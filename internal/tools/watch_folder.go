@@ -1,0 +1,129 @@
+package tools
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+type WatchFolderArgs struct {
+	Path string `json:"path" jsonschema:"Absolute or ~ path to local folder to watch"`
+}
+
+func WatchFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, WatchFolderArgs) (*mcp.CallToolResult, any, error) {
+	return func(ctx context.Context, req *mcp.CallToolRequest, args WatchFolderArgs) (*mcp.CallToolResult, any, error) {
+		t := newTimer()
+
+		if deps.Watcher == nil {
+			r, _ := errorResult("file watcher not initialized")
+			return r, nil, nil
+		}
+
+		folderPath := args.Path
+		if strings.HasPrefix(folderPath, "~/") {
+			home, _ := os.UserHomeDir()
+			folderPath = filepath.Join(home, folderPath[2:])
+		}
+
+		absPath, err := filepath.Abs(folderPath)
+		if err != nil {
+			r, _ := errorResult("invalid path: " + err.Error())
+			return r, nil, nil
+		}
+
+		info, err := os.Stat(absPath)
+		if err != nil || !info.IsDir() {
+			r, _ := errorResult("not a directory: " + absPath)
+			return r, nil, nil
+		}
+
+		err = deps.Watcher.Watch(absPath)
+		if err != nil {
+			r, _ := errorResult("watch failed: " + err.Error())
+			return r, nil, nil
+		}
+
+		result := map[string]any{
+			"success": true,
+			"path":    absPath,
+			"message": "Now watching for changes. Modified files will be automatically reindexed.",
+			"_meta": Meta{
+				TimingMs: t.elapsedMs(),
+			},
+		}
+		r, _ := toTextResult(result)
+		return r, nil, nil
+	}
+}
+
+type UnwatchFolderArgs struct {
+	Path string `json:"path" jsonschema:"Path of the folder to stop watching"`
+}
+
+func UnwatchFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, UnwatchFolderArgs) (*mcp.CallToolResult, any, error) {
+	return func(ctx context.Context, req *mcp.CallToolRequest, args UnwatchFolderArgs) (*mcp.CallToolResult, any, error) {
+		t := newTimer()
+
+		if deps.Watcher == nil {
+			r, _ := errorResult("file watcher not initialized")
+			return r, nil, nil
+		}
+
+		folderPath := args.Path
+		if strings.HasPrefix(folderPath, "~/") {
+			home, _ := os.UserHomeDir()
+			folderPath = filepath.Join(home, folderPath[2:])
+		}
+
+		absPath, err := filepath.Abs(folderPath)
+		if err != nil {
+			r, _ := errorResult("invalid path: " + err.Error())
+			return r, nil, nil
+		}
+
+		err = deps.Watcher.Unwatch(absPath)
+		if err != nil {
+			r, _ := errorResult("unwatch failed: " + err.Error())
+			return r, nil, nil
+		}
+
+		result := map[string]any{
+			"success": true,
+			"path":    absPath,
+			"message": "Stopped watching folder.",
+			"_meta": Meta{
+				TimingMs: t.elapsedMs(),
+			},
+		}
+		r, _ := toTextResult(result)
+		return r, nil, nil
+	}
+}
+
+type ListWatchesArgs struct{}
+
+func ListWatchesHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, ListWatchesArgs) (*mcp.CallToolResult, any, error) {
+	return func(ctx context.Context, req *mcp.CallToolRequest, args ListWatchesArgs) (*mcp.CallToolResult, any, error) {
+		t := newTimer()
+
+		if deps.Watcher == nil {
+			r, _ := errorResult("file watcher not initialized")
+			return r, nil, nil
+		}
+
+		watches := deps.Watcher.ListWatches()
+
+		result := map[string]any{
+			"watches": watches,
+			"count":   len(watches),
+			"_meta": Meta{
+				TimingMs: t.elapsedMs(),
+			},
+		}
+		r, _ := toTextResult(result)
+		return r, nil, nil
+	}
+}
