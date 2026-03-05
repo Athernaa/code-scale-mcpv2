@@ -26,7 +26,7 @@ func NewCodeScaleServer(store *storage.IndexStore) (*mcp.Server, *watcher.Manage
 		Watcher: watchMgr,
 	}
 
-	// Register all 11 tools
+	// Register all 14 tools
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "index_repo",
 		Description: "Index a GitHub repository's source code for symbol-level retrieval.",

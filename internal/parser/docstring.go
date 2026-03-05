@@ -26,24 +26,27 @@ func extractPythonDocstring(node *sitter.Node, src []byte) string {
 
 	for i := 0; i < int(body.ChildCount()); i++ {
 		child := body.Child(i)
+		if child == nil {
+			continue
+		}
 		if child.Type() == "expression_statement" {
 			// Check field "expression"
 			expr := child.ChildByFieldName("expression")
 			if expr != nil && expr.Type() == "string" {
-				doc := string(src[expr.StartByte():expr.EndByte()])
+				doc := safeNodeText(src, expr)
 				return stripQuotes(doc)
 			}
 			// Handle tree-sitter-python string format
 			if child.ChildCount() > 0 {
 				first := child.Child(0)
-				if first.Type() == "string" || first.Type() == "concatenated_string" {
-					doc := string(src[first.StartByte():first.EndByte()])
+				if first != nil && (first.Type() == "string" || first.Type() == "concatenated_string") {
+					doc := safeNodeText(src, first)
 					return stripQuotes(doc)
 				}
 			}
 		} else if child.Type() == "string" {
 			// Class docstrings directly in block
-			doc := string(src[child.StartByte():child.EndByte()])
+			doc := safeNodeText(src, child)
 			return stripQuotes(doc)
 		}
 	}
@@ -58,7 +61,7 @@ func extractPrecedingComments(node *sitter.Node, src []byte) string {
 	for prev != nil {
 		t := prev.Type()
 		if t == "comment" || t == "line_comment" || t == "block_comment" {
-			commentText := string(src[prev.StartByte():prev.EndByte()])
+			commentText := safeNodeText(src, prev)
 			comments = append([]string{commentText}, comments...)
 			prev = prev.PrevNamedSibling()
 		} else {

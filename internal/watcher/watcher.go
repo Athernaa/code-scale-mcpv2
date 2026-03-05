@@ -106,15 +106,19 @@ func (m *Manager) Unwatch(absPath string) error {
 		return nil
 	}
 	delete(m.watches, absPath)
+
+	// Close stop channel and watcher while still holding the lock
+	// to prevent Watch from racing on the same path.
+	close(fw.stop)
+	err := fw.watcher.Close()
 	m.mu.Unlock()
 
-	// Remove from database
-	if err := m.store.DeleteWatch(absPath); err != nil {
-		log.Printf("watcher: failed to delete persisted watch for %s: %v", absPath, err)
+	// Remove from database (safe outside lock)
+	if dbErr := m.store.DeleteWatch(absPath); dbErr != nil {
+		log.Printf("watcher: failed to delete persisted watch for %s: %v", absPath, dbErr)
 	}
 
-	close(fw.stop)
-	return fw.watcher.Close()
+	return err
 }
 
 // ListWatches returns all active watches.
@@ -224,6 +228,13 @@ func (m *Manager) watchLoop(fw *FolderWatch) {
 				debounceTimer.Stop()
 			}
 			debounceTimer = time.AfterFunc(debounceInterval, func() {
+				// Check if watcher was stopped before processing
+				select {
+				case <-fw.stop:
+					return
+				default:
+				}
+
 				pendingMu.Lock()
 				paths := make([]string, 0, len(pending))
 				for p := range pending {
@@ -260,9 +271,10 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 
 		// Check if file was deleted
 		if _, err := os.Stat(fullPath); os.IsNotExist(err) {
-			// File deleted — we could remove its symbols here
-			// For now, the next full reindex will clean it up
-			log.Printf("watcher: file removed %s", relPath)
+			log.Printf("watcher: file removed %s, cleaning index", relPath)
+			if err := m.store.DeleteFileFromIndex(owner, repoName, relPath); err != nil {
+				log.Printf("watcher: failed to remove %s from index: %v", relPath, err)
+			}
 			continue
 		}
 
@@ -291,7 +303,9 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 		fileLangs := map[string]string{relPath: lang}
 
 		// Save content file
-		_ = m.store.SaveContentFile(owner, repoName, relPath, content)
+		if err := m.store.SaveContentFile(owner, repoName, relPath, content); err != nil {
+			log.Printf("watcher: failed to save content for %s: %v", relPath, err)
+		}
 
 		// Save index (incremental)
 		err = m.store.SaveIndex(owner, repoName, "local", "", fileHashes, fileLangs, symbols)

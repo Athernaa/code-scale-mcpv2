@@ -36,17 +36,26 @@ func EstimateSavings(rawBytes, responseBytes int64) int64 {
 
 // AddSavings records additional token savings.
 func (t *TokenTracker) AddSavings(tokensSaved int64) (int64, error) {
-	// Ensure row exists
-	_, _ = t.db.Exec("INSERT OR IGNORE INTO token_savings (id, total_tokens_saved, anon_id) VALUES (1, 0, ?)", uuid.New().String())
+	tx, err := t.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
 
-	_, err := t.db.Exec("UPDATE token_savings SET total_tokens_saved = total_tokens_saved + ? WHERE id = 1", tokensSaved)
+	// Ensure row exists
+	_, _ = tx.Exec("INSERT OR IGNORE INTO token_savings (id, total_tokens_saved, anon_id) VALUES (1, 0, ?)", uuid.New().String())
+
+	_, err = tx.Exec("UPDATE token_savings SET total_tokens_saved = total_tokens_saved + ? WHERE id = 1", tokensSaved)
 	if err != nil {
 		return 0, err
 	}
 
 	var total int64
-	_ = t.db.QueryRow("SELECT total_tokens_saved FROM token_savings WHERE id = 1").Scan(&total)
-	return total, nil
+	if err := tx.QueryRow("SELECT total_tokens_saved FROM token_savings WHERE id = 1").Scan(&total); err != nil {
+		return 0, err
+	}
+
+	return total, tx.Commit()
 }
 
 // GetTotalSavings returns cumulative token savings.

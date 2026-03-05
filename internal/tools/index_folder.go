@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -57,6 +58,7 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 		var sourceFiles []string
 		_ = filepath.WalkDir(absPath, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
+				log.Printf("index_folder: skipping %s: %v", path, err)
 				return nil
 			}
 
@@ -163,7 +165,9 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 			allSymbols = append(allSymbols, pr.symbols...)
 
 			// Save content file
-			_ = deps.Store.SaveContentFile(owner, repoName, pr.path, pr.content)
+			if err := deps.Store.SaveContentFile(owner, repoName, pr.path, pr.content); err != nil {
+				log.Printf("index_folder: failed to save content for %s: %v", pr.path, err)
+			}
 		}
 
 		// Summarize

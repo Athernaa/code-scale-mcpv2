@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"errors"
 	"os"
 	"testing"
 )
@@ -286,11 +287,14 @@ func min2(a, b int) int {
 
 func TestParseUnsupportedLanguage(t *testing.T) {
 	symbols, err := ParseFile([]byte("hello"), "test.txt", "unknown")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatalf("expected error for unsupported language, got nil")
+	}
+	if !errors.Is(err, ErrUnsupportedLanguage) {
+		t.Fatalf("expected ErrUnsupportedLanguage, got: %v", err)
 	}
 	if symbols != nil {
-		t.Errorf("expected nil for unsupported language, got %d symbols", len(symbols))
+		t.Errorf("expected nil symbols for unsupported language, got %d symbols", len(symbols))
 	}
 }
 

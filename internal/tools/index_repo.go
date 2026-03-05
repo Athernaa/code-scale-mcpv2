@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"log"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/syphon1c/code-scale-mcp/internal/github"
@@ -107,7 +109,9 @@ func IndexRepoHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, In
 			allSymbols = append(allSymbols, symbols...)
 
 			// Save content file
-			_ = deps.Store.SaveContentFile(owner, repoName, path, content)
+			if err := deps.Store.SaveContentFile(owner, repoName, path, content); err != nil {
+				log.Printf("index_repo: failed to save content for %s: %v", path, err)
+			}
 		}
 
 		// Summarize
@@ -129,7 +133,7 @@ func IndexRepoHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, In
 		result := map[string]any{
 			"success":      true,
 			"repo":         owner + "/" + repoName,
-			"indexed_at":   "now",
+			"indexed_at":   time.Now().UTC().Format(time.RFC3339),
 			"file_count":   len(fileHashes),
 			"symbol_count": len(allSymbols),
 			"languages":    langCounts,

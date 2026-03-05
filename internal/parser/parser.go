@@ -2,6 +2,7 @@ package parser
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -10,11 +11,14 @@ import (
 	sitter "github.com/smacker/go-tree-sitter"
 )
 
+// ErrUnsupportedLanguage is returned when the language is not in the registry.
+var ErrUnsupportedLanguage = errors.New("unsupported language")
+
 // ParseFile parses source code and extracts symbols using tree-sitter.
 func ParseFile(content []byte, filename string, language string) ([]Symbol, error) {
 	spec, ok := LanguageRegistry[language]
 	if !ok {
-		return nil, nil
+		return nil, ErrUnsupportedLanguage
 	}
 
 	parser := sitter.NewParser()
@@ -77,6 +81,9 @@ func walkTree(
 	// Recurse into children
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
+		if child == nil {
+			continue
+		}
 		walkTree(child, spec, src, filename, language, symbols, parentSymbol)
 	}
 }
@@ -122,7 +129,10 @@ func extractSymbol(
 	decorators := extractDecorators(node, spec, src)
 
 	// Compute content hash
-	symbolBytes := src[node.StartByte():node.EndByte()]
+	symbolBytes := safeSlice(src, node.StartByte(), node.EndByte())
+	if symbolBytes == nil {
+		return nil
+	}
 	contentHash := ComputeContentHash(symbolBytes)
 
 	parentID := ""
@@ -164,7 +174,7 @@ func extractName(node *sitter.Node, spec *LanguageSpec, src []byte) string {
 			if child.Type() == "type_spec" {
 				nameNode := child.ChildByFieldName("name")
 				if nameNode != nil {
-					return string(src[nameNode.StartByte():nameNode.EndByte()])
+					return safeNodeText(src, nameNode)
 				}
 			}
 		}
@@ -178,16 +188,19 @@ func extractName(node *sitter.Node, spec *LanguageSpec, src []byte) string {
 
 	nameNode := node.ChildByFieldName(fieldName)
 	if nameNode != nil {
-		return string(src[nameNode.StartByte():nameNode.EndByte()])
+		return safeNodeText(src, nameNode)
 	}
 
 	// Fallback: some grammars (e.g. Kotlin) don't use field names.
 	// Search named children for type_identifier or simple_identifier.
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
+		if child == nil {
+			continue
+		}
 		switch child.Type() {
 		case "type_identifier", "simple_identifier":
-			return string(src[child.StartByte():child.EndByte()])
+			return safeNodeText(src, child)
 		}
 	}
 
@@ -204,7 +217,10 @@ func buildSignature(node *sitter.Node, src []byte) string {
 		endByte = body.StartByte()
 	}
 
-	sigBytes := src[node.StartByte():endByte]
+	sigBytes := safeSlice(src, node.StartByte(), endByte)
+	if sigBytes == nil {
+		return ""
+	}
 	sigText := strings.TrimSpace(string(sigBytes))
 
 	// Clean up: remove trailing '{', ':', etc.
@@ -222,8 +238,10 @@ func extractDecorators(node *sitter.Node, spec *LanguageSpec, src []byte) []stri
 	var decorators []string
 	prev := node.PrevNamedSibling()
 	for prev != nil && prev.Type() == spec.DecoratorNodeType {
-		text := strings.TrimSpace(string(src[prev.StartByte():prev.EndByte()]))
-		decorators = append([]string{text}, decorators...)
+		text := strings.TrimSpace(safeNodeText(src, prev))
+		if text != "" {
+			decorators = append([]string{text}, decorators...)
+		}
 		prev = prev.PrevNamedSibling()
 	}
 
@@ -236,13 +254,16 @@ func extractConstant(node *sitter.Node, spec *LanguageSpec, src []byte, filename
 	if node.Type() == "assignment" {
 		left := node.ChildByFieldName("left")
 		if left != nil && left.Type() == "identifier" {
-			name := string(src[left.StartByte():left.EndByte()])
+			name := safeNodeText(src, left)
 			if isConstantName(name) {
-				sig := string(src[node.StartByte():node.EndByte()])
-				if len(sig) > 100 {
-					sig = sig[:100]
+				sig := safeNodeText(src, node)
+				if len([]rune(sig)) > 100 {
+					sig = string([]rune(sig)[:100])
 				}
-				constBytes := src[node.StartByte():node.EndByte()]
+				constBytes := safeSlice(src, node.StartByte(), node.EndByte())
+				if constBytes == nil {
+					return nil
+				}
 				return &Symbol{
 					ID:            MakeSymbolID(filename, name, KindConstant),
 					File:          filename,
@@ -286,6 +307,26 @@ func isConstantName(name string) bool {
 		return true
 	}
 	return false
+}
+
+// safeSlice returns a slice of src between start and end, with bounds checking.
+func safeSlice(src []byte, start, end uint32) []byte {
+	if start > end || start >= uint32(len(src)) {
+		return nil
+	}
+	if end > uint32(len(src)) {
+		end = uint32(len(src))
+	}
+	return src[start:end]
+}
+
+// safeNodeText extracts text from a tree-sitter node with bounds checking.
+func safeNodeText(src []byte, node *sitter.Node) string {
+	b := safeSlice(src, node.StartByte(), node.EndByte())
+	if b == nil {
+		return ""
+	}
+	return string(b)
 }
 
 // disambiguateOverloads appends ordinal suffix to symbols with duplicate IDs.

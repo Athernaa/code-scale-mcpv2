@@ -54,7 +54,7 @@ func NewIndexStore(basePath string) (*IndexStore, error) {
 	}
 
 	dbPath := filepath.Join(basePath, "code-scale.db")
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)")
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("cannot open database: %w", err)
 	}
@@ -444,9 +444,16 @@ func (s *IndexStore) SearchSymbols(repoID int64, query string, kind string, lang
 	if filePattern != "" {
 		var filtered []parser.Symbol
 		for _, sym := range symbols {
-			if matched, _ := filepath.Match(filePattern, sym.File); matched {
+			matched, err := filepath.Match(filePattern, sym.File)
+			if err != nil {
+				return nil, nil, fmt.Errorf("invalid file pattern %q: %w", filePattern, err)
+			}
+			if matched {
 				filtered = append(filtered, sym)
-			} else if matched, _ := filepath.Match(filePattern, filepath.Base(sym.File)); matched {
+				continue
+			}
+			matched, _ = filepath.Match(filePattern, filepath.Base(sym.File))
+			if matched {
 				filtered = append(filtered, sym)
 			}
 		}
@@ -653,17 +660,80 @@ func (s *IndexStore) GetFileContent(repoID int64, filePath string) ([]byte, erro
 		return nil, err
 	}
 
-	contentPath := filepath.Join(s.basePath, owner+"-"+name, filePath)
+	repoDir := filepath.Join(s.basePath, owner+"-"+name)
+	contentPath := filepath.Join(repoDir, filePath)
+
+	// Prevent path traversal
+	cleanPath := filepath.Clean(contentPath)
+	cleanRepo := filepath.Clean(repoDir)
+	rel, err := filepath.Rel(cleanRepo, cleanPath)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return nil, fmt.Errorf("path traversal detected: %s", filePath)
+	}
+
 	return os.ReadFile(contentPath)
 }
 
 // SaveContentFile saves a raw source file to the content cache.
 func (s *IndexStore) SaveContentFile(owner, name, filePath string, content []byte) error {
-	dir := filepath.Join(s.basePath, owner+"-"+name, filepath.Dir(filePath))
+	repoDir := filepath.Join(s.basePath, owner+"-"+name)
+	fullPath := filepath.Join(repoDir, filePath)
+
+	// Prevent path traversal
+	cleanPath := filepath.Clean(fullPath)
+	cleanRepo := filepath.Clean(repoDir)
+	rel, err := filepath.Rel(cleanRepo, cleanPath)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return fmt.Errorf("path traversal detected: %s", filePath)
+	}
+
+	dir := filepath.Dir(fullPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(s.basePath, owner+"-"+name, filePath), content, 0644)
+	return os.WriteFile(fullPath, content, 0644)
+}
+
+// DeleteFileFromIndex removes a single file and its symbols from a repository's index.
+func (s *IndexStore) DeleteFileFromIndex(owner, name, filePath string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	repo := owner + "/" + name
+	var repoID int64
+	err := s.db.QueryRow("SELECT id FROM repos WHERE repo = ?", repo).Scan(&repoID)
+	if err != nil {
+		return fmt.Errorf("repository %q not indexed", repo)
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Delete symbols for this file
+	if _, err := tx.Exec("DELETE FROM symbols WHERE repo_id = ? AND file_path = ?", repoID, filePath); err != nil {
+		return fmt.Errorf("delete symbols for %s: %w", filePath, err)
+	}
+	// Delete the file record
+	if _, err := tx.Exec("DELETE FROM files WHERE repo_id = ? AND path = ?", repoID, filePath); err != nil {
+		return fmt.Errorf("delete file %s: %w", filePath, err)
+	}
+	// Rebuild FTS index
+	if _, err := tx.Exec("INSERT INTO symbols_fts(symbols_fts) VALUES('rebuild')"); err != nil {
+		return fmt.Errorf("rebuild FTS index: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	// Remove content file
+	contentPath := filepath.Join(s.basePath, owner+"-"+name, filePath)
+	_ = os.Remove(contentPath)
+
+	return nil
 }
 
 // DeleteIndex removes all data for a repository.
