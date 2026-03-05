@@ -3,6 +3,7 @@ package parser
 import (
 	"context"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -17,12 +18,14 @@ func ParseFile(content []byte, filename string, language string) ([]Symbol, erro
 	}
 
 	parser := sitter.NewParser()
+	defer parser.Close()
 	parser.SetLanguage(spec.GetLanguage())
 
 	tree, err := parser.ParseCtx(context.Background(), nil, content)
 	if err != nil {
 		return nil, err
 	}
+	defer tree.Close()
 
 	var symbols []Symbol
 	walkTree(tree.RootNode(), spec, content, filename, language, &symbols, nil)
@@ -310,24 +313,10 @@ func disambiguateOverloads(symbols []Symbol) []Symbol {
 	for i := range symbols {
 		if duplicated[symbols[i].ID] {
 			ordinals[symbols[i].ID]++
-			symbols[i].ID = symbols[i].ID + "~" + itoa(ordinals[symbols[i].ID])
+			symbols[i].ID = symbols[i].ID + "~" + strconv.Itoa(ordinals[symbols[i].ID])
 		}
 	}
 
 	return symbols
 }
 
-// itoa converts int to string without importing strconv.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
-}
