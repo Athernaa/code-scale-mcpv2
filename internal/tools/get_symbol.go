@@ -123,6 +123,11 @@ func GetSymbolsHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, G
 	return func(ctx context.Context, req *mcp.CallToolRequest, args GetSymbolsArgs) (*mcp.CallToolResult, any, error) {
 		t := newTimer()
 
+		if len(args.SymbolIDs) > 100 {
+			r, _ := errorResult("too many symbol IDs (max 100)")
+			return r, nil, nil
+		}
+
 		repoID, err := deps.Store.GetRepoID(args.Repo)
 		if err != nil {
 			r, _ := errorResult(err.Error())

@@ -23,10 +23,7 @@ func SearchTextHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, S
 			return r, nil, nil
 		}
 
-		maxResults := args.MaxResults
-		if maxResults <= 0 {
-			maxResults = 20
-		}
+		maxResults := clampResults(args.MaxResults, 20, 200)
 
 		results, err := deps.Store.SearchText(repoID, args.Query, args.FilePattern, maxResults)
 		if err != nil {
