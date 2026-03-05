@@ -1,26 +1,26 @@
 ---
 name: code-scale-mcp
-description: "Index codebases and retrieve symbols with byte-level precision. Reduces token costs by up to 99% by fetching individual functions, classes, and methods instead of whole files. Supports 13 languages.\nTRIGGER when: exploring unfamiliar codebases, investigating bugs across files, understanding features or architecture, working with large codebases (100+ files), or when you'd need to read 3+ files or grep across many files to answer a question. Use `index_folder` or `index_repo` first, then `get_repo_outline`/`search_symbols`/`get_symbol` instead of reading whole files.\nDO NOT TRIGGER when: reading a single small file (<50 lines), editing a file where you need full line-number context, reading config files or READMEs, or when the codebase is already fully loaded in context."
-allowed-tools:
-  - mcp__code-scale__index_repo
-  - mcp__code-scale__index_folder
-  - mcp__code-scale__list_repos
-  - mcp__code-scale__get_file_tree
-  - mcp__code-scale__get_file_outline
-  - mcp__code-scale__get_symbol
-  - mcp__code-scale__get_symbols
-  - mcp__code-scale__search_symbols
-  - mcp__code-scale__search_text
-  - mcp__code-scale__get_repo_outline
-  - mcp__code-scale__invalidate_cache
-  - mcp__code-scale__watch_folder
-  - mcp__code-scale__unwatch_folder
-  - mcp__code-scale__list_watches
+description: "Use this skill whenever you need to explore, understand, or navigate a codebase — especially when the user asks how something works, where something is defined, what calls a function, or needs to trace logic across multiple files. This skill indexes codebases and lets you retrieve individual functions, classes, and methods instead of reading whole files, saving up to 99% of tokens. Use it for: understanding architecture or code flow, investigating bugs across files, onboarding to unfamiliar repos, finding all usages of a symbol, tracing call chains, exploring large codebases (50+ files), or any task where you would otherwise need to read 3+ files or grep broadly. Supports Python, TypeScript, JavaScript, Go, Rust, Java, and 7 more languages. DO NOT use when: reading a single small file, making a targeted edit to a known location, reading config/README files, or when the file is already in context."
 ---
 
 # code-scale-mcp
 
 High-performance codebase indexer and symbol retriever. Index any repo or folder once, then retrieve exactly the symbols you need — functions, classes, methods, constants — with byte-level precision.
+
+## Why Use code-scale Instead of Read/Grep
+
+You have built-in tools like Read and Grep that work great for small, targeted operations. But they become expensive and noisy when you need to understand code across many files. code-scale fills that gap:
+
+- **Read** shows you an entire file to get one function. That's ~2,000 tokens when you only need ~50. `get_symbol` fetches just the function.
+- **Grep** finds text matches but doesn't understand code structure. `search_symbols` understands functions, classes, methods, and their relationships.
+- **Reading 5 files** to trace a feature costs ~10,000 tokens. Fetching 5 specific symbols costs ~250 tokens — a 97% reduction.
+
+**The rule of thumb**: if you'd need to read 3+ files or grep across many files to answer a question, index the codebase first and use code-scale tools. You'll get better results with far fewer tokens.
+
+**Still use Read/Grep when:**
+- You need the entire file (configs, READMEs, small scripts under 50 lines)
+- You're about to edit a file and need line numbers for the Edit tool
+- You're looking at a single specific file you already know about
 
 ## Quick Start
 
@@ -28,29 +28,42 @@ High-performance codebase indexer and symbol retriever. Index any repo or folder
 ```
 index_repo({ "url": "https://github.com/owner/repo" })
 ```
+For private repos, set the `GITHUB_TOKEN` environment variable.
 
 ### Index a local folder
 ```
 index_folder({ "path": "/path/to/project" })
 ```
 
-### Search for symbols
+### Then explore and retrieve
 ```
+get_repo_outline({ "repo": "owner/repo" })
 search_symbols({ "repo": "owner/repo", "query": "authenticate" })
-```
-
-### Get a specific symbol's source code
-```
 get_symbol({ "repo": "owner/repo", "symbol_id": "src/auth.py::authenticate#function" })
 ```
 
-## Workflow
+## Common Workflows
 
-1. **Index**: Use `index_repo` or `index_folder` to index a codebase
-2. **Explore**: Use `get_file_tree` and `get_repo_outline` to understand structure
-3. **Search**: Use `search_symbols` or `search_text` to find what you need
-4. **Retrieve**: Use `get_symbol` or `get_symbols` to fetch exact source code
-5. **Watch**: Use `watch_folder` to auto-reindex on file changes
+### "How does feature X work?"
+1. `search_symbols` for the feature name to find entry points
+2. `get_symbol` to read each relevant function/class
+3. `search_text` to find where those symbols are called from
+4. `get_symbols` to batch-fetch all the callers
+
+### "Find and fix a bug"
+1. `search_symbols` or `search_text` to locate the relevant code
+2. `get_symbol` with `context_lines: 5` to see surrounding code
+3. Once you've identified the fix, use Read to get the full file with line numbers, then Edit
+
+### "Help me understand this codebase"
+1. `get_repo_outline` for the high-level structure (directories, languages, symbol distribution)
+2. `get_file_tree` to see the full file hierarchy
+3. `get_file_outline` on key files to see their symbols
+4. `get_symbol` to drill into specific implementations
+
+### "What calls this function?" / "Where is this used?"
+1. `search_text` with the function name to find all usages across the codebase
+2. `get_symbol` on the callers to understand context
 
 ## Symbol IDs
 
@@ -61,29 +74,31 @@ Examples:
 - `src/models.py::UserService.login#method`
 - `src/config.py::MAX_RETRIES#constant`
 
+Symbol IDs from `search_symbols`, `get_file_outline`, and `get_repo_outline` can be passed directly to `get_symbol` — no need to construct them manually.
+
 ## Tools Reference
 
 ### Indexing
-- **index_repo**: Index a GitHub repo. Args: `url` (required), `use_ai_summaries` (optional)
+- **index_repo**: Index a GitHub repo. Args: `url` (required — GitHub URL or owner/repo), `use_ai_summaries` (optional)
 - **index_folder**: Index a local folder. Args: `path` (required), `use_ai_summaries`, `extra_ignore_patterns`, `follow_symlinks` (optional)
 
 ### Exploration
-- **list_repos**: List all indexed repos. No args.
+- **list_repos**: List all indexed repos with symbol/file counts and languages. No args.
 - **get_file_tree**: Get file tree. Args: `repo` (required), `path_prefix` (optional filter)
-- **get_file_outline**: Symbol outline for a file. Args: `repo`, `file_path` (required)
-- **get_repo_outline**: High-level repo overview. Args: `repo` (required)
+- **get_file_outline**: Symbol outline for a file. Args: `repo`, `file_path` (required), `flat` (optional — set true for flat list with depth integers instead of nested tree)
+- **get_repo_outline**: High-level repo overview — directory file counts, language breakdown, symbol kind distribution. Args: `repo` (required)
 
 ### Retrieval
-- **get_symbol**: Get one symbol's source. Args: `repo`, `symbol_id` (required), `verify`, `context_lines` (optional)
-- **get_symbols**: Batch get symbols. Args: `repo`, `symbol_ids` (required)
+- **get_symbol**: Get one symbol's source. Args: `repo`, `symbol_id` (required), `context_lines` (optional — include N surrounding lines), `verify` (optional — re-hash to detect source drift since indexing)
+- **get_symbols**: Batch get up to 100 symbols. Args: `repo`, `symbol_ids` (required array). More efficient than multiple `get_symbol` calls.
 
 ### Search
-- **search_symbols**: Search by name/signature. Args: `repo`, `query` (required), `kind`, `language`, `file_pattern`, `max_results` (optional)
-- **search_text**: Full-text search in files. Args: `repo`, `query` (required), `file_pattern`, `max_results` (optional)
+- **search_symbols**: Search by name/signature with weighted scoring. Args: `repo`, `query` (required), `kind` (optional: function/class/method/constant/type), `language`, `file_pattern`, `max_results` (optional, default 10, max 200)
+- **search_text**: Full-text search across file contents. Args: `repo`, `query` (required), `file_pattern`, `max_results` (optional, default 20, max 200)
 
 ### Management
 - **invalidate_cache**: Delete a repo's index. Args: `repo` (required)
-- **watch_folder**: Start auto-reindex on changes. Args: `path` (required)
+- **watch_folder**: Start auto-reindex on file changes. Args: `path` (required)
 - **unwatch_folder**: Stop watching. Args: `path` (required)
 - **list_watches**: List active watches. No args.
 
@@ -91,16 +106,11 @@ Examples:
 
 Python, JavaScript, TypeScript, Go, Rust, Java, PHP, C, C++, Ruby, Kotlin, Swift, Lua
 
-## Security
-
-- System directories (`/etc`, `/usr`, `/var`, `/root`, etc.) are blocked from indexing/watching by default
-- Set `CODE_SCALE_ALLOWED_ROOTS` to restrict indexing to specific directories (e.g. `/home/user/projects:/opt/code`)
-- SSE transport supports bearer token authentication via `CODE_SCALE_AUTH_TOKEN`
-
 ## Tips
 
 - Use `search_symbols` with `kind: "function"` to filter by symbol type
-- Use `get_symbols` for batch retrieval (more efficient than multiple `get_symbol` calls)
-- Set `use_ai_summaries: true` when indexing for richer one-line summaries (requires API key)
+- Use `get_symbols` for batch retrieval — one call for many symbols
+- Set `use_ai_summaries: true` when indexing for richer one-line summaries (requires ANTHROPIC_API_KEY or GEMINI_API_KEY)
 - Watch active development folders with `watch_folder` to keep the index fresh
-- Symbol IDs from `search_symbols` and `get_file_outline` can be passed directly to `get_symbol`
+- Use `context_lines` on `get_symbol` when you need to see code around a function (e.g., imports, nearby constants)
+- Use `verify: true` on `get_symbol` if you suspect the source file has changed since indexing
