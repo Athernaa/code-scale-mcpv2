@@ -70,14 +70,6 @@ If you installed the binary to `/usr/local/bin/`, you can simplify the command:
 }
 ```
 
-### Cowork
-
-Upload the `code-scale-mcp_cowork.zip` skill package to Cowork, or add the skill file manually:
-
-```
-.claude/skills/code-scale-mcp/SKILL.md
-```
-
 ### SSE/HTTP Mode
 
 For web-based MCP clients, run in SSE mode:

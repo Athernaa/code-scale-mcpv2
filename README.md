@@ -123,14 +123,6 @@ get_symbol        → fetch just one function's source code (~50 tokens vs ~2,00
 
 Every response includes `_meta` with `tokens_saved`, `total_tokens_saved`, and `cost_avoided` so you can track the savings.
 
-### Cowork
-
-Upload the `code-scale-mcp_cowork.zip` skill package to Cowork, or add manually:
-
-```
-.claude/skills/code-scale-mcp/SKILL.md
-```
-
 ### SSE/HTTP mode
 
 ```bash
