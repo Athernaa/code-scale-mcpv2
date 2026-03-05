@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/syphon1c/code-scale-mcp/internal/storage"
 	"github.com/syphon1c/code-scale-mcp/internal/watcher"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Meta contains response metadata.

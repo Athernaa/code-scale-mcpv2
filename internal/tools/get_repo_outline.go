@@ -3,8 +3,8 @@ package tools
 import (
 	"context"
 
-	"github.com/syphon1c/code-scale-mcp/internal/storage"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/syphon1c/code-scale-mcp/internal/storage"
 )
 
 type GetRepoOutlineArgs struct {

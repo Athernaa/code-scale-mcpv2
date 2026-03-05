@@ -1,10 +1,10 @@
 package server
 
 import (
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/syphon1c/code-scale-mcp/internal/storage"
 	"github.com/syphon1c/code-scale-mcp/internal/tools"
 	"github.com/syphon1c/code-scale-mcp/internal/watcher"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Version is set at build time via ldflags.
@@ -49,7 +49,7 @@ func NewCodeScaleServer(store *storage.IndexStore) (*mcp.Server, *watcher.Manage
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_file_outline",
-		Description: "Get a hierarchical symbol outline for a specific file.",
+		Description: "Get a hierarchical symbol outline for a specific file. Use flat=true for a flat list with depth.",
 	}, tools.GetFileOutlineHandler(deps))
 
 	mcp.AddTool(server, &mcp.Tool{

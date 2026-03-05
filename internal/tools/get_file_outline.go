@@ -3,14 +3,15 @@ package tools
 import (
 	"context"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/syphon1c/code-scale-mcp/internal/parser"
 	"github.com/syphon1c/code-scale-mcp/internal/storage"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type GetFileOutlineArgs struct {
 	Repo     string `json:"repo" jsonschema:"Repository name"`
 	FilePath string `json:"file_path" jsonschema:"Path to file within the repository"`
+	Flat     bool   `json:"flat,omitempty" jsonschema:"Return flat list with depth instead of nested tree"`
 }
 
 func GetFileOutlineHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, GetFileOutlineArgs) (*mcp.CallToolResult, any, error) {
@@ -31,6 +32,11 @@ func GetFileOutlineHandler(deps *Deps) func(context.Context, *mcp.CallToolReques
 
 		tree := parser.BuildSymbolTree(symbols)
 
+		var syms any = tree
+		if args.Flat {
+			syms = parser.FlattenTree(tree, 0)
+		}
+
 		// Detect language from first symbol
 		language := ""
 		if len(symbols) > 0 {
@@ -43,7 +49,7 @@ func GetFileOutlineHandler(deps *Deps) func(context.Context, *mcp.CallToolReques
 			"repo":     args.Repo,
 			"file":     args.FilePath,
 			"language": language,
-			"symbols":  tree,
+			"symbols":  syms,
 			"_meta": Meta{
 				TimingMs:    t.elapsedMs(),
 				SymbolCount: len(symbols),

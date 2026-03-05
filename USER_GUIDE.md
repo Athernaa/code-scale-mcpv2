@@ -202,7 +202,7 @@ index_repo:       { "url": "owner/repo" }
 | `index_folder`     | Index local folder            | `path`, `extra_ignore_patterns`, `follow_symlinks`, `use_ai_summaries` |
 | `list_repos`       | List all indexed repositories | —                                                                  |
 | `get_file_tree`    | Browse file structure         | `repo`, `path_prefix`                                              |
-| `get_file_outline` | Symbols in a file             | `repo`, `file_path`                                                |
+| `get_file_outline` | Symbols in a file             | `repo`, `file_path`, `flat`                                        |
 | `get_symbol`       | Full source of one symbol     | `repo`, `symbol_id`, `verify`, `context_lines`                     |
 | `get_symbols`      | Batch retrieve symbols        | `repo`, `symbol_ids`                                               |
 | `search_symbols`   | Search symbols                | `repo`, `query`, `kind`, `language`, `file_pattern`, `max_results` |

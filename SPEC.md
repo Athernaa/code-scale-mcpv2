@@ -79,11 +79,12 @@ Returns a nested directory tree with per-file language and symbol count annotati
 ```json
 {
   "repo": "owner/repo",
-  "file_path": "src/main.py"
+  "file_path": "src/main.py",
+  "flat": false
 }
 ```
 
-Returns a hierarchical symbol tree (classes contain methods) with signatures and summaries. Source code is not included; use `get_symbol` for that.
+Returns a hierarchical symbol tree (classes contain methods) with signatures and summaries. Source code is not included; use `get_symbol` for that. Set `flat: true` to get a flat list with depth integers instead of nested tree — simpler for linear processing and more token-efficient.
 
 #### `get_repo_outline` — High-level repository overview
 

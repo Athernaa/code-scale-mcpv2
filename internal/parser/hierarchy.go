@@ -47,20 +47,17 @@ func buildNode(nodeMap map[string]*SymbolNode, childrenOf map[string][]string, i
 	return node
 }
 
+// FlatSymbolNode is a symbol with its nesting depth in the hierarchy.
+type FlatSymbolNode struct {
+	Symbol Symbol `json:"symbol"`
+	Depth  int    `json:"depth"`
+}
+
 // FlattenTree flattens symbol tree with depth information.
-func FlattenTree(nodes []SymbolNode, depth int) []struct {
-	Symbol Symbol
-	Depth  int
-} {
-	var result []struct {
-		Symbol Symbol
-		Depth  int
-	}
+func FlattenTree(nodes []SymbolNode, depth int) []FlatSymbolNode {
+	var result []FlatSymbolNode
 	for _, node := range nodes {
-		result = append(result, struct {
-			Symbol Symbol
-			Depth  int
-		}{node.Symbol, depth})
+		result = append(result, FlatSymbolNode{Symbol: node.Symbol, Depth: depth})
 		result = append(result, FlattenTree(node.Children, depth+1)...)
 	}
 	return result

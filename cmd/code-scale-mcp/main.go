@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/syphon1c/code-scale-mcp/internal/server"
 	"github.com/syphon1c/code-scale-mcp/internal/storage"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 var version = "dev"

@@ -4,9 +4,9 @@ import (
 	"context"
 	"strings"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/syphon1c/code-scale-mcp/internal/parser"
 	"github.com/syphon1c/code-scale-mcp/internal/storage"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type GetSymbolArgs struct {

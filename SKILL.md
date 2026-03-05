@@ -70,7 +70,7 @@ Examples:
 ### Exploration
 - **list_repos**: List all indexed repos. No args.
 - **get_file_tree**: Get file tree. Args: `repo` (required), `path_prefix` (optional filter)
-- **get_file_outline**: Symbol outline for a file. Args: `repo`, `file_path` (required)
+- **get_file_outline**: Symbol outline for a file. Args: `repo`, `file_path` (required), `flat` (optional, returns flat list with depth instead of nested tree)
 - **get_repo_outline**: High-level repo overview. Args: `repo` (required)
 
 ### Retrieval

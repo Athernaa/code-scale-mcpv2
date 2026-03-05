@@ -5,11 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/syphon1c/code-scale-mcp/internal/github"
 	"github.com/syphon1c/code-scale-mcp/internal/parser"
 	"github.com/syphon1c/code-scale-mcp/internal/security"
 	"github.com/syphon1c/code-scale-mcp/internal/summarizer"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type IndexRepoArgs struct {

@@ -390,6 +390,47 @@ func TestBuildSymbolTree(t *testing.T) {
 	}
 }
 
+func TestFlattenTree(t *testing.T) {
+	parentID := "test.py::MyClass#class"
+	symbols := []Symbol{
+		{ID: parentID, Name: "MyClass", Kind: KindClass},
+		{ID: "test.py::MyClass.method1#method", Name: "method1", Kind: KindMethod, Parent: parentID},
+		{ID: "test.py::MyClass.method2#method", Name: "method2", Kind: KindMethod, Parent: parentID},
+		{ID: "test.py::standalone#function", Name: "standalone", Kind: KindFunction},
+	}
+
+	tree := BuildSymbolTree(symbols)
+	flat := FlattenTree(tree, 0)
+
+	if len(flat) != 4 {
+		t.Fatalf("expected 4 flat nodes, got %d", len(flat))
+	}
+
+	// MyClass at depth 0
+	if flat[0].Symbol.Name != "MyClass" || flat[0].Depth != 0 {
+		t.Errorf("expected MyClass at depth 0, got %s at depth %d", flat[0].Symbol.Name, flat[0].Depth)
+	}
+	// method1 at depth 1
+	if flat[1].Symbol.Name != "method1" || flat[1].Depth != 1 {
+		t.Errorf("expected method1 at depth 1, got %s at depth %d", flat[1].Symbol.Name, flat[1].Depth)
+	}
+	// method2 at depth 1
+	if flat[2].Symbol.Name != "method2" || flat[2].Depth != 1 {
+		t.Errorf("expected method2 at depth 1, got %s at depth %d", flat[2].Symbol.Name, flat[2].Depth)
+	}
+	// standalone at depth 0
+	if flat[3].Symbol.Name != "standalone" || flat[3].Depth != 0 {
+		t.Errorf("expected standalone at depth 0, got %s at depth %d", flat[3].Symbol.Name, flat[3].Depth)
+	}
+}
+
+func TestFlattenTreeEmpty(t *testing.T) {
+	flat := FlattenTree(nil, 0)
+	if len(flat) != 0 {
+		t.Errorf("expected empty result, got %d items", len(flat))
+	}
+}
+
 func assertSymbol(t *testing.T, names map[string]string, name string, kind string) {
 	t.Helper()
 	got, ok := names[name]
