@@ -125,6 +125,8 @@ That's it. The MCP server starts automatically when Claude Code detects `.mcp.js
 
 ## Usage
 
+> **Try it out:** See [PROMPTS.md](PROMPTS.md) for ready-to-use test prompts covering every tool — great for verifying your setup or exploring what code-scale-mcp can do.
+
 Once indexed, use symbol-level retrieval instead of reading entire files:
 
 ```
