@@ -2,6 +2,8 @@
 
 A high-performance MCP server that indexes codebases via tree-sitter AST parsing and provides token-efficient symbol retrieval. Reduces agent token costs by up to 99% by letting agents retrieve individual symbols instead of whole files.
 
+**Inspiration and thanks to [jcodemunch-mcp](https://github.com/jgravelle/jcodemunch-mcp)** — awesome work that inspired me to build my version of his original tool!
+
 **Go** — single binary, true parallelism, SQLite storage, 13 languages.
 
 ## The Problem
