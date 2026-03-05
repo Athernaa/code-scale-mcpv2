@@ -29,12 +29,18 @@ func IndexRepoHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, In
 			return r, nil, nil
 		}
 
+		if !security.SafeRepoComponent(owner) || !security.SafeRepoComponent(repoName) {
+			r, _ := errorResult("invalid repository name: owner and repo must be alphanumeric")
+			return r, nil, nil
+		}
+
 		client := github.NewClient()
 
 		// Fetch repo tree
 		tree, err := client.FetchRepoTree(owner, repoName)
 		if err != nil {
-			r, _ := errorResult("fetch tree: " + err.Error())
+			log.Printf("index_repo: fetch tree error for %s/%s: %v", owner, repoName, err)
+			r, _ := errorResult("failed to fetch repository tree")
 			return r, nil, nil
 		}
 

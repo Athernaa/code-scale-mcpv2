@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/syphon1c/code-scale-mcp/internal/parser"
+	"github.com/syphon1c/code-scale-mcp/internal/security"
 	_ "modernc.org/sqlite"
 )
 
@@ -159,6 +160,10 @@ func (s *IndexStore) SaveIndex(
 	fileLanguages map[string]string, // path -> language
 	symbols []parser.Symbol,
 ) error {
+	if !security.SafeRepoComponent(owner) || !security.SafeRepoComponent(name) {
+		return fmt.Errorf("invalid repository component: owner=%q name=%q", owner, name)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -636,7 +641,15 @@ func (s *IndexStore) GetSymbolContent(repoID int64, symbolID string) (string, er
 		return "", err
 	}
 
-	contentPath := filepath.Join(s.basePath, owner+"-"+name, sym.File)
+	repoDir := filepath.Join(s.basePath, owner+"-"+name)
+	contentPath := filepath.Join(repoDir, sym.File)
+
+	// Prevent path traversal
+	rel, err := filepath.Rel(filepath.Clean(repoDir), filepath.Clean(contentPath))
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return "", fmt.Errorf("path traversal detected: %s", sym.File)
+	}
+
 	f, err := os.Open(contentPath)
 	if err != nil {
 		return "", fmt.Errorf("cannot open content file: %w", err)
@@ -676,6 +689,9 @@ func (s *IndexStore) GetFileContent(repoID int64, filePath string) ([]byte, erro
 
 // SaveContentFile saves a raw source file to the content cache.
 func (s *IndexStore) SaveContentFile(owner, name, filePath string, content []byte) error {
+	if !security.SafeRepoComponent(owner) || !security.SafeRepoComponent(name) {
+		return fmt.Errorf("invalid repository component: owner=%q name=%q", owner, name)
+	}
 	repoDir := filepath.Join(s.basePath, owner+"-"+name)
 	fullPath := filepath.Join(repoDir, filePath)
 
@@ -696,6 +712,10 @@ func (s *IndexStore) SaveContentFile(owner, name, filePath string, content []byt
 
 // DeleteFileFromIndex removes a single file and its symbols from a repository's index.
 func (s *IndexStore) DeleteFileFromIndex(owner, name, filePath string) error {
+	if !security.SafeRepoComponent(owner) || !security.SafeRepoComponent(name) {
+		return fmt.Errorf("invalid repository component: owner=%q name=%q", owner, name)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -729,9 +749,13 @@ func (s *IndexStore) DeleteFileFromIndex(owner, name, filePath string) error {
 		return err
 	}
 
-	// Remove content file
-	contentPath := filepath.Join(s.basePath, owner+"-"+name, filePath)
-	_ = os.Remove(contentPath)
+	// Remove content file (with path traversal check)
+	repoDir := filepath.Join(s.basePath, owner+"-"+name)
+	contentPath := filepath.Join(repoDir, filePath)
+	rel, relErr := filepath.Rel(filepath.Clean(repoDir), filepath.Clean(contentPath))
+	if relErr == nil && !strings.HasPrefix(rel, "..") {
+		_ = os.Remove(contentPath)
+	}
 
 	return nil
 }
