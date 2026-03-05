@@ -3,6 +3,7 @@ package watcher
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -86,6 +87,11 @@ func (m *Manager) Watch(absPath string) error {
 	}
 	m.watches[absPath] = fw
 
+	// Persist watch to database for restore on restart
+	if err := m.store.SaveWatch(absPath, repo); err != nil {
+		log.Printf("watcher: failed to persist watch for %s: %v", absPath, err)
+	}
+
 	go m.watchLoop(fw)
 
 	return nil
@@ -101,6 +107,11 @@ func (m *Manager) Unwatch(absPath string) error {
 	}
 	delete(m.watches, absPath)
 	m.mu.Unlock()
+
+	// Remove from database
+	if err := m.store.DeleteWatch(absPath); err != nil {
+		log.Printf("watcher: failed to delete persisted watch for %s: %v", absPath, err)
+	}
 
 	close(fw.stop)
 	return fw.watcher.Close()
@@ -120,6 +131,31 @@ func (m *Manager) ListWatches() []FolderWatch {
 		})
 	}
 	return result
+}
+
+// RestoreWatches restores persisted watches from the database.
+func (m *Manager) RestoreWatches() error {
+	saved, err := m.store.ListSavedWatches()
+	if err != nil {
+		return fmt.Errorf("list saved watches: %w", err)
+	}
+
+	for _, sw := range saved {
+		// Check if the directory still exists
+		info, err := os.Stat(sw.Path)
+		if err != nil || !info.IsDir() {
+			log.Printf("watcher: removing stale watch for %s (no longer exists)", sw.Path)
+			_ = m.store.DeleteWatch(sw.Path)
+			continue
+		}
+
+		if err := m.Watch(sw.Path); err != nil {
+			log.Printf("watcher: failed to restore watch for %s: %v", sw.Path, err)
+			continue
+		}
+		log.Printf("watcher: restored watch for %s", sw.Path)
+	}
+	return nil
 }
 
 // Close stops all watchers.

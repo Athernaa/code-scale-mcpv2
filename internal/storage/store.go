@@ -90,9 +90,64 @@ func (s *IndexStore) migrate() error {
 		return fmt.Errorf("schema exec: %w", err)
 	}
 
-	// Insert schema version if not exists
-	_, err = s.db.Exec("INSERT OR IGNORE INTO schema_version (version) VALUES (?)", CurrentSchemaVersion)
+	// Check current schema version
+	var currentVersion int
+	err = s.db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_version").Scan(&currentVersion)
+	if err != nil {
+		currentVersion = 0
+	}
+
+	// Apply incremental migrations
+	if currentVersion < 2 {
+		if _, err := s.db.Exec(MigrateV2SQL); err != nil {
+			return fmt.Errorf("migrate v2: %w", err)
+		}
+	}
+
+	// Upsert schema version
+	_, err = s.db.Exec("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", CurrentSchemaVersion)
 	return err
+}
+
+// SavedWatch represents a persisted folder watch.
+type SavedWatch struct {
+	Path      string `json:"path"`
+	Repo      string `json:"repo"`
+	CreatedAt string `json:"created_at"`
+}
+
+// SaveWatch persists a folder watch to the database.
+func (s *IndexStore) SaveWatch(path, repo string) error {
+	_, err := s.db.Exec(
+		"INSERT OR IGNORE INTO watches (path, repo, created_at) VALUES (?, ?, ?)",
+		path, repo, time.Now().UTC().Format(time.RFC3339),
+	)
+	return err
+}
+
+// DeleteWatch removes a persisted folder watch.
+func (s *IndexStore) DeleteWatch(path string) error {
+	_, err := s.db.Exec("DELETE FROM watches WHERE path = ?", path)
+	return err
+}
+
+// ListSavedWatches returns all persisted folder watches.
+func (s *IndexStore) ListSavedWatches() ([]SavedWatch, error) {
+	rows, err := s.db.Query("SELECT path, repo, created_at FROM watches ORDER BY created_at")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var watches []SavedWatch
+	for rows.Next() {
+		var w SavedWatch
+		if err := rows.Scan(&w.Path, &w.Repo, &w.CreatedAt); err != nil {
+			return nil, err
+		}
+		watches = append(watches, w)
+	}
+	return watches, rows.Err()
 }
 
 // SaveIndex saves symbols for a repository. Replaces existing data for the same repo.

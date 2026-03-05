@@ -68,5 +68,15 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 `
 
+// MigrateV2SQL adds the watches table for persisting folder watches across restarts.
+const MigrateV2SQL = `
+CREATE TABLE IF NOT EXISTS watches (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    path       TEXT NOT NULL UNIQUE,
+    repo       TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+`
+
 // CurrentSchemaVersion is the current schema version.
-const CurrentSchemaVersion = 1
+const CurrentSchemaVersion = 2

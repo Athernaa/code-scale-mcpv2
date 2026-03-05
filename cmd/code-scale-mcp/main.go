@@ -37,6 +37,11 @@ func main() {
 	srv, watchMgr := server.NewCodeScaleServer(store)
 	defer watchMgr.Close()
 
+	// Restore persisted watches from previous sessions
+	if err := watchMgr.RestoreWatches(); err != nil {
+		log.Printf("Warning: failed to restore watches: %v", err)
+	}
+
 	switch *transport {
 	case "stdio":
 		ctx := context.Background()

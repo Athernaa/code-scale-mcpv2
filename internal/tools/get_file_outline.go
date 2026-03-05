@@ -30,13 +30,6 @@ func GetFileOutlineHandler(deps *Deps) func(context.Context, *mcp.CallToolReques
 			return r, nil, nil
 		}
 
-		tree := parser.BuildSymbolTree(symbols)
-
-		var syms any = tree
-		if args.Flat {
-			syms = parser.FlattenTree(tree, 0)
-		}
-
 		// Detect language from first symbol
 		language := ""
 		if len(symbols) > 0 {
@@ -44,6 +37,13 @@ func GetFileOutlineHandler(deps *Deps) func(context.Context, *mcp.CallToolReques
 		}
 
 		saved, total := deps.addSavings(int64(len(symbols)*500), int64(len(symbols)*50))
+
+		var syms any
+		if args.Flat {
+			syms = parser.FlattenSymbols(symbols)
+		} else {
+			syms = parser.BuildSymbolTree(symbols)
+		}
 
 		result := map[string]any{
 			"repo":     args.Repo,

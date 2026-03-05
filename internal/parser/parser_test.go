@@ -366,16 +366,18 @@ func TestComputeContentHash(t *testing.T) {
 	}
 }
 
-func TestBuildSymbolTree(t *testing.T) {
+func makeHierarchyFixture() []Symbol {
 	parentID := "test.py::MyClass#class"
-	symbols := []Symbol{
+	return []Symbol{
 		{ID: parentID, Name: "MyClass", Kind: KindClass},
 		{ID: "test.py::MyClass.method1#method", Name: "method1", Kind: KindMethod, Parent: parentID},
 		{ID: "test.py::MyClass.method2#method", Name: "method2", Kind: KindMethod, Parent: parentID},
 		{ID: "test.py::standalone#function", Name: "standalone", Kind: KindFunction},
 	}
+}
 
-	tree := BuildSymbolTree(symbols)
+func TestBuildSymbolTree(t *testing.T) {
+	tree := BuildSymbolTree(makeHierarchyFixture())
 	if len(tree) != 2 {
 		t.Fatalf("expected 2 root nodes, got %d", len(tree))
 	}
@@ -390,17 +392,8 @@ func TestBuildSymbolTree(t *testing.T) {
 	}
 }
 
-func TestFlattenTree(t *testing.T) {
-	parentID := "test.py::MyClass#class"
-	symbols := []Symbol{
-		{ID: parentID, Name: "MyClass", Kind: KindClass},
-		{ID: "test.py::MyClass.method1#method", Name: "method1", Kind: KindMethod, Parent: parentID},
-		{ID: "test.py::MyClass.method2#method", Name: "method2", Kind: KindMethod, Parent: parentID},
-		{ID: "test.py::standalone#function", Name: "standalone", Kind: KindFunction},
-	}
-
-	tree := BuildSymbolTree(symbols)
-	flat := FlattenTree(tree, 0)
+func TestFlattenSymbols(t *testing.T) {
+	flat := FlattenSymbols(makeHierarchyFixture())
 
 	if len(flat) != 4 {
 		t.Fatalf("expected 4 flat nodes, got %d", len(flat))
@@ -424,8 +417,8 @@ func TestFlattenTree(t *testing.T) {
 	}
 }
 
-func TestFlattenTreeEmpty(t *testing.T) {
-	flat := FlattenTree(nil, 0)
+func TestFlattenSymbolsEmpty(t *testing.T) {
+	flat := FlattenSymbols(nil)
 	if len(flat) != 0 {
 		t.Errorf("expected empty result, got %d items", len(flat))
 	}

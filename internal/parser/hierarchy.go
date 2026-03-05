@@ -53,12 +53,34 @@ type FlatSymbolNode struct {
 	Depth  int    `json:"depth"`
 }
 
-// FlattenTree flattens symbol tree with depth information.
-func FlattenTree(nodes []SymbolNode, depth int) []FlatSymbolNode {
-	var result []FlatSymbolNode
-	for _, node := range nodes {
-		result = append(result, FlatSymbolNode{Symbol: node.Symbol, Depth: depth})
-		result = append(result, FlattenTree(node.Children, depth+1)...)
+// FlattenSymbols computes a flat list with depth directly from a symbol slice,
+// without building an intermediate tree. Depth is derived from parent chains.
+func FlattenSymbols(symbols []Symbol) []FlatSymbolNode {
+	// Build parent-child relationships
+	childrenOf := make(map[string][]int, len(symbols))
+	idxByID := make(map[string]int, len(symbols))
+	isChild := make(map[string]bool)
+	for i, sym := range symbols {
+		idxByID[sym.ID] = i
+		if sym.Parent != "" {
+			childrenOf[sym.Parent] = append(childrenOf[sym.Parent], i)
+			isChild[sym.ID] = true
+		}
+	}
+
+	result := make([]FlatSymbolNode, 0, len(symbols))
+	for _, sym := range symbols {
+		if !isChild[sym.ID] {
+			flattenInto(&result, symbols, childrenOf, sym.ID, idxByID, 0)
+		}
 	}
 	return result
+}
+
+func flattenInto(out *[]FlatSymbolNode, symbols []Symbol, childrenOf map[string][]int, id string, idxByID map[string]int, depth int) {
+	idx := idxByID[id]
+	*out = append(*out, FlatSymbolNode{Symbol: symbols[idx], Depth: depth})
+	for _, childIdx := range childrenOf[id] {
+		flattenInto(out, symbols, childrenOf, symbols[childIdx].ID, idxByID, depth+1)
+	}
 }
