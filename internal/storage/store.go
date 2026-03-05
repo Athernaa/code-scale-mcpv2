@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -126,7 +127,10 @@ func (s *IndexStore) SaveIndex(
 		if err != nil {
 			return err
 		}
-		repoID, _ = res.LastInsertId()
+		repoID, err = res.LastInsertId()
+		if err != nil {
+			return fmt.Errorf("get repo ID: %w", err)
+		}
 	} else if err != nil {
 		return err
 	} else {
@@ -137,7 +141,7 @@ func (s *IndexStore) SaveIndex(
 		if _, err := tx.Exec("DELETE FROM files WHERE repo_id = ?", repoID); err != nil {
 			return err
 		}
-		if _, err := tx.Exec("UPDATE repos SET indexed_at = ?, git_head = ? WHERE id = ?", now, gitHead, repoID); err != nil {
+		if _, err := tx.Exec("UPDATE repos SET indexed_at = ?, git_head = ?, source_type = ? WHERE id = ?", now, gitHead, sourceType, repoID); err != nil {
 			return err
 		}
 	}
@@ -156,7 +160,10 @@ func (s *IndexStore) SaveIndex(
 		if err != nil {
 			return fmt.Errorf("insert file %s: %w", path, err)
 		}
-		fid, _ := res.LastInsertId()
+		fid, err := res.LastInsertId()
+		if err != nil {
+			return fmt.Errorf("get file ID for %s: %w", path, err)
+		}
 		fileIDMap[path] = fid
 	}
 
@@ -173,10 +180,16 @@ func (s *IndexStore) SaveIndex(
 
 	for _, sym := range symbols {
 		fileID := fileIDMap[sym.File]
-		decorJSON, _ := json.Marshal(sym.Decorators)
-		kwJSON, _ := json.Marshal(sym.Keywords)
+		decorJSON, err := json.Marshal(sym.Decorators)
+		if err != nil {
+			return fmt.Errorf("marshal decorators for %s: %w", sym.ID, err)
+		}
+		kwJSON, err := json.Marshal(sym.Keywords)
+		if err != nil {
+			return fmt.Errorf("marshal keywords for %s: %w", sym.ID, err)
+		}
 
-		_, err := symStmt.Exec(
+		_, err = symStmt.Exec(
 			repoID, fileID, sym.ID, sym.File, sym.Name, sym.QualifiedName,
 			sym.Kind, sym.Language, sym.Signature, sym.ContentHash,
 			sym.Docstring, sym.Summary, string(decorJSON), string(kwJSON),
@@ -187,10 +200,10 @@ func (s *IndexStore) SaveIndex(
 		}
 	}
 
-	// Update FTS index
-	_, _ = tx.Exec("DELETE FROM symbols_fts")
-	_, _ = tx.Exec(`INSERT INTO symbols_fts(rowid, name, qualified_name, signature, summary, docstring)
-		SELECT id, name, qualified_name, signature, summary, docstring FROM symbols WHERE repo_id = ?`, repoID)
+	// Rebuild FTS index from all symbols (FTS5 content-sync tables require full rebuild)
+	if _, err := tx.Exec("INSERT INTO symbols_fts(symbols_fts) VALUES('rebuild')"); err != nil {
+		return fmt.Errorf("rebuild FTS index: %w", err)
+	}
 
 	return tx.Commit()
 }
@@ -221,6 +234,10 @@ func (s *IndexStore) ListRepos() ([]RepoInfo, error) {
 		repos = append(repos, r)
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
 	// Fetch languages per repo
 	for i := range repos {
 		langRows, err := s.db.Query(
@@ -233,7 +250,9 @@ func (s *IndexStore) ListRepos() ([]RepoInfo, error) {
 		for langRows.Next() {
 			var lang string
 			var count int
-			_ = langRows.Scan(&lang, &count)
+			if err := langRows.Scan(&lang, &count); err != nil {
+				continue
+			}
 			repos[i].Languages[lang] = count
 		}
 		_ = langRows.Close()
@@ -256,44 +275,67 @@ func (s *IndexStore) GetRepoID(repo string) (int64, error) {
 			return 0, err
 		}
 		defer func() { _ = rows.Close() }()
+		type repoMatch struct {
+			id   int64
+			repo string
+		}
+		var matches []repoMatch
 		for rows.Next() {
 			var rid int64
 			var r string
-			_ = rows.Scan(&rid, &r)
-			if strings.HasSuffix(r, "/"+repo) || strings.HasSuffix(r, "-"+repo) {
-				return rid, nil
+			if err := rows.Scan(&rid, &r); err != nil {
+				continue
 			}
+			if strings.HasSuffix(r, "/"+repo) || strings.HasSuffix(r, "-"+repo) {
+				matches = append(matches, repoMatch{rid, r})
+			}
+		}
+		if len(matches) == 1 {
+			return matches[0].id, nil
+		}
+		if len(matches) > 1 {
+			names := make([]string, len(matches))
+			for i, m := range matches {
+				names[i] = m.repo
+			}
+			return 0, fmt.Errorf("ambiguous repository %q, matches: %s", repo, strings.Join(names, ", "))
 		}
 		return 0, fmt.Errorf("repository %q not indexed", repo)
 	}
 	return id, err
 }
 
-// GetFiles returns all files for a repo.
-func (s *IndexStore) GetFiles(repoID int64) ([]struct {
+// FileInfo contains file path and language.
+type FileInfo struct {
 	Path     string
 	Language string
-}, error) {
+}
+
+// GetFiles returns all files for a repo.
+func (s *IndexStore) GetFiles(repoID int64) ([]FileInfo, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.getFilesLocked(repoID)
+}
 
+// getFilesLocked returns all files for a repo. Caller must hold s.mu (read or write).
+func (s *IndexStore) getFilesLocked(repoID int64) ([]FileInfo, error) {
 	rows, err := s.db.Query("SELECT path, language FROM files WHERE repo_id = ? ORDER BY path", repoID)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 
-	var files []struct {
-		Path     string
-		Language string
-	}
+	var files []FileInfo
 	for rows.Next() {
-		var f struct {
-			Path     string
-			Language string
+		var f FileInfo
+		if err := rows.Scan(&f.Path, &f.Language); err != nil {
+			return nil, fmt.Errorf("scan file row: %w", err)
 		}
-		_ = rows.Scan(&f.Path, &f.Language)
 		files = append(files, f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return files, nil
 }
@@ -326,10 +368,6 @@ func (s *IndexStore) SearchSymbols(repoID int64, query string, kind string, lang
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if maxResults <= 0 {
-		maxResults = 10
-	}
-
 	// Get all symbols for the repo (or filtered by kind/language)
 	where := "repo_id = ?"
 	args := []any{repoID}
@@ -353,8 +391,7 @@ func (s *IndexStore) SearchSymbols(repoID int64, query string, kind string, lang
 		for _, sym := range symbols {
 			if matched, _ := filepath.Match(filePattern, sym.File); matched {
 				filtered = append(filtered, sym)
-			}
-			if matched, _ := filepath.Match(filePattern, filepath.Base(sym.File)); matched {
+			} else if matched, _ := filepath.Match(filePattern, filepath.Base(sym.File)); matched {
 				filtered = append(filtered, sym)
 			}
 		}
@@ -379,13 +416,9 @@ func (s *IndexStore) SearchSymbols(repoID int64, query string, kind string, lang
 	}
 
 	// Sort by score descending
-	for i := 0; i < len(results); i++ {
-		for j := i + 1; j < len(results); j++ {
-			if results[j].score > results[i].score {
-				results[i], results[j] = results[j], results[i]
-			}
-		}
-	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].score > results[j].score
+	})
 
 	// Limit results
 	if len(results) > maxResults {
@@ -466,10 +499,6 @@ func (s *IndexStore) SearchText(repoID int64, query string, filePattern string, 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if maxResults <= 0 {
-		maxResults = 20
-	}
-
 	// Get repo info
 	var owner, name string
 	err := s.db.QueryRow("SELECT owner, name FROM repos WHERE id = ?", repoID).Scan(&owner, &name)
@@ -479,8 +508,8 @@ func (s *IndexStore) SearchText(repoID int64, query string, filePattern string, 
 
 	contentDir := filepath.Join(s.basePath, owner+"-"+name)
 
-	// Get files for this repo
-	files, err := s.GetFiles(repoID)
+	// Get files for this repo (use locked version since we already hold RLock)
+	files, err := s.getFilesLocked(repoID)
 	if err != nil {
 		return nil, err
 	}
@@ -600,10 +629,19 @@ func (s *IndexStore) DeleteIndex(repo string) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	_, _ = tx.Exec("DELETE FROM symbols WHERE repo_id = ?", id)
-	_, _ = tx.Exec("DELETE FROM files WHERE repo_id = ?", id)
-	_, _ = tx.Exec("DELETE FROM repos WHERE id = ?", id)
-	_, _ = tx.Exec("DELETE FROM symbols_fts")
+	if _, err := tx.Exec("DELETE FROM symbols WHERE repo_id = ?", id); err != nil {
+		return fmt.Errorf("delete symbols: %w", err)
+	}
+	if _, err := tx.Exec("DELETE FROM files WHERE repo_id = ?", id); err != nil {
+		return fmt.Errorf("delete files: %w", err)
+	}
+	if _, err := tx.Exec("DELETE FROM repos WHERE id = ?", id); err != nil {
+		return fmt.Errorf("delete repo: %w", err)
+	}
+	// Rebuild FTS index from remaining symbols
+	if _, err := tx.Exec("INSERT INTO symbols_fts(symbols_fts) VALUES('rebuild')"); err != nil {
+		return fmt.Errorf("rebuild FTS index: %w", err)
+	}
 
 	if err := tx.Commit(); err != nil {
 		return err
@@ -635,47 +673,56 @@ func (s *IndexStore) GetRepoOutline(repoID int64) (*RepoInfo, map[string]int, ma
 
 	// Languages
 	info.Languages = make(map[string]int)
-	langRows, _ := s.db.Query(
+	langRows, err := s.db.Query(
 		"SELECT language, COUNT(*) FROM files WHERE repo_id = ? AND language != '' GROUP BY language", repoID)
-	if langRows != nil {
-		for langRows.Next() {
-			var l string
-			var c int
-			_ = langRows.Scan(&l, &c)
-			info.Languages[l] = c
-		}
-		_ = langRows.Close()
+	if err != nil {
+		return nil, nil, nil, err
 	}
+	for langRows.Next() {
+		var l string
+		var c int
+		if err := langRows.Scan(&l, &c); err != nil {
+			continue
+		}
+		info.Languages[l] = c
+	}
+	_ = langRows.Close()
 
 	// Directories
 	dirs := make(map[string]int)
-	dirRows, _ := s.db.Query("SELECT path FROM files WHERE repo_id = ?", repoID)
-	if dirRows != nil {
-		for dirRows.Next() {
-			var p string
-			_ = dirRows.Scan(&p)
-			d := filepath.Dir(p)
-			if d == "." {
-				d = "/"
-			}
-			dirs[d]++
-		}
-		_ = dirRows.Close()
+	dirRows, err := s.db.Query("SELECT path FROM files WHERE repo_id = ?", repoID)
+	if err != nil {
+		return nil, nil, nil, err
 	}
+	for dirRows.Next() {
+		var p string
+		if err := dirRows.Scan(&p); err != nil {
+			continue
+		}
+		d := filepath.Dir(p)
+		if d == "." {
+			d = "/"
+		}
+		dirs[d]++
+	}
+	_ = dirRows.Close()
 
 	// Symbol kinds
 	kinds := make(map[string]int)
-	kindRows, _ := s.db.Query(
+	kindRows, err := s.db.Query(
 		"SELECT kind, COUNT(*) FROM symbols WHERE repo_id = ? GROUP BY kind", repoID)
-	if kindRows != nil {
-		for kindRows.Next() {
-			var k string
-			var c int
-			_ = kindRows.Scan(&k, &c)
-			kinds[k] = c
-		}
-		_ = kindRows.Close()
+	if err != nil {
+		return nil, nil, nil, err
 	}
+	for kindRows.Next() {
+		var k string
+		var c int
+		if err := kindRows.Scan(&k, &c); err != nil {
+			continue
+		}
+		kinds[k] = c
+	}
+	_ = kindRows.Close()
 
 	return &info, dirs, kinds, nil
 }
@@ -686,15 +733,18 @@ func (s *IndexStore) DetectChanges(repoID int64, currentHashes map[string]string
 	defer s.mu.RUnlock()
 
 	stored := make(map[string]string)
-	rows, _ := s.db.Query("SELECT path, content_hash FROM files WHERE repo_id = ?", repoID)
-	if rows != nil {
-		for rows.Next() {
-			var p, h string
-			_ = rows.Scan(&p, &h)
-			stored[p] = h
-		}
-		_ = rows.Close()
+	rows, err := s.db.Query("SELECT path, content_hash FROM files WHERE repo_id = ?", repoID)
+	if err != nil {
+		return
 	}
+	for rows.Next() {
+		var p, h string
+		if err := rows.Scan(&p, &h); err != nil {
+			continue
+		}
+		stored[p] = h
+	}
+	_ = rows.Close()
 
 	for path, hash := range currentHashes {
 		if oldHash, ok := stored[path]; ok {
@@ -750,6 +800,9 @@ func (s *IndexStore) querySymbols(query string, args ...any) ([]parser.Symbol, e
 		}
 
 		symbols = append(symbols, sym)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return symbols, nil
 }
