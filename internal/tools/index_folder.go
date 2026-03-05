@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/syphon1c/code-scale-mcp/internal/parser"
 	"github.com/syphon1c/code-scale-mcp/internal/security"
@@ -29,10 +31,10 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 		t := newTimer()
 
 		// Expand ~ in path
-		folderPath := args.Path
-		if strings.HasPrefix(folderPath, "~/") {
-			home, _ := os.UserHomeDir()
-			folderPath = filepath.Join(home, folderPath[2:])
+		folderPath, err := expandHomePath(args.Path)
+		if err != nil {
+			r, _ := errorResult(err.Error())
+			return r, nil, nil
 		}
 
 		absPath, err := filepath.Abs(folderPath)
@@ -184,7 +186,7 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 			"success":      true,
 			"repo":         owner + "/" + repoName,
 			"folder_path":  absPath,
-			"indexed_at":   fileHashes,
+			"indexed_at":   time.Now().UTC().Format(time.RFC3339),
 			"file_count":   len(fileHashes),
 			"symbol_count": len(allSymbols),
 			"languages":    langCounts,
@@ -228,13 +230,9 @@ func prioritizeFiles(files []string, maxCount int) []string {
 	}
 
 	// Sort by priority
-	for i := 0; i < len(scored_files); i++ {
-		for j := i + 1; j < len(scored_files); j++ {
-			if scored_files[j].score < scored_files[i].score {
-				scored_files[i], scored_files[j] = scored_files[j], scored_files[i]
-			}
-		}
-	}
+	sort.Slice(scored_files, func(i, j int) bool {
+		return scored_files[i].score < scored_files[j].score
+	})
 
 	if len(scored_files) > maxCount {
 		scored_files = scored_files[:maxCount]

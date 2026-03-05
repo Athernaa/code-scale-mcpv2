@@ -26,10 +26,7 @@ func SearchSymbolsHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest
 			return r, nil, nil
 		}
 
-		maxResults := args.MaxResults
-		if maxResults <= 0 {
-			maxResults = 10
-		}
+		maxResults := clampResults(args.MaxResults, 10, 200)
 
 		symbols, scores, err := deps.Store.SearchSymbols(repoID, args.Query, args.Kind, args.Language, args.FilePattern, maxResults)
 		if err != nil {
