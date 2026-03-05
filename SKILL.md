@@ -1,6 +1,6 @@
 ---
 name: code-scale-mcp
-description: Index codebases and retrieve symbols with byte-level precision. Reduces token costs by up to 99% by fetching individual functions, classes, and methods instead of whole files. Supports 13 languages.
+description: "Index codebases and retrieve symbols with byte-level precision. Reduces token costs by up to 99% by fetching individual functions, classes, and methods instead of whole files. Supports 13 languages.\nTRIGGER when: exploring unfamiliar codebases, investigating bugs across files, understanding features or architecture, working with large codebases (100+ files), or when you'd need to read 3+ files or grep across many files to answer a question. Use `index_folder` or `index_repo` first, then `get_repo_outline`/`search_symbols`/`get_symbol` instead of reading whole files.\nDO NOT TRIGGER when: reading a single small file (<50 lines), editing a file where you need full line-number context, reading config files or READMEs, or when the codebase is already fully loaded in context."
 allowed-tools:
   - mcp__code-scale__index_repo
   - mcp__code-scale__index_folder
@@ -70,7 +70,7 @@ Examples:
 ### Exploration
 - **list_repos**: List all indexed repos. No args.
 - **get_file_tree**: Get file tree. Args: `repo` (required), `path_prefix` (optional filter)
-- **get_file_outline**: Symbol outline for a file. Args: `repo`, `file_path` (required), `flat` (optional, returns flat list with depth instead of nested tree)
+- **get_file_outline**: Symbol outline for a file. Args: `repo`, `file_path` (required)
 - **get_repo_outline**: High-level repo overview. Args: `repo` (required)
 
 ### Retrieval
