@@ -9,6 +9,7 @@ logs/*
 .claude/*
 .vscode/*
 .metrics/*
+.mcp.json
 
 # macOS system files
 .DS_Store
