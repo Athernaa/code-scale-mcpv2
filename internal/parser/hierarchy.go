@@ -15,28 +15,36 @@ func BuildSymbolTree(symbols []Symbol) []SymbolNode {
 		nodeMap[symbols[i].ID] = &SymbolNode{Symbol: symbols[i]}
 	}
 
-	// Track which nodes are children (not roots)
+	// Pre-build children map for O(N) total instead of O(N²)
+	childrenOf := make(map[string][]string, len(symbols))
 	isChild := make(map[string]bool)
-
-	// First pass: build parent-child relationships
 	for _, sym := range symbols {
 		if sym.Parent != "" {
-			if parent, ok := nodeMap[sym.Parent]; ok {
-				parent.Children = append(parent.Children, *nodeMap[sym.ID])
+			if _, ok := nodeMap[sym.Parent]; ok {
+				childrenOf[sym.Parent] = append(childrenOf[sym.Parent], sym.ID)
 				isChild[sym.ID] = true
 			}
 		}
 	}
 
-	// Second pass: collect roots (copy from nodeMap to get updated children)
+	// Collect roots, then recursively build children
 	var roots []SymbolNode
 	for _, sym := range symbols {
 		if !isChild[sym.ID] {
-			roots = append(roots, *nodeMap[sym.ID])
+			roots = append(roots, buildNode(nodeMap, childrenOf, sym.ID))
 		}
 	}
 
 	return roots
+}
+
+// buildNode recursively builds a SymbolNode with all descendants.
+func buildNode(nodeMap map[string]*SymbolNode, childrenOf map[string][]string, id string) SymbolNode {
+	node := SymbolNode{Symbol: nodeMap[id].Symbol}
+	for _, childID := range childrenOf[id] {
+		node.Children = append(node.Children, buildNode(nodeMap, childrenOf, childID))
+	}
+	return node
 }
 
 // FlattenTree flattens symbol tree with depth information.
