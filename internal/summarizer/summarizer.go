@@ -8,9 +8,12 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/syphon1c/code-scale-mcp/internal/parser"
 )
+
+var httpClient = &http.Client{Timeout: 30 * time.Second}
 
 // SummarizeSymbols applies 3-tier summarization to a list of symbols.
 // Tier 1: Docstring extraction (free)
@@ -136,14 +139,20 @@ func summarizeWithAnthropic(symbols []*parser.Symbol, apiKey string) ([]string, 
 			{"role": "user", "content": prompt},
 		},
 	}
-	jsonBody, _ := json.Marshal(body)
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
 
-	req, _ := http.NewRequest("POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(jsonBody))
+	req, err := http.NewRequest("POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", apiKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +162,10 @@ func summarizeWithAnthropic(symbols []*parser.Symbol, apiKey string) ([]string, 
 		return nil, fmt.Errorf("anthropic API error: %d", resp.StatusCode)
 	}
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MB limit
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
 	return parseSummaryResponse(respBody, len(symbols))
 }
 
@@ -166,10 +178,19 @@ func summarizeWithGemini(symbols []*parser.Symbol, apiKey string) ([]string, err
 			{"parts": []map[string]string{{"text": prompt}}},
 		},
 	}
-	jsonBody, _ := json.Marshal(body)
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
 
-	url := "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + apiKey
-	resp, err := http.Post(url, "application/json", bytes.NewReader(jsonBody))
+	req, err := http.NewRequest("POST", "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent", bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", apiKey)
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +200,10 @@ func summarizeWithGemini(symbols []*parser.Symbol, apiKey string) ([]string, err
 		return nil, fmt.Errorf("gemini API error: %d", resp.StatusCode)
 	}
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MB limit
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
 	return parseGeminiResponse(respBody, len(symbols))
 }
 

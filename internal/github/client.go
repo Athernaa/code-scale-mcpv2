@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 // TreeEntry represents a file in the GitHub tree API response.
@@ -29,7 +30,7 @@ type Client struct {
 func NewClient() *Client {
 	return &Client{
 		token:      os.Getenv("GITHUB_TOKEN"),
-		httpClient: http.DefaultClient,
+		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
