@@ -231,6 +231,60 @@ func SafeRepoComponent(value string) bool {
 	return safeComponentRegex.MatchString(value)
 }
 
+// DeniedRootPaths are system directories that should never be indexed.
+var DeniedRootPaths = []string{
+	"/etc",
+	"/var",
+	"/usr",
+	"/bin",
+	"/sbin",
+	"/boot",
+	"/dev",
+	"/proc",
+	"/sys",
+	"/lib",
+	"/lib64",
+	"/root",
+	"/System",
+	"/Library",
+	"/private",
+	"C:\\Windows",
+	"C:\\Program Files",
+	"C:\\Program Files (x86)",
+}
+
+// IsAllowedRootPath checks that the given absolute path is not a sensitive system directory.
+// Returns false if the path is or is inside a denied root.
+func IsAllowedRootPath(absPath string) bool {
+	cleaned := filepath.Clean(absPath)
+
+	// Check allowed roots from environment (if set, only allow those)
+	if allowed := os.Getenv("CODE_SCALE_ALLOWED_ROOTS"); allowed != "" {
+		for _, root := range strings.Split(allowed, string(os.PathListSeparator)) {
+			root = filepath.Clean(root)
+			if cleaned == root || strings.HasPrefix(cleaned, root+string(os.PathSeparator)) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Default: deny known system paths
+	for _, denied := range DeniedRootPaths {
+		denied = filepath.Clean(denied)
+		if cleaned == denied || strings.HasPrefix(cleaned, denied+string(os.PathSeparator)) {
+			return false
+		}
+	}
+
+	// Also deny the filesystem root itself
+	if cleaned == "/" || cleaned == `C:\` {
+		return false
+	}
+
+	return true
+}
+
 // ExcludeReason represents why a file was excluded.
 type ExcludeReason string
 

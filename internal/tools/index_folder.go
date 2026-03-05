@@ -34,19 +34,24 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 		// Expand ~ in path
 		folderPath, err := expandHomePath(args.Path)
 		if err != nil {
-			r, _ := errorResult(err.Error())
+			r, _ := errorResult("invalid path")
 			return r, nil, nil
 		}
 
 		absPath, err := filepath.Abs(folderPath)
 		if err != nil {
-			r, _ := errorResult("invalid path: " + err.Error())
+			r, _ := errorResult("invalid path")
 			return r, nil, nil
 		}
 
 		info, err := os.Stat(absPath)
 		if err != nil || !info.IsDir() {
-			r, _ := errorResult("not a directory: " + absPath)
+			r, _ := errorResult("path is not a valid directory")
+			return r, nil, nil
+		}
+
+		if !security.IsAllowedRootPath(absPath) {
+			r, _ := errorResult("directory is not allowed for indexing (system or restricted path)")
 			return r, nil, nil
 		}
 

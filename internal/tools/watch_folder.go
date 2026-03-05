@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/syphon1c/code-scale-mcp/internal/security"
 )
 
 type WatchFolderArgs struct {
@@ -23,25 +24,30 @@ func WatchFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 
 		folderPath, err := expandHomePath(args.Path)
 		if err != nil {
-			r, _ := errorResult(err.Error())
+			r, _ := errorResult("invalid path")
 			return r, nil, nil
 		}
 
 		absPath, err := filepath.Abs(folderPath)
 		if err != nil {
-			r, _ := errorResult("invalid path: " + err.Error())
+			r, _ := errorResult("invalid path")
 			return r, nil, nil
 		}
 
 		info, err := os.Stat(absPath)
 		if err != nil || !info.IsDir() {
-			r, _ := errorResult("not a directory: " + absPath)
+			r, _ := errorResult("path is not a valid directory")
+			return r, nil, nil
+		}
+
+		if !security.IsAllowedRootPath(absPath) {
+			r, _ := errorResult("directory is not allowed for watching (system or restricted path)")
 			return r, nil, nil
 		}
 
 		err = deps.Watcher.Watch(absPath)
 		if err != nil {
-			r, _ := errorResult("watch failed: " + err.Error())
+			r, _ := errorResult("watch failed")
 			return r, nil, nil
 		}
 
@@ -73,19 +79,19 @@ func UnwatchFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest
 
 		folderPath, err := expandHomePath(args.Path)
 		if err != nil {
-			r, _ := errorResult(err.Error())
+			r, _ := errorResult("invalid path")
 			return r, nil, nil
 		}
 
 		absPath, err := filepath.Abs(folderPath)
 		if err != nil {
-			r, _ := errorResult("invalid path: " + err.Error())
+			r, _ := errorResult("invalid path")
 			return r, nil, nil
 		}
 
 		err = deps.Watcher.Unwatch(absPath)
 		if err != nil {
-			r, _ := errorResult("unwatch failed: " + err.Error())
+			r, _ := errorResult("unwatch failed")
 			return r, nil, nil
 		}
 
