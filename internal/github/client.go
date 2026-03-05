@@ -146,7 +146,9 @@ func (c *Client) get(url string) ([]byte, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	// Limit response body to 50MB to prevent OOM from unexpected responses
+	const maxResponseSize = 50 * 1024 * 1024
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
 		return nil, err
 	}
@@ -155,17 +157,10 @@ func (c *Client) get(url string) ([]byte, error) {
 	case 200:
 		return body, nil
 	case 404:
-		return nil, fmt.Errorf("not found: %s", url)
+		return nil, fmt.Errorf("resource not found")
 	case 403:
 		return nil, fmt.Errorf("rate limited or forbidden (set GITHUB_TOKEN for higher limits)")
 	default:
-		return nil, fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, string(body[:min(200, len(body))]))
+		return nil, fmt.Errorf("GitHub API error %d", resp.StatusCode)
 	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
