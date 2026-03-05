@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -22,10 +21,10 @@ func WatchFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 			return r, nil, nil
 		}
 
-		folderPath := args.Path
-		if strings.HasPrefix(folderPath, "~/") {
-			home, _ := os.UserHomeDir()
-			folderPath = filepath.Join(home, folderPath[2:])
+		folderPath, err := expandHomePath(args.Path)
+		if err != nil {
+			r, _ := errorResult(err.Error())
+			return r, nil, nil
 		}
 
 		absPath, err := filepath.Abs(folderPath)
@@ -72,10 +71,10 @@ func UnwatchFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest
 			return r, nil, nil
 		}
 
-		folderPath := args.Path
-		if strings.HasPrefix(folderPath, "~/") {
-			home, _ := os.UserHomeDir()
-			folderPath = filepath.Join(home, folderPath[2:])
+		folderPath, err := expandHomePath(args.Path)
+		if err != nil {
+			r, _ := errorResult(err.Error())
+			return r, nil, nil
 		}
 
 		absPath, err := filepath.Abs(folderPath)
