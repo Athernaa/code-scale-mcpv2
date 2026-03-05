@@ -4,6 +4,31 @@ A high-performance MCP server that indexes codebases via tree-sitter AST parsing
 
 **Go** — single binary, true parallelism, SQLite storage, 13 languages.
 
+## The Problem
+AI coding agents (like Claude Code) are token-hungry when navigating codebases. Every time an agent needs to understand a function, it reads the entire file — even if it only needs 10 lines out of 500. This means:
+
+- Massive token waste: A single function might be ~50 tokens, but reading the whole file costs ~2,000 tokens. Across a debugging session touching dozens of files, this adds up fast.
+- Context window pollution: Agents fill their limited context window with irrelevant code, leaving less room for actual reasoning.
+- Higher cost: More tokens = more API spend. For enterprise teams running agents at scale, this becomes a real budget problem.
+
+## The Solution
+code-scale-mcp is an MCP server that indexes codebases at the symbol level using tree-sitter AST parsing. Instead of reading whole files, agents can:
+
+- ***Index once :*** parse the entire codebase into a SQLite database of individual symbols (functions, classes, methods, constants)
+- ***Search precisely :*** find symbols by name, type, or full-text content
+- ***Retrieve surgically :*** fetch just the one function they need, with byte-level precision
+
+***The result:*** up to 99% token reduction per retrieval, without losing any code comprehension quality. The agent gets exactly the code it needs, nothing more.
+
+Key Design Choices
+- ***Go single binary :*** no Python/pip dependency chain, millisecond startup, true multi-core parallelism
+- 13 languages supported via tree-sitter grammars
+- ***File watching :*** auto-reindexes as you edit, keeping the index fresh
+- ***Token savings tracking :*** every response reports how many tokens were saved and cost avoided
+
+***In short:*** it turns "read the whole file to find one function" into "fetch exactly that function"m making AI coding agents faster, cheaper, and more effective at scale.
+
+
 ## Features
 
 - **13 languages**: Python, JavaScript, TypeScript, Go, Rust, Java, PHP, C, C++, Ruby, Kotlin, Swift, Lua
