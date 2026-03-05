@@ -77,6 +77,12 @@ EOF
 
 That's it. The MCP server starts automatically when Claude Code detects `.mcp.json`. You'll be prompted to approve it on first use.
 
+> **Tip**: After indexing, enable file watching so the index stays up-to-date as you edit code:
+> ```
+> > Use watch_folder to watch this project for changes
+> ```
+> Without this, you'll need to re-run `index_folder` after every code change to update the index.
+
 > **Note**: You must restart your Claude Code session after adding or modifying `.mcp.json`. The `.mcp.json` is per-project — add it to each project you want to use code-scale with. Alternatively, copy the binary to `/usr/local/bin/` and use just `"command": "code-scale-mcp"`.
 
 ## Usage
@@ -122,7 +128,7 @@ code-scale-mcp --transport=sse --port=8080
 | `index_folder` | Index a local folder for symbol retrieval |
 | `list_repos` | List all indexed repositories |
 | `get_file_tree` | Get file structure of an indexed repo |
-| `get_file_outline` | Get hierarchical symbol outline for a file |
+| `get_file_outline` | Get hierarchical symbol outline for a file (supports flat mode) |
 | `get_symbol` | Retrieve full source code of a symbol by ID |
 | `get_symbols` | Batch retrieve source code for multiple symbols |
 | `search_symbols` | Search symbols by name/signature with weighted scoring |
