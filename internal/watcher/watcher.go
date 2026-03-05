@@ -278,6 +278,14 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 			continue
 		}
 
+		// Security: check for symlink escape and path traversal
+		if security.IsSymlinkEscape(fw.Path, fullPath) {
+			continue
+		}
+		if reason := security.ShouldExcludeFile(fullPath, fw.Path, security.DefaultMaxFileSize); reason != "" {
+			continue
+		}
+
 		content, err := os.ReadFile(fullPath)
 		if err != nil {
 			continue
