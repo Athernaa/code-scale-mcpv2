@@ -25,7 +25,7 @@ func IndexRepoHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, In
 
 		owner, repoName, err := github.ParseRepoURL(args.URL)
 		if err != nil {
-			r, _ := errorResult(err.Error())
+			r, _ := errorResult("invalid repository (expected GitHub URL or owner/repo format)")
 			return r, nil, nil
 		}
 
