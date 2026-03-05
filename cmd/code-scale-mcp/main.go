@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/syphon1c/code-scale-mcp/internal/server"
@@ -51,11 +53,36 @@ func main() {
 	case "sse":
 		addr := fmt.Sprintf(":%d", *port)
 		log.Printf("Starting SSE server on %s", addr)
-		handler := mcp.NewSSEHandler(func(request *http.Request) *mcp.Server {
+		sseHandler := mcp.NewSSEHandler(func(request *http.Request) *mcp.Server {
 			return srv
 		}, nil)
+
+		var handler http.Handler = sseHandler
+		if token := os.Getenv("CODE_SCALE_AUTH_TOKEN"); token != "" {
+			handler = authMiddleware(sseHandler, token)
+			log.Printf("SSE server authentication enabled")
+		} else {
+			log.Printf("WARNING: No CODE_SCALE_AUTH_TOKEN set, SSE server is unauthenticated")
+		}
 		log.Fatal(http.ListenAndServe(addr, handler))
 	default:
 		log.Fatalf("Unknown transport: %s (use stdio or sse)", *transport)
 	}
+}
+
+// authMiddleware wraps an HTTP handler with Bearer token authentication.
+func authMiddleware(next http.Handler, token string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if !strings.HasPrefix(auth, "Bearer ") {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		provided := strings.TrimPrefix(auth, "Bearer ")
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(token)) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
