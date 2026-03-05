@@ -433,11 +433,11 @@ func (s *IndexStore) SearchSymbols(repoID int64, query string, kind string, lang
 	args := []any{repoID}
 	if kind != "" {
 		where += " AND kind = ?"
-		args = append(args, kind)
+		args = append(args, strings.ToLower(kind))
 	}
 	if language != "" {
 		where += " AND language = ?"
-		args = append(args, language)
+		args = append(args, strings.ToLower(language))
 	}
 
 	symbols, err := s.querySymbols("SELECT * FROM symbols WHERE "+where, args...)
