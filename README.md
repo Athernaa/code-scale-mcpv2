@@ -49,6 +49,17 @@ Key Design Choices
 - Optional: `ANTHROPIC_API_KEY` or `GEMINI_API_KEY` for AI-powered summaries
 - Optional: `GITHUB_TOKEN` for indexing private GitHub repos
 
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GITHUB_TOKEN` | — | GitHub personal access token for private repos and higher rate limits |
+| `ANTHROPIC_API_KEY` | — | Anthropic API key for AI-powered symbol summaries |
+| `GEMINI_API_KEY` | — | Google Gemini API key for AI-powered symbol summaries |
+| `CODE_INDEX_PATH` | `~/.code-index` | Directory for SQLite database and cached content files |
+| `CODE_SCALE_ALLOWED_ROOTS` | — | Colon-separated (`;` on Windows) list of allowed root directories for indexing/watching. When set, only paths under these roots can be indexed. When unset, system directories (`/etc`, `/usr`, `/var`, `/root`, etc.) are denied by default. |
+| `CODE_SCALE_AUTH_TOKEN` | — | Bearer token for SSE transport authentication. When set, all SSE requests must include `Authorization: Bearer <token>`. When unset, SSE mode runs without authentication (a warning is logged). |
+
 ## Installation
 
 ### From source
@@ -123,10 +134,55 @@ get_symbol        → fetch just one function's source code (~50 tokens vs ~2,00
 
 Every response includes `_meta` with `tokens_saved`, `total_tokens_saved`, and `cost_avoided` so you can track the savings.
 
+### Skill Installation (Recommended)
+
+The SKILL.md file teaches your AI agent *when* and *how* to use code-scale-mcp's tools effectively. Without it, the agent has the tools available but won't know the optimal workflow (index → explore → search → retrieve).
+
+**Claude Code (Cowork)**
+
+Copy the skill into your project's `.claude/skills/` directory:
+
+```bash
+mkdir -p .claude/skills/code-scale-mcp
+cp /path/to/code-scale-mcp/SKILL.md .claude/skills/code-scale-mcp/SKILL.md
+```
+
+Or use the pre-packaged zip:
+```bash
+unzip code-scale-mcp_cowork.zip -d .claude/skills/
+```
+
+The skill will be automatically loaded by Claude Code on the next session.
+
+**Cursor / Windsurf**
+
+Add the SKILL.md contents to your project's rules file:
+
+```bash
+# Cursor
+cat /path/to/code-scale-mcp/SKILL.md >> .cursor/rules/code-scale-mcp.md
+
+# Windsurf
+cat /path/to/code-scale-mcp/SKILL.md >> .windsurfrules
+```
+
+**Other agents**
+
+For any agent that supports system prompts or project-level instructions, include the contents of SKILL.md in your agent's configuration. The key information it provides:
+
+- When to trigger symbol retrieval vs. reading whole files
+- The correct workflow order (index → explore → search → retrieve)
+- Tool reference with required/optional arguments
+- Symbol ID format for `get_symbol` calls
+
 ### SSE/HTTP mode
 
 ```bash
+# Without authentication (warning logged)
 code-scale-mcp --transport=sse --port=8080
+
+# With authentication (recommended)
+CODE_SCALE_AUTH_TOKEN=your-secret-token code-scale-mcp --transport=sse --port=8080
 ```
 
 ### CLI flags
