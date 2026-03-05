@@ -91,6 +91,12 @@ Examples:
 
 Python, JavaScript, TypeScript, Go, Rust, Java, PHP, C, C++, Ruby, Kotlin, Swift, Lua
 
+## Security
+
+- System directories (`/etc`, `/usr`, `/var`, `/root`, etc.) are blocked from indexing/watching by default
+- Set `CODE_SCALE_ALLOWED_ROOTS` to restrict indexing to specific directories (e.g. `/home/user/projects:/opt/code`)
+- SSE transport supports bearer token authentication via `CODE_SCALE_AUTH_TOKEN`
+
 ## Tips
 
 - Use `search_symbols` with `kind: "function"` to filter by symbol type
