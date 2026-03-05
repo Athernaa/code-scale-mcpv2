@@ -2,6 +2,10 @@ package tools
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/syphon1c/code-scale-mcp/internal/storage"
@@ -73,4 +77,27 @@ func (d *Deps) addSavings(rawBytes, responseBytes int64) (int64, int64) {
 	saved := storage.EstimateSavings(rawBytes, responseBytes)
 	total, _ := d.Tracker.AddSavings(saved)
 	return saved, total
+}
+
+// expandHomePath expands a leading ~/ in the path to the user's home directory.
+func expandHomePath(p string) (string, error) {
+	if strings.HasPrefix(p, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("cannot determine home directory: %w", err)
+		}
+		return filepath.Join(home, p[2:]), nil
+	}
+	return p, nil
+}
+
+// clampResults clamps n to [defaultVal, max].
+func clampResults(n, defaultVal, max int) int {
+	if n <= 0 {
+		return defaultVal
+	}
+	if n > max {
+		return max
+	}
+	return n
 }
