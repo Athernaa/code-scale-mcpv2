@@ -136,6 +136,7 @@ func (m *Manager) Close() {
 
 // watchLoop handles fsnotify events with debouncing.
 func (m *Manager) watchLoop(fw *FolderWatch) {
+	var pendingMu sync.Mutex
 	pending := make(map[string]struct{})
 	var debounceTimer *time.Timer
 
@@ -178,20 +179,22 @@ func (m *Manager) watchLoop(fw *FolderWatch) {
 				continue
 			}
 
+			pendingMu.Lock()
 			pending[event.Name] = struct{}{}
+			pendingMu.Unlock()
 
 			// Reset debounce timer
 			if debounceTimer != nil {
 				debounceTimer.Stop()
 			}
 			debounceTimer = time.AfterFunc(debounceInterval, func() {
-				m.mu.Lock()
+				pendingMu.Lock()
 				paths := make([]string, 0, len(pending))
 				for p := range pending {
 					paths = append(paths, p)
 				}
 				pending = make(map[string]struct{})
-				m.mu.Unlock()
+				pendingMu.Unlock()
 
 				if len(paths) > 0 {
 					m.reindexFiles(fw, paths)
