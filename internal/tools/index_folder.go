@@ -179,7 +179,7 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 		summarizer.SummarizeSymbols(allSymbols, args.UseAISummaries)
 
 		// Save index
-		err = deps.Store.SaveIndex(owner, repoName, "local", "", fileHashes, fileLangs, allSymbols)
+		err = deps.Store.SaveIndex(owner, repoName, "local", "", fileHashes, fileLangs, allSymbols, absPath)
 		if err != nil {
 			r, _ := errorResult("save index: " + err.Error())
 			return r, nil, nil

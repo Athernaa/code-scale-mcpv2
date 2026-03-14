@@ -34,7 +34,7 @@ Key Design Choices
 ## Features
 
 - **13 languages**: Python, JavaScript, TypeScript, Go, Rust, Java, PHP, C, C++, Ruby, Kotlin, Swift, Lua
-- **14 MCP tools**: Index repos/folders, search symbols, retrieve source code, file watching
+- **15 MCP tools**: Index repos/folders, search symbols, retrieve source code, file watching, batch operations
 - **SQLite + FTS5**: Structured queries and full-text search, no file limits
 - **Parallel parsing**: True multi-core via goroutines (3-5x faster than Python)
 - **Single binary**: No Python/pip dependency chain, millisecond startup
@@ -42,6 +42,11 @@ Key Design Choices
 - **File watching**: Auto-reindex on file changes via fsnotify
 - **9-layer security**: Path traversal prevention, secret detection, binary filtering, gitignore respect
 - **3-tier summarization**: Docstring extraction → AI (Claude Haiku / Gemini Flash) → signature fallback
+- **3-layer search**: FTS5 BM25 ranking → substring scoring → fuzzy Levenshtein matching
+- **Smart truncation**: 60/40 head/tail truncation for large symbols, preserving errors at output end
+- **Batch operations**: Execute multiple tool calls in a single MCP request
+- **Progressive throttling**: Per-tool rate limiting nudges agents toward efficient batch usage
+- **Stale cleanup**: Auto-removes orphaned indexes on startup
 - **Token savings tracking**: Reports tokens saved and cost avoided per request
 
 ## Requirements
@@ -208,8 +213,9 @@ CODE_SCALE_AUTH_TOKEN=your-secret-token code-scale-mcp --transport=sse --port=80
 | `get_file_outline` | Get hierarchical symbol outline for a file (supports flat mode) |
 | `get_symbol` | Retrieve full source code of a symbol by ID |
 | `get_symbols` | Batch retrieve source code for multiple symbols |
-| `search_symbols` | Search symbols by name/signature with weighted scoring |
-| `search_text` | Full-text search across indexed file contents |
+| `search_symbols` | Search symbols with 3-layer fallback (FTS5 BM25, substring, fuzzy) |
+| `search_text` | Full-text search with optional snippet context windows |
+| `batch_execute` | Execute multiple operations in a single call (max 10) |
 | `get_repo_outline` | High-level overview of an indexed repo |
 | `invalidate_cache` | Delete index and cached files for a repo |
 | `watch_folder` | Start watching a folder for auto-reindex |
@@ -247,7 +253,11 @@ code-scale-mcp/
 │   ├── github/                     # GitHub API client
 │   ├── watcher/                    # fsnotify file watcher
 │   ├── server/                     # MCP server setup + tool registration
-│   └── tools/                      # 14 MCP tool handlers
+│   ├── tools/                      # 15 MCP tool handlers
+│   ├── snippet/                    # Context window extraction for search results
+│   ├── truncate/                   # Smart 60/40 head/tail output truncation
+│   ├── search/                     # Fuzzy Levenshtein matching
+│   └── ratelimit/                  # Progressive per-tool throttling
 └── testdata/                       # Test fixtures for all 13 languages
 ```
 

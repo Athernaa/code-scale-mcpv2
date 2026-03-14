@@ -31,6 +31,14 @@ Use these prompts to verify that the code-scale-mcp server is working correctly 
 | Tool | Prompt |
 |------|--------|
 | `search_text` | "Search for all occurrences of 'tree-sitter' in the codebase" |
+| `search_text` (snippets) | "Search for 'TODO' with 3 lines of context around each match" |
+
+## Batch Operations
+
+| Tool | Prompt |
+|------|--------|
+| `batch_execute` | "Search for 'authenticate' and also get the file outline of auth.py — do both in one call" |
+| `batch_execute` | "Batch fetch the source of these 3 functions: login, logout, and refresh_token" |
 
 ## Watch / Cache Management
 
@@ -52,5 +60,7 @@ For a quick end-to-end smoke test, run these prompts in order:
 5. "Find all symbols related to 'parse' in this codebase"
 6. "Show me the implementation of the `IndexRepo` function"
 7. "Search for all occurrences of 'tree-sitter' in the codebase"
+8. "Search for 'TODO' with context around each match"
+9. "Batch search for 'auth' and get the outline of auth.py in one call"
 
-This covers indexing, listing, tree/outline views, symbol search, symbol retrieval, and text search — hitting the core workflow.
+This covers indexing, listing, tree/outline views, symbol search, symbol retrieval, text search, snippet context, and batch operations — hitting all major workflows.

@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/syphon1c/code-scale-mcp/internal/ratelimit"
 	"github.com/syphon1c/code-scale-mcp/internal/storage"
 )
 
@@ -28,42 +29,54 @@ func SearchSymbolsHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest
 
 		maxResults := clampResults(args.MaxResults, 10, 200)
 
-		symbols, scores, err := deps.Store.SearchSymbols(repoID, args.Query, args.Kind, args.Language, args.FilePattern, maxResults)
+		// Progressive throttling
+		action := deps.Throttle.Check("search_symbols")
+		maxResults, warning := ratelimit.ApplyLimit(action, maxResults)
+		if action == ratelimit.ActionBlocked {
+			r, _ := errorResult(warning)
+			return r, nil, nil
+		}
+
+		scored, err := deps.Store.SearchSymbolsWithTier(repoID, args.Query, args.Kind, args.Language, args.FilePattern, maxResults)
 		if err != nil {
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
 		}
 
 		var results []map[string]any
-		for i, sym := range symbols {
+		for _, s := range scored {
 			results = append(results, map[string]any{
-				"id":        sym.ID,
-				"kind":      sym.Kind,
-				"name":      sym.Name,
-				"file":      sym.File,
-				"line":      sym.Line,
-				"signature": sym.Signature,
-				"summary":   sym.Summary,
-				"score":     scores[i],
+				"id":         s.Symbol.ID,
+				"kind":       s.Symbol.Kind,
+				"name":       s.Symbol.Name,
+				"file":       s.Symbol.File,
+				"line":       s.Symbol.Line,
+				"signature":  s.Symbol.Signature,
+				"summary":    s.Symbol.Summary,
+				"score":      s.Score,
+				"match_tier": string(s.Tier),
 			})
 		}
 
-		saved, total := deps.addSavings(int64(len(symbols)*500), int64(len(results)*50))
+		saved, total := deps.addSavings(int64(len(scored)*500), int64(len(results)*50))
 
 		result := map[string]any{
 			"repo":         args.Repo,
 			"query":        args.Query,
 			"result_count": len(results),
 			"results":      results,
-			"_meta": Meta{
-				TimingMs:    t.elapsedMs(),
-				Repo:        args.Repo,
-				Truncated:   len(results) >= maxResults,
-				TokensSaved: saved,
-				TotalSaved:  total,
-				CostAvoided: storage.CostAvoided(saved),
-				TotalCost:   storage.CostAvoided(total),
-			},
+		}
+		if warning != "" {
+			result["warning"] = warning
+		}
+		result["_meta"] = Meta{
+			TimingMs:    t.elapsedMs(),
+			Repo:        args.Repo,
+			Truncated:   len(results) >= maxResults,
+			TokensSaved: saved,
+			TotalSaved:  total,
+			CostAvoided: storage.CostAvoided(saved),
+			TotalCost:   storage.CostAvoided(total),
 		}
 		r, _ := toTextResult(result)
 		return r, nil, nil

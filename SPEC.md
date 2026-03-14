@@ -17,7 +17,7 @@ Written in Go for single-binary distribution, true parallelism via goroutines, a
 
 ---
 
-## MCP Tools (14)
+## MCP Tools (15)
 
 ### Indexing Tools
 
@@ -107,11 +107,12 @@ Returns directory file counts, language breakdown, and symbol kind distribution.
   "repo": "owner/repo",
   "symbol_id": "src/main.py::MyClass.login#method",
   "verify": true,
-  "context_lines": 3
+  "context_lines": 3,
+  "max_length": 8192
 }
 ```
 
-Retrieves source via byte-offset seeking (O(1)). Optional `verify` re-hashes the source and compares it to the stored `content_hash`. Optional `context_lines` includes surrounding lines.
+Retrieves source via byte-offset seeking (O(1)). Optional `verify` re-hashes the source and compares it to the stored `content_hash`. Optional `context_lines` includes surrounding lines. Optional `max_length` applies smart 60/40 head/tail truncation to large symbols — preserving the end of output where errors and return values typically appear.
 
 #### `get_symbols` — Batch retrieve multiple symbols
 
@@ -141,7 +142,15 @@ Returns a list of symbols plus an error list for any IDs not found.
 }
 ```
 
-Uses SQLite FTS5 full-text search with weighted scoring across name, signature, summary, keywords, and docstring. All filters are optional.
+Uses a 3-layer search fallback chain:
+
+1. **FTS5 BM25** — Queries the `symbols_fts` table with weighted BM25 ranking (name=10, qualified_name=5, signature=3, summary=2, docstring=1). Supports stemming (e.g. "caching" matches "cached").
+2. **Substring scoring** — Falls back to in-memory substring matching across name, signature, summary, keywords, and docstring with weighted scoring.
+3. **Fuzzy Levenshtein** — Final fallback using edit distance on symbol names. Threshold: `max(2, len(query)/4)`. Catches typos like "authenticat" → "authenticate".
+
+Each result includes a `match_tier` field (`fts5`, `substring`, or `fuzzy`) indicating which layer produced it. All filters are optional.
+
+**Progressive throttling**: Calls 1-3 per 60s window return full results. Calls 4-8 return reduced results with a warning. Calls 9+ are blocked with a suggestion to use `batch_execute`.
 
 #### `search_text` — Full-text search across file contents
 
@@ -150,11 +159,36 @@ Uses SQLite FTS5 full-text search with weighted scoring across name, signature, 
   "repo": "owner/repo",
   "query": "TODO",
   "file_pattern": "*.py",
-  "max_results": 20
+  "max_results": 20,
+  "context_lines": 3
 }
 ```
 
-Case-insensitive search across indexed file contents. Returns matching lines with file, line number, and surrounding context. Use when symbol search misses (string literals, comments, config values).
+Case-insensitive search across indexed file contents. Use when symbol search misses (string literals, comments, config values).
+
+When `context_lines` is 0 (default), returns individual matching lines truncated to 200 characters. When `context_lines` > 0, returns **consolidated snippet windows** — contextual blocks of ±N lines around each match. Overlapping windows are merged into single snippets, reducing token usage while providing meaningful context. Maximum `context_lines` is 10.
+
+**Progressive throttling**: Same per-tool rate limiting as `search_symbols`.
+
+---
+
+### Batch Tools
+
+#### `batch_execute` — Execute multiple operations in one call
+
+```json
+{
+  "operations": [
+    { "tool": "search_symbols", "args": { "repo": "owner/repo", "query": "auth" } },
+    { "tool": "get_symbol", "args": { "repo": "owner/repo", "symbol_id": "src/auth.py::login#function" } },
+    { "tool": "get_file_outline", "args": { "repo": "owner/repo", "file_path": "src/auth.py" } }
+  ]
+}
+```
+
+Executes up to 10 operations concurrently in a single MCP tool call. Supported tools: `get_symbol`, `get_symbols`, `search_symbols`, `search_text`, `get_file_outline`, `get_file_tree`, `get_repo_outline`. Each operation runs independently — failures in one don't affect others. Returns indexed results with per-operation errors.
+
+Reduces MCP round-trips and context overhead when multiple lookups are needed.
 
 ---
 
@@ -219,7 +253,8 @@ type Symbol struct {
 CREATE TABLE repos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     owner TEXT, name TEXT, repo TEXT UNIQUE,
-    indexed_at TEXT, git_head TEXT, source_type TEXT
+    indexed_at TEXT, git_head TEXT, source_type TEXT,
+    source_path TEXT DEFAULT ''  -- original local path (for stale cleanup)
 );
 
 -- Source files with content hashes for incremental indexing
@@ -255,6 +290,17 @@ CREATE TABLE token_savings (
 Indexes on `name`, `kind`, `language`, `file_path`, `repo_id` for common query patterns.
 
 Raw source files stored on filesystem at `~/.code-index/{owner}-{name}/{file_path}` for O(1) byte-offset retrieval.
+
+---
+
+## Startup Behavior
+
+On startup, the server performs automatic maintenance:
+
+1. **Schema migration** — Applies any pending database migrations (currently v1→v3)
+2. **Stale repo cleanup** — Checks all local repos (`source_type = "local"`) and removes index data for any whose `source_path` directory no longer exists on disk
+3. **Orphaned directory cleanup** — Removes content directories under `~/.code-index/` that don't correspond to any indexed repository
+4. **Watch restoration** — Restores file watches from the previous session
 
 ---
 

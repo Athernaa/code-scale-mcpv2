@@ -14,6 +14,7 @@ type GetSymbolArgs struct {
 	SymbolID     string `json:"symbol_id" jsonschema:"Symbol ID (e.g. src/main.py::authenticate#function)"`
 	Verify       bool   `json:"verify,omitempty" jsonschema:"Verify content hash for drift detection"`
 	ContextLines int    `json:"context_lines,omitempty" jsonschema:"Lines of context before/after symbol"`
+	MaxLength    int    `json:"max_length,omitempty" jsonschema:"Max bytes for source (0=unlimited). Applies 60/40 head/tail truncation."`
 }
 
 func GetSymbolHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, GetSymbolArgs) (*mcp.CallToolResult, any, error) {
@@ -67,6 +68,12 @@ func GetSymbolHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, Ge
 			}
 		}
 
+		// Smart truncation
+		var truncated bool
+		if args.MaxLength > 0 {
+			source, truncated = smartTruncateSource(source, args.MaxLength)
+		}
+
 		// Verify content hash
 		var verified *bool
 		if args.Verify {
@@ -102,6 +109,7 @@ func GetSymbolHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, Ge
 		result["_meta"] = Meta{
 			TimingMs:    t.elapsedMs(),
 			Repo:        args.Repo,
+			Truncated:   truncated,
 			TokensSaved: saved,
 			TotalSaved:  total,
 			CostAvoided: storage.CostAvoided(saved),

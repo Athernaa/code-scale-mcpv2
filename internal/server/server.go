@@ -2,6 +2,7 @@ package server
 
 import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/syphon1c/code-scale-mcp/internal/ratelimit"
 	"github.com/syphon1c/code-scale-mcp/internal/storage"
 	"github.com/syphon1c/code-scale-mcp/internal/tools"
 	"github.com/syphon1c/code-scale-mcp/internal/watcher"
@@ -21,9 +22,10 @@ func NewCodeScaleServer(store *storage.IndexStore) (*mcp.Server, *watcher.Manage
 	watchMgr := watcher.NewManager(store)
 
 	deps := &tools.Deps{
-		Store:   store,
-		Tracker: storage.NewTokenTracker(store.DB()),
-		Watcher: watchMgr,
+		Store:    store,
+		Tracker:  storage.NewTokenTracker(store.DB()),
+		Watcher:  watchMgr,
+		Throttle: ratelimit.NewThrottler(),
 	}
 
 	// Register all 14 tools
@@ -69,8 +71,13 @@ func NewCodeScaleServer(store *storage.IndexStore) (*mcp.Server, *watcher.Manage
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search_text",
-		Description: "Full-text search across all indexed file contents.",
+		Description: "Full-text search across all indexed file contents. Use context_lines for snippet windows around matches.",
 	}, tools.SearchTextHandler(deps))
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "batch_execute",
+		Description: "Execute multiple operations in a single call. Supports: get_symbol, get_symbols, search_symbols, search_text, get_file_outline, get_file_tree, get_repo_outline. Max 10 operations.",
+	}, tools.BatchExecuteHandler(deps))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_repo_outline",

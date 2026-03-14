@@ -1,4 +1,4 @@
-.PHONY: build test lint fmt clean release
+.PHONY: build test lint fmt clean release eval
 
 BINARY=code-scale-mcp
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -19,6 +19,9 @@ fmt:
 lint:
 	@which golangci-lint > /dev/null 2>&1 || echo "Install golangci-lint: https://golangci-lint.run/usage/install/"
 	golangci-lint run ./...
+
+eval:
+	go test ./internal/eval/... -v -count=1 -run TestEval
 
 clean:
 	rm -rf bin/ dist/

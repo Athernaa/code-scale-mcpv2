@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/syphon1c/code-scale-mcp/internal/parser"
+	"github.com/syphon1c/code-scale-mcp/internal/search"
 	"github.com/syphon1c/code-scale-mcp/internal/security"
+	"github.com/syphon1c/code-scale-mcp/internal/snippet"
 	_ "modernc.org/sqlite"
 )
 
@@ -104,6 +106,14 @@ func (s *IndexStore) migrate() error {
 			return fmt.Errorf("migrate v2: %w", err)
 		}
 	}
+	if currentVersion < 3 {
+		if _, err := s.db.Exec(MigrateV3SQL); err != nil {
+			// Column may already exist from a partial migration
+			if !strings.Contains(err.Error(), "duplicate column") {
+				return fmt.Errorf("migrate v3: %w", err)
+			}
+		}
+	}
 
 	// Upsert schema version
 	_, err = s.db.Exec("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", CurrentSchemaVersion)
@@ -159,6 +169,7 @@ func (s *IndexStore) SaveIndex(
 	files map[string]string, // path -> content_hash
 	fileLanguages map[string]string, // path -> language
 	symbols []parser.Symbol,
+	sourcePaths ...string, // optional: original source path for local repos
 ) error {
 	if !security.SafeRepoComponent(owner) || !security.SafeRepoComponent(name) {
 		return fmt.Errorf("invalid repository component: owner=%q name=%q", owner, name)
@@ -176,13 +187,19 @@ func (s *IndexStore) SaveIndex(
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Resolve optional source path
+	sourcePath := ""
+	if len(sourcePaths) > 0 {
+		sourcePath = sourcePaths[0]
+	}
+
 	// Upsert repo
 	var repoID int64
 	err = tx.QueryRow("SELECT id FROM repos WHERE repo = ?", repo).Scan(&repoID)
 	if err == sql.ErrNoRows {
 		res, err := tx.Exec(
-			"INSERT INTO repos (owner, name, repo, indexed_at, git_head, source_type) VALUES (?, ?, ?, ?, ?, ?)",
-			owner, name, repo, now, gitHead, sourceType,
+			"INSERT INTO repos (owner, name, repo, indexed_at, git_head, source_type, source_path) VALUES (?, ?, ?, ?, ?, ?, ?)",
+			owner, name, repo, now, gitHead, sourceType, sourcePath,
 		)
 		if err != nil {
 			return err
@@ -201,7 +218,7 @@ func (s *IndexStore) SaveIndex(
 		if _, err := tx.Exec("DELETE FROM files WHERE repo_id = ?", repoID); err != nil {
 			return err
 		}
-		if _, err := tx.Exec("UPDATE repos SET indexed_at = ?, git_head = ?, source_type = ? WHERE id = ?", now, gitHead, sourceType, repoID); err != nil {
+		if _, err := tx.Exec("UPDATE repos SET indexed_at = ?, git_head = ?, source_type = ?, source_path = ? WHERE id = ?", now, gitHead, sourceType, sourcePath, repoID); err != nil {
 			return err
 		}
 	}
@@ -423,12 +440,168 @@ func (s *IndexStore) GetSymbolByID(repoID int64, symbolID string) (*parser.Symbo
 	return &symbols[0], nil
 }
 
-// SearchSymbols searches for symbols using weighted scoring.
+// MatchTier indicates which search layer produced a result.
+type MatchTier string
+
+const (
+	MatchTierFTS5      MatchTier = "fts5"
+	MatchTierSubstring MatchTier = "substring"
+	MatchTierFuzzy     MatchTier = "fuzzy"
+)
+
+// ScoredSymbol wraps a symbol with its score and match tier.
+type ScoredSymbol struct {
+	Symbol parser.Symbol
+	Score  float64
+	Tier   MatchTier
+}
+
+// SearchSymbols searches for symbols using a 3-layer fallback: FTS5 BM25, substring, fuzzy.
 func (s *IndexStore) SearchSymbols(repoID int64, query string, kind string, language string, filePattern string, maxResults int) ([]parser.Symbol, []float64, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// Get all symbols for the repo (or filtered by kind/language)
+	scored, err := s.searchSymbolsLayered(repoID, query, kind, language, filePattern, maxResults)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var syms []parser.Symbol
+	var scores []float64
+	for _, r := range scored {
+		syms = append(syms, r.Symbol)
+		scores = append(scores, r.Score)
+	}
+	return syms, scores, nil
+}
+
+// SearchSymbolsWithTier is like SearchSymbols but also returns the match tier per result.
+func (s *IndexStore) SearchSymbolsWithTier(repoID int64, query string, kind string, language string, filePattern string, maxResults int) ([]ScoredSymbol, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.searchSymbolsLayered(repoID, query, kind, language, filePattern, maxResults)
+}
+
+func (s *IndexStore) searchSymbolsLayered(repoID int64, query string, kind string, language string, filePattern string, maxResults int) ([]ScoredSymbol, error) {
+	seen := make(map[string]bool)
+	var results []ScoredSymbol
+
+	// Layer 1: FTS5 BM25 search
+	ftsResults, err := s.searchFTS5(repoID, query, kind, language, filePattern, maxResults)
+	if err == nil {
+		for _, r := range ftsResults {
+			if !seen[r.Symbol.ID] {
+				seen[r.Symbol.ID] = true
+				results = append(results, r)
+			}
+		}
+	}
+
+	// Layer 2: Substring scoring (fills remaining slots)
+	if len(results) < maxResults {
+		subResults, err := s.searchSubstring(repoID, query, kind, language, filePattern, maxResults-len(results))
+		if err == nil {
+			for _, r := range subResults {
+				if !seen[r.Symbol.ID] {
+					seen[r.Symbol.ID] = true
+					results = append(results, r)
+				}
+			}
+		}
+	}
+
+	// Layer 3: Fuzzy matching (fills remaining slots)
+	if len(results) < maxResults {
+		fuzzyResults, err := s.searchFuzzy(repoID, query, kind, language, filePattern, maxResults-len(results))
+		if err == nil {
+			for _, r := range fuzzyResults {
+				if !seen[r.Symbol.ID] {
+					seen[r.Symbol.ID] = true
+					results = append(results, r)
+				}
+			}
+		}
+	}
+
+	return results, nil
+}
+
+// searchFTS5 queries the FTS5 index with BM25 ranking.
+func (s *IndexStore) searchFTS5(repoID int64, query string, kind string, language string, filePattern string, limit int) ([]ScoredSymbol, error) {
+	// Sanitize query for FTS5 MATCH syntax: escape special chars, quote terms
+	ftsQuery := sanitizeFTS5Query(query)
+	if ftsQuery == "" {
+		return nil, nil
+	}
+
+	// BM25 weights: name=10, qualified_name=5, signature=3, summary=2, docstring=1
+	sqlQuery := `
+		SELECT s.*, bm25(symbols_fts, 10, 5, 3, 2, 1) as rank
+		FROM symbols_fts f
+		JOIN symbols s ON f.rowid = s.id
+		WHERE symbols_fts MATCH ? AND s.repo_id = ?`
+	args := []any{ftsQuery, repoID}
+
+	if kind != "" {
+		sqlQuery += " AND s.kind = ?"
+		args = append(args, strings.ToLower(kind))
+	}
+	if language != "" {
+		sqlQuery += " AND s.language = ?"
+		args = append(args, strings.ToLower(language))
+	}
+
+	sqlQuery += " ORDER BY rank LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.db.Query(sqlQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var results []ScoredSymbol
+	for rows.Next() {
+		var sym parser.Symbol
+		var id, rid, fileID int64
+		var decorJSON, kwJSON string
+		var rank float64
+
+		err := rows.Scan(
+			&id, &rid, &fileID,
+			&sym.ID, &sym.File, &sym.Name, &sym.QualifiedName,
+			&sym.Kind, &sym.Language, &sym.Signature, &sym.ContentHash,
+			&sym.Docstring, &sym.Summary, &decorJSON, &kwJSON,
+			&sym.Parent, &sym.Line, &sym.EndLine, &sym.ByteOffset, &sym.ByteLength,
+			&rank,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		_ = json.Unmarshal([]byte(decorJSON), &sym.Decorators)
+		_ = json.Unmarshal([]byte(kwJSON), &sym.Keywords)
+		if sym.Decorators == nil {
+			sym.Decorators = []string{}
+		}
+		if sym.Keywords == nil {
+			sym.Keywords = []string{}
+		}
+
+		// Apply file pattern filter
+		if filePattern != "" && !matchFilePattern(sym.File, filePattern) {
+			continue
+		}
+
+		// BM25 returns negative scores (lower = better), normalize to positive
+		results = append(results, ScoredSymbol{Symbol: sym, Score: -rank, Tier: MatchTierFTS5})
+	}
+
+	return results, rows.Err()
+}
+
+// searchSubstring uses the existing in-memory substring scoring.
+func (s *IndexStore) searchSubstring(repoID int64, query string, kind string, language string, filePattern string, limit int) ([]ScoredSymbol, error) {
 	where := "repo_id = ?"
 	args := []any{repoID}
 	if kind != "" {
@@ -442,30 +615,19 @@ func (s *IndexStore) SearchSymbols(repoID int64, query string, kind string, lang
 
 	symbols, err := s.querySymbols("SELECT * FROM symbols WHERE "+where, args...)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	// Apply file pattern filter
 	if filePattern != "" {
 		var filtered []parser.Symbol
 		for _, sym := range symbols {
-			matched, err := filepath.Match(filePattern, sym.File)
-			if err != nil {
-				return nil, nil, fmt.Errorf("invalid file pattern %q: %w", filePattern, err)
-			}
-			if matched {
-				filtered = append(filtered, sym)
-				continue
-			}
-			matched, _ = filepath.Match(filePattern, filepath.Base(sym.File))
-			if matched {
+			if matchFilePattern(sym.File, filePattern) {
 				filtered = append(filtered, sym)
 			}
 		}
 		symbols = filtered
 	}
 
-	// Score symbols
 	queryLower := strings.ToLower(query)
 	queryWords := strings.Fields(queryLower)
 
@@ -482,23 +644,118 @@ func (s *IndexStore) SearchSymbols(repoID int64, query string, kind string, lang
 		}
 	}
 
-	// Sort by score descending
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].score > results[j].score
 	})
 
-	// Limit results
-	if len(results) > maxResults {
-		results = results[:maxResults]
+	if len(results) > limit {
+		results = results[:limit]
 	}
 
-	var syms []parser.Symbol
-	var scores []float64
+	var out []ScoredSymbol
 	for _, r := range results {
-		syms = append(syms, r.symbol)
-		scores = append(scores, r.score)
+		out = append(out, ScoredSymbol{Symbol: r.symbol, Score: r.score, Tier: MatchTierSubstring})
 	}
-	return syms, scores, nil
+	return out, nil
+}
+
+// searchFuzzy uses Levenshtein distance on symbol names.
+func (s *IndexStore) searchFuzzy(repoID int64, query string, kind string, language string, filePattern string, limit int) ([]ScoredSymbol, error) {
+	where := "repo_id = ?"
+	args := []any{repoID}
+	if kind != "" {
+		where += " AND kind = ?"
+		args = append(args, strings.ToLower(kind))
+	}
+	if language != "" {
+		where += " AND language = ?"
+		args = append(args, strings.ToLower(language))
+	}
+
+	symbols, err := s.querySymbols("SELECT * FROM symbols WHERE "+where, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	if filePattern != "" {
+		var filtered []parser.Symbol
+		for _, sym := range symbols {
+			if matchFilePattern(sym.File, filePattern) {
+				filtered = append(filtered, sym)
+			}
+		}
+		symbols = filtered
+	}
+
+	queryLower := strings.ToLower(query)
+	threshold := search.FuzzyThreshold(len(queryLower))
+
+	type scored struct {
+		symbol   parser.Symbol
+		distance int
+	}
+	var results []scored
+
+	for _, sym := range symbols {
+		nameLower := strings.ToLower(sym.Name)
+		dist := search.LevenshteinDistance(queryLower, nameLower)
+		if dist <= threshold {
+			results = append(results, scored{sym, dist})
+		}
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].distance < results[j].distance
+	})
+
+	if len(results) > limit {
+		results = results[:limit]
+	}
+
+	var out []ScoredSymbol
+	for _, r := range results {
+		// Convert distance to a score (lower distance = higher score)
+		score := float64(threshold-r.distance+1) / float64(threshold+1) * 5
+		out = append(out, ScoredSymbol{Symbol: r.symbol, Score: score, Tier: MatchTierFuzzy})
+	}
+	return out, nil
+}
+
+// sanitizeFTS5Query escapes special FTS5 characters and formats as a valid MATCH query.
+func sanitizeFTS5Query(query string) string {
+	// Split into words and quote each to avoid FTS5 syntax errors
+	words := strings.Fields(query)
+	if len(words) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, w := range words {
+		// Remove FTS5 special chars
+		clean := strings.NewReplacer(
+			"\"", "", "*", "", "(", "", ")", "",
+			":", "", "^", "", "{", "", "}", "",
+		).Replace(w)
+		if clean != "" {
+			parts = append(parts, "\""+clean+"\"")
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " OR ")
+}
+
+// matchFilePattern checks if a file path matches a glob pattern.
+func matchFilePattern(filePath string, pattern string) bool {
+	matched, err := filepath.Match(pattern, filePath)
+	if err != nil {
+		return false
+	}
+	if matched {
+		return true
+	}
+	matched, _ = filepath.Match(pattern, filepath.Base(filePath))
+	return matched
 }
 
 // scoreSymbol computes weighted relevance score for a symbol against a query.
@@ -562,7 +819,8 @@ func scoreSymbol(sym parser.Symbol, queryLower string, queryWords []string) floa
 }
 
 // SearchText performs full-text search across cached file contents.
-func (s *IndexStore) SearchText(repoID int64, query string, filePattern string, maxResults int) ([]TextSearchResult, error) {
+// When contextLines > 0, returns consolidated snippet windows instead of individual lines.
+func (s *IndexStore) SearchText(repoID int64, query string, filePattern string, maxResults int, contextLines int) ([]TextSearchResult, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -581,38 +839,64 @@ func (s *IndexStore) SearchText(repoID int64, query string, filePattern string, 
 		return nil, err
 	}
 
-	queryLower := strings.ToLower(query)
 	var results []TextSearchResult
 
-	for _, f := range files {
-		if filePattern != "" {
-			matched1, _ := filepath.Match(filePattern, f.Path)
-			matched2, _ := filepath.Match(filePattern, filepath.Base(f.Path))
-			if !matched1 && !matched2 {
+	if contextLines > 0 {
+		// Snippet mode: return merged context windows
+		for _, f := range files {
+			if filePattern != "" && !matchFilePattern(f.Path, filePattern) {
 				continue
 			}
-		}
 
-		contentPath := filepath.Join(contentDir, f.Path)
-		data, err := os.ReadFile(contentPath)
-		if err != nil {
-			continue
-		}
+			contentPath := filepath.Join(contentDir, f.Path)
+			data, err := os.ReadFile(contentPath)
+			if err != nil {
+				continue
+			}
 
-		lines := strings.Split(string(data), "\n")
-		for i, line := range lines {
-			if strings.Contains(strings.ToLower(line), queryLower) {
-				text := strings.TrimSpace(line)
-				if len(text) > 200 {
-					text = text[:200]
-				}
+			snippets := snippet.ExtractSnippets(string(data), f.Path, query, contextLines, maxResults-len(results))
+			for _, s := range snippets {
 				results = append(results, TextSearchResult{
-					File: f.Path,
-					Line: i + 1,
-					Text: text,
+					File:      s.File,
+					Line:      s.MatchLine,
+					StartLine: s.StartLine,
+					EndLine:   s.EndLine,
+					Text:      s.Text,
 				})
 				if len(results) >= maxResults {
 					return results, nil
+				}
+			}
+		}
+	} else {
+		// Legacy mode: individual matching lines
+		queryLower := strings.ToLower(query)
+		for _, f := range files {
+			if filePattern != "" && !matchFilePattern(f.Path, filePattern) {
+				continue
+			}
+
+			contentPath := filepath.Join(contentDir, f.Path)
+			data, err := os.ReadFile(contentPath)
+			if err != nil {
+				continue
+			}
+
+			lines := strings.Split(string(data), "\n")
+			for i, line := range lines {
+				if strings.Contains(strings.ToLower(line), queryLower) {
+					text := strings.TrimSpace(line)
+					if len(text) > 200 {
+						text = text[:200]
+					}
+					results = append(results, TextSearchResult{
+						File: f.Path,
+						Line: i + 1,
+						Text: text,
+					})
+					if len(results) >= maxResults {
+						return results, nil
+					}
 				}
 			}
 		}
@@ -623,9 +907,11 @@ func (s *IndexStore) SearchText(repoID int64, query string, filePattern string, 
 
 // TextSearchResult represents a text search match.
 type TextSearchResult struct {
-	File string `json:"file"`
-	Line int    `json:"line"`
-	Text string `json:"text"`
+	File      string `json:"file"`
+	Line      int    `json:"line"`
+	StartLine int    `json:"start_line,omitempty"`
+	EndLine   int    `json:"end_line,omitempty"`
+	Text      string `json:"text"`
 }
 
 // GetSymbolContent reads the raw source for a symbol using byte-offset seeking.
@@ -961,4 +1247,110 @@ func (s *IndexStore) GetAllSymbols(repoID int64) ([]parser.Symbol, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.querySymbols("SELECT * FROM symbols WHERE repo_id = ? ORDER BY file_path, line", repoID)
+}
+
+// CleanupStale removes indexed data for local repos whose source directories no longer exist,
+// and orphaned content directories that don't correspond to any indexed repo.
+func (s *IndexStore) CleanupStale() (removedRepos []string, removedDirs []string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Phase 1: Remove repos with stale source paths
+	rows, err := s.db.Query("SELECT id, repo, owner, name, source_type, source_path FROM repos")
+	if err != nil {
+		return nil, nil, fmt.Errorf("query repos: %w", err)
+	}
+
+	type repoRecord struct {
+		id         int64
+		repo       string
+		owner      string
+		name       string
+		sourceType string
+		sourcePath string
+	}
+	var repos []repoRecord
+	for rows.Next() {
+		var r repoRecord
+		if err := rows.Scan(&r.id, &r.repo, &r.owner, &r.name, &r.sourceType, &r.sourcePath); err != nil {
+			_ = rows.Close()
+			return nil, nil, err
+		}
+		repos = append(repos, r)
+	}
+	_ = rows.Close()
+
+	// Track valid content dirs
+	validDirs := make(map[string]bool)
+
+	for _, r := range repos {
+		validDirs[r.owner+"-"+r.name] = true
+
+		// Only check local repos with a recorded source path
+		if r.sourceType != "local" || r.sourcePath == "" {
+			continue
+		}
+
+		if _, statErr := os.Stat(r.sourcePath); os.IsNotExist(statErr) {
+			// Source directory gone — clean up
+			if delErr := s.deleteRepoLocked(r.id, r.owner, r.name); delErr == nil {
+				removedRepos = append(removedRepos, r.repo)
+				delete(validDirs, r.owner+"-"+r.name)
+			}
+		}
+	}
+
+	// Phase 2: Remove orphaned content directories
+	entries, err := os.ReadDir(s.basePath)
+	if err != nil {
+		return removedRepos, nil, nil // Non-fatal
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		// Skip known non-content dirs and the database file
+		if name == "." || name == ".." || strings.HasSuffix(name, ".db") || strings.HasSuffix(name, "-journal") || strings.HasSuffix(name, "-wal") || strings.HasSuffix(name, "-shm") {
+			continue
+		}
+		if !validDirs[name] {
+			dirPath := filepath.Join(s.basePath, name)
+			if rmErr := os.RemoveAll(dirPath); rmErr == nil {
+				removedDirs = append(removedDirs, name)
+			}
+		}
+	}
+
+	return removedRepos, removedDirs, nil
+}
+
+// deleteRepoLocked removes a repo and its data. Caller must hold s.mu write lock.
+func (s *IndexStore) deleteRepoLocked(repoID int64, owner, name string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.Exec("DELETE FROM symbols WHERE repo_id = ?", repoID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("DELETE FROM files WHERE repo_id = ?", repoID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("DELETE FROM repos WHERE id = ?", repoID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("INSERT INTO symbols_fts(symbols_fts) VALUES('rebuild')"); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	contentDir := filepath.Join(s.basePath, owner+"-"+name)
+	_ = os.RemoveAll(contentDir)
+	return nil
 }

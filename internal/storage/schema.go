@@ -78,5 +78,10 @@ CREATE TABLE IF NOT EXISTS watches (
 );
 `
 
+// MigrateV3SQL adds source_path to repos for stale cleanup tracking.
+const MigrateV3SQL = `
+ALTER TABLE repos ADD COLUMN source_path TEXT DEFAULT '';
+`
+
 // CurrentSchemaVersion is the current schema version.
-const CurrentSchemaVersion = 2
+const CurrentSchemaVersion = 3

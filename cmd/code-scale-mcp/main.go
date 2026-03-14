@@ -36,6 +36,18 @@ func main() {
 	}
 	defer func() { _ = store.Close() }()
 
+	// Cleanup stale repos and orphaned content directories
+	removedRepos, removedDirs, cleanupErr := store.CleanupStale()
+	if cleanupErr != nil {
+		log.Printf("Warning: stale cleanup error: %v", cleanupErr)
+	}
+	if len(removedRepos) > 0 {
+		log.Printf("Cleaned up %d stale repos: %s", len(removedRepos), strings.Join(removedRepos, ", "))
+	}
+	if len(removedDirs) > 0 {
+		log.Printf("Cleaned up %d orphaned dirs: %s", len(removedDirs), strings.Join(removedDirs, ", "))
+	}
+
 	srv, watchMgr := server.NewCodeScaleServer(store)
 	defer watchMgr.Close()
 

@@ -89,12 +89,15 @@ Symbol IDs from `search_symbols`, `get_file_outline`, and `get_repo_outline` can
 - **get_repo_outline**: High-level repo overview — directory file counts, language breakdown, symbol kind distribution. Args: `repo` (required)
 
 ### Retrieval
-- **get_symbol**: Get one symbol's source. Args: `repo`, `symbol_id` (required), `context_lines` (optional — include N surrounding lines), `verify` (optional — re-hash to detect source drift since indexing)
+- **get_symbol**: Get one symbol's source. Args: `repo`, `symbol_id` (required), `context_lines` (optional — include N surrounding lines), `verify` (optional — re-hash to detect source drift since indexing), `max_length` (optional — smart 60/40 head/tail truncation for large symbols)
 - **get_symbols**: Batch get up to 100 symbols. Args: `repo`, `symbol_ids` (required array). More efficient than multiple `get_symbol` calls.
 
 ### Search
-- **search_symbols**: Search by name/signature with weighted scoring. Args: `repo`, `query` (required), `kind` (optional: function/class/method/constant/type), `language`, `file_pattern`, `max_results` (optional, default 10, max 200)
-- **search_text**: Full-text search across file contents. Args: `repo`, `query` (required), `file_pattern`, `max_results` (optional, default 20, max 200)
+- **search_symbols**: 3-layer search: FTS5 BM25 → substring → fuzzy Levenshtein. Args: `repo`, `query` (required), `kind` (optional: function/class/method/constant/type), `language`, `file_pattern`, `max_results` (optional, default 10, max 200). Results include `match_tier` (fts5/substring/fuzzy).
+- **search_text**: Full-text search with optional snippet context. Args: `repo`, `query` (required), `file_pattern`, `max_results` (optional, default 20, max 200), `context_lines` (optional, 0=single lines, 1-10=merged snippet windows)
+
+### Batch
+- **batch_execute**: Execute up to 10 operations in one call. Args: `operations` (array of `{tool, args}`). Supports: get_symbol, get_symbols, search_symbols, search_text, get_file_outline, get_file_tree, get_repo_outline. Operations run concurrently.
 
 ### Management
 - **invalidate_cache**: Delete a repo's index. Args: `repo` (required)
@@ -108,8 +111,11 @@ Python, JavaScript, TypeScript, Go, Rust, Java, PHP, C, C++, Ruby, Kotlin, Swift
 
 ## Tips
 
-- Use `search_symbols` with `kind: "function"` to filter by symbol type
+- Use `search_symbols` with `kind: "function"` to filter by symbol type — fuzzy matching catches typos automatically
+- Use `batch_execute` to combine search + retrieval into a single MCP call — reduces round-trips
 - Use `get_symbols` for batch retrieval — one call for many symbols
+- Use `search_text` with `context_lines: 3` for contextual snippet windows instead of isolated lines
+- Use `max_length` on `get_symbol` to truncate very large symbols (preserves head and tail)
 - Set `use_ai_summaries: true` when indexing for richer one-line summaries (requires ANTHROPIC_API_KEY or GEMINI_API_KEY)
 - Watch active development folders with `watch_folder` to keep the index fresh
 - Use `context_lines` on `get_symbol` when you need to see code around a function (e.g., imports, nearby constants)

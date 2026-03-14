@@ -167,6 +167,28 @@ search_text: { "repo": "owner/repo", "query": "TODO", "file_pattern": "*.py" }
 
 Use `search_text` for string literals, comments, configuration values, or anything that is not a symbol name.
 
+For contextual snippets instead of isolated lines, add `context_lines`:
+
+```
+search_text: { "repo": "owner/repo", "query": "TODO", "context_lines": 3 }
+```
+
+This returns merged snippet windows with ±3 lines of context around each match, reducing token usage while providing meaningful context.
+
+### Batch Multiple Operations
+
+```
+batch_execute: {
+  "operations": [
+    { "tool": "search_symbols", "args": { "repo": "owner/repo", "query": "auth" } },
+    { "tool": "get_symbol", "args": { "repo": "owner/repo", "symbol_id": "src/auth.py::login#function" } },
+    { "tool": "get_file_outline", "args": { "repo": "owner/repo", "file_path": "src/auth.py" } }
+  ]
+}
+```
+
+Execute up to 10 operations in a single MCP call. All operations run concurrently. Supports: `get_symbol`, `get_symbols`, `search_symbols`, `search_text`, `get_file_outline`, `get_file_tree`, `get_repo_outline`.
+
 ### Watch a Folder for Changes
 
 ```
@@ -195,10 +217,11 @@ index_repo:       { "url": "owner/repo" }
 | `list_repos`       | List all indexed repositories | —                                                                  |
 | `get_file_tree`    | Browse file structure         | `repo`, `path_prefix`                                              |
 | `get_file_outline` | Symbols in a file             | `repo`, `file_path`, `flat`                                        |
-| `get_symbol`       | Full source of one symbol     | `repo`, `symbol_id`, `verify`, `context_lines`                     |
+| `get_symbol`       | Full source of one symbol     | `repo`, `symbol_id`, `verify`, `context_lines`, `max_length`      |
 | `get_symbols`      | Batch retrieve symbols        | `repo`, `symbol_ids`                                               |
-| `search_symbols`   | Search symbols                | `repo`, `query`, `kind`, `language`, `file_pattern`, `max_results` |
-| `search_text`      | Full-text search              | `repo`, `query`, `file_pattern`, `max_results`                     |
+| `search_symbols`   | Search symbols (FTS5+fuzzy)   | `repo`, `query`, `kind`, `language`, `file_pattern`, `max_results` |
+| `search_text`      | Full-text search with snippets| `repo`, `query`, `file_pattern`, `max_results`, `context_lines`    |
+| `batch_execute`    | Multi-operation batch call    | `operations` (array of `{tool, args}`, max 10)                     |
 | `get_repo_outline` | High-level overview           | `repo`                                                             |
 | `invalidate_cache` | Delete cached index           | `repo`                                                             |
 | `watch_folder`     | Watch folder for changes      | `path`                                                             |
@@ -304,7 +327,10 @@ Raw source files are cached on the filesystem for byte-offset retrieval:
 2. **Use `get_file_outline` before reading source** to understand the API surface first — it's much cheaper than reading the whole file.
 3. **Narrow searches** using `kind`, `language`, and `file_pattern` filters.
 4. **Batch-retrieve** related symbols with `get_symbols` instead of repeated `get_symbol` calls.
-5. **Use `search_text`** when symbol search does not locate the needed content (string literals, comments, config).
-6. **Use `verify: true`** on `get_symbol` to detect source drift since indexing.
-7. **Use `watch_folder`** on active projects to keep the index up to date automatically.
-8. **Use `context_lines`** on `get_symbol` to see surrounding code without reading the full file.
+5. **Use `batch_execute`** to combine search + retrieval into a single MCP call — reduces round-trips and context overhead.
+6. **Use `search_text` with `context_lines`** for contextual snippet windows instead of isolated lines — more useful, fewer tokens.
+7. **Use `max_length`** on `get_symbol` to truncate very large symbols (60% head / 40% tail, preserving the end where errors appear).
+8. **Fuzzy search works** — `search_symbols` catches typos like "authenticat" → "authenticate" via Levenshtein matching.
+9. **Use `verify: true`** on `get_symbol` to detect source drift since indexing.
+10. **Use `watch_folder`** on active projects to keep the index up to date automatically.
+11. **Use `context_lines`** on `get_symbol` to see surrounding code without reading the full file.

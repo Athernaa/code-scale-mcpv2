@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/syphon1c/code-scale-mcp/internal/ratelimit"
 	"github.com/syphon1c/code-scale-mcp/internal/storage"
+	"github.com/syphon1c/code-scale-mcp/internal/truncate"
 	"github.com/syphon1c/code-scale-mcp/internal/watcher"
 )
 
@@ -34,9 +36,10 @@ type Response struct {
 
 // Deps holds shared dependencies for tools.
 type Deps struct {
-	Store   *storage.IndexStore
-	Tracker *storage.TokenTracker
-	Watcher *watcher.Manager
+	Store    *storage.IndexStore
+	Tracker  *storage.TokenTracker
+	Watcher  *watcher.Manager
+	Throttle *ratelimit.Throttler
 }
 
 // toTextResult converts any value to an MCP CallToolResult with JSON TextContent.
@@ -100,4 +103,13 @@ func clampResults(n, defaultVal, max int) int {
 		return max
 	}
 	return n
+}
+
+// smartTruncateSource applies smart truncation to source code if maxLength > 0.
+// Returns the (possibly truncated) source and whether truncation was applied.
+func smartTruncateSource(source string, maxLength int) (string, bool) {
+	if maxLength <= 0 {
+		return source, false
+	}
+	return truncate.SmartTruncate(source, maxLength)
 }
