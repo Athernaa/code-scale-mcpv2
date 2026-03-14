@@ -16,20 +16,19 @@ AI coding agents (like Claude Code) are token-hungry when navigating codebases. 
 ## The Solution
 code-scale-mcp is an MCP server that indexes codebases at the symbol level using tree-sitter AST parsing. Instead of reading whole files, agents can:
 
-- ***Index once :*** parse the entire codebase into a SQLite database of individual symbols (functions, classes, methods, constants)
-- ***Search precisely :*** find symbols by name, type, or full-text content
-- ***Retrieve surgically :*** fetch just the one function they need, with byte-level precision
+- ***Index once:*** parse the entire codebase into a SQLite database of individual symbols (functions, classes, methods, constants)
+- ***Search precisely:*** find symbols by name, type, or full-text content with 3-layer search (BM25 → substring → fuzzy)
+- ***Retrieve surgically:*** fetch just the one function they need, with byte-level precision
 
 ***The result:*** up to 99% token reduction per retrieval, without losing any code comprehension quality. The agent gets exactly the code it needs, nothing more.
 
-Key Design Choices
-- ***Go single binary :*** no Python/pip dependency chain, millisecond startup, true multi-core parallelism
+## Key Design Choices
+- ***Go single binary:*** no Python/pip dependency chain, millisecond startup, true multi-core parallelism
 - 13 languages supported via tree-sitter grammars
-- ***File watching :*** auto-reindexes as you edit, keeping the index fresh
-- ***Token savings tracking :*** every response reports how many tokens were saved and cost avoided
+- ***File watching:*** auto-reindexes as you edit, keeping the index fresh
+- ***Token savings tracking:*** every response reports how many tokens were saved and cost avoided
 
-***In short:*** it turns "read the whole file to find one function" into "fetch exactly that function"m making AI coding agents faster, cheaper, and more effective at scale.
-
+***In short:*** it turns "read the whole file to find one function" into "fetch exactly that function", making AI coding agents faster, cheaper, and more effective at scale.
 
 ## Features
 
@@ -137,8 +136,10 @@ Once indexed, use symbol-level retrieval instead of reading entire files:
 ```
 get_repo_outline  → high-level structure (dirs, languages, symbol counts)
 get_file_outline  → all symbols in a file without reading the whole file
-search_symbols    → find functions/classes by name across the codebase
-get_symbol        → fetch just one function's source code (~50 tokens vs ~2,000 for the full file)
+search_symbols    → find functions/classes by name (FTS5 BM25 → substring → fuzzy)
+get_symbol        → fetch just one function's source code (~50 tokens vs ~2,000)
+search_text       → full-text search with contextual snippet windows
+batch_execute     → combine multiple operations into a single call
 ```
 
 Every response includes `_meta` with `tokens_saved`, `total_tokens_saved`, and `cost_avoided` so you can track the savings.
