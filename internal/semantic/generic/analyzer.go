@@ -47,6 +47,7 @@ type fileFacts struct {
 	references  []semantic.Entity
 	exports     map[string]struct{}
 	packageName string
+	bindings    *lexicalBindings
 }
 
 func (a *Analyzer) AnalyzeFile(ctx context.Context, input semantic.FileInput) (semantic.Result, error) {
@@ -172,6 +173,7 @@ func (f *fileFacts) addSymbols() {
 }
 
 func (f *fileFacts) analyzeJavaScript() {
+	f.bindings = collectJavaScriptBindings(f.root, f.input.Content)
 	exports := collectJavaScriptExports(f.root, f.input.Content)
 	for _, symbol := range f.codeSymbols {
 		if names := exportNamesForSymbol(symbol.Name, exports); len(names) > 0 {
@@ -263,12 +265,8 @@ func (f *fileFacts) addJavaScriptCall(node *sitter.Node) {
 	if className := containingClassName(node, f.input.Content); className != "" && receiver == "this" {
 		metadata["class_name"] = className
 	}
-	if hasShadowingParameter(node, name, f.input.Content) {
-		metadata["shadowed"] = true
-	}
-	if receiver != "" && receiver != "this" && hasShadowingParameter(node, receiver, f.input.Content) {
-		metadata["receiver_shadowed"] = true
-	}
+	f.annotateBinding(node, name, metadata)
+	f.annotateReceiver(node, receiver, metadata)
 	f.calls = append(f.calls, f.site(KindCallSite, name, int(node.StartPoint().Row)+1, node, metadata))
 	if name == "require" {
 		if args := node.ChildByFieldName("arguments"); args != nil {
@@ -286,7 +284,9 @@ func (f *fileFacts) addJavaScriptCall(node *sitter.Node) {
 			if child.Parent() != nil && child.Parent().Type() == "property_identifier" {
 				return
 			}
-			f.references = append(f.references, f.site(KindReferenceSite, nodeText(f.input.Content, child), int(child.StartPoint().Row)+1, child, map[string]any{"name": nodeText(f.input.Content, child), "language": f.input.Language}))
+			metadata := map[string]any{"name": nodeText(f.input.Content, child), "language": f.input.Language}
+			f.annotateBinding(child, nodeText(f.input.Content, child), metadata)
+			f.references = append(f.references, f.site(KindReferenceSite, nodeText(f.input.Content, child), int(child.StartPoint().Row)+1, child, metadata))
 		})
 	}
 }
@@ -308,10 +308,13 @@ func (f *fileFacts) addJSXReference(node *sitter.Node) {
 	if name == "" || strings.ContainsAny(name, ".:-") {
 		return
 	}
-	f.references = append(f.references, f.site(KindReferenceSite, name, int(node.StartPoint().Row)+1, node, map[string]any{"name": name, "jsx": true, "language": f.input.Language}))
+	metadata := map[string]any{"name": name, "jsx": true, "language": f.input.Language}
+	f.annotateBinding(node, name, metadata)
+	f.references = append(f.references, f.site(KindReferenceSite, name, int(node.StartPoint().Row)+1, node, metadata))
 }
 
 func (f *fileFacts) analyzeLua() {
+	f.bindings = collectLuaBindings(f.root, f.input.Content)
 	walk(f.root, func(node *sitter.Node) {
 		if node.Type() != "function_call" {
 			return
@@ -323,6 +326,11 @@ func (f *fileFacts) analyzeLua() {
 		}
 		receiver, member := luaCallee(name)
 		metadata := map[string]any{"callee": member, "receiver": receiver, "member": receiver != "", "language": "lua"}
+		if receiver == "" {
+			f.annotateBinding(node, member, metadata)
+		} else {
+			f.annotateReceiver(node, receiver, metadata)
+		}
 		f.calls = append(f.calls, f.site(KindCallSite, member, int(node.StartPoint().Row)+1, node, metadata))
 		if member == "require" {
 			if args := node.ChildByFieldName("args"); args != nil {
@@ -335,6 +343,7 @@ func (f *fileFacts) analyzeLua() {
 }
 
 func (f *fileFacts) analyzeGo() {
+	f.bindings = collectGoBindings(f.root, f.input.Content)
 	f.packageName = firstNodeText(f.root, "package_identifier", f.input.Content)
 	walk(f.root, func(node *sitter.Node) {
 		switch node.Type() {
@@ -353,7 +362,13 @@ func (f *fileFacts) analyzeGo() {
 			if receiver == "" {
 				receiver = ""
 			}
-			f.calls = append(f.calls, f.site(KindCallSite, name, int(node.StartPoint().Row)+1, node, map[string]any{"callee": member, "receiver": receiver, "member": member != name, "language": "go"}))
+			metadata := map[string]any{"callee": member, "receiver": receiver, "member": member != name, "language": "go"}
+			if receiver == "" {
+				f.annotateBinding(node, name, metadata)
+			} else {
+				f.annotateReceiver(node, receiver, metadata)
+			}
+			f.calls = append(f.calls, f.site(KindCallSite, name, int(node.StartPoint().Row)+1, node, metadata))
 		}
 	})
 }
@@ -537,26 +552,6 @@ func luaCallee(value string) (receiver, member string) {
 		return value[:dot], value[dot+1:]
 	}
 	return "", value
-}
-
-func hasShadowingParameter(node *sitter.Node, name string, source []byte) bool {
-	for current := node.Parent(); current != nil; current = current.Parent() {
-		if current.Type() != "function_declaration" && current.Type() != "function_expression" && current.Type() != "arrow_function" && current.Type() != "method_definition" {
-			continue
-		}
-		parameters := current.ChildByFieldName("parameters")
-		if parameters == nil {
-			return false
-		}
-		found := false
-		walk(parameters, func(child *sitter.Node) {
-			if nodeText(source, child) == name && (child.Type() == "identifier" || child.Type() == "required_parameter" || child.Type() == "pattern") {
-				found = true
-			}
-		})
-		return found
-	}
-	return false
 }
 
 func containingClassName(node *sitter.Node, source []byte) string {

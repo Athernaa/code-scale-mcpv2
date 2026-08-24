@@ -439,6 +439,14 @@ func (m *Manager) updateSemanticFile(repo, resource, filePath, language string, 
 		Content: content, Symbols: symbols, Side: side,
 	})
 	if err != nil {
+		clearErr := m.store.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerFiveM, filePath, nil)
+		refreshErr := m.refreshSemanticRelationships(repo)
+		if clearErr != nil {
+			return fmt.Errorf("fivem analysis failed: %v; clearing stale facts failed: %w", err, clearErr)
+		}
+		if refreshErr != nil {
+			return fmt.Errorf("fivem analysis failed: %v; refreshing relationships failed: %w", err, refreshErr)
+		}
 		return err
 	}
 	if err := m.store.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerFiveM, filePath, result.Entities); err != nil {
@@ -468,6 +476,14 @@ func (m *Manager) updateGenericFile(repo, filePath, language string, content []b
 		Repo: repo, File: filePath, Language: language, Content: content, Symbols: symbols,
 	})
 	if err != nil {
+		clearErr := m.store.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerGenericGraph, filePath, nil)
+		refreshErr := m.refreshGenericRelationships(repo)
+		if clearErr != nil {
+			return fmt.Errorf("generic analysis failed: %v; clearing stale facts failed: %w", err, clearErr)
+		}
+		if refreshErr != nil {
+			return fmt.Errorf("generic analysis failed: %v; refreshing relationships failed: %w", err, refreshErr)
+		}
 		return err
 	}
 	if err := m.store.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerGenericGraph, filePath, result.Entities); err != nil {
@@ -508,6 +524,9 @@ func (m *Manager) rebuildSemanticRepository(repoID int64, repo, resource string)
 	}
 	result, err := fivem.NewAnalyzer().AnalyzeRepository(context.Background(), input)
 	if err != nil {
+		if clearErr := m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, semantic.Result{}); clearErr != nil {
+			return fmt.Errorf("fivem repository analysis failed: %v; clearing stale facts failed: %w", err, clearErr)
+		}
 		return err
 	}
 	return m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, result)

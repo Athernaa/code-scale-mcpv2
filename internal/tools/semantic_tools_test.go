@@ -8,6 +8,7 @@ import (
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/fivem"
+	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/generic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -201,5 +202,124 @@ func TestGenericTraceBySymbolIDAndImpact(t *testing.T) {
 	counts := impact["counts"].(map[string]any)
 	if counts["direct"] != float64(1) || counts["transitive"] != float64(1) || counts["files"] != float64(2) {
 		t.Fatalf("impact traversal returned incorrect dependent counts: %#v", impact)
+	}
+}
+
+func TestAnalyzerFailureClearsOnlyFailedAnalyzer(t *testing.T) {
+	store, err := storage.NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	if err := store.ReplaceRepoIndex("local", "failure-safety", "local", "", map[string]string{"main.ts": "hash"}, map[string]string{"main.ts": "typescript"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	repo := "local/failure-safety"
+	repoID, err := store.GetRepoID(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fivemEntity := semantic.Entity{ID: "fivem-still-valid", Analyzer: semantic.AnalyzerFiveM, Repo: repo, File: "fxmanifest.lua", Kind: fivem.KindManifestResource, Name: "failure-safety", Framework: "fivem"}
+	genericEntity := semantic.Entity{ID: "generic-stale", Analyzer: semantic.AnalyzerGenericGraph, Repo: repo, File: "main.ts", Kind: "code_file", Name: "main.ts"}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, semantic.Result{Entities: []semantic.Entity{fivemEntity}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, semantic.Result{Entities: []semantic.Entity{genericEntity}}); err != nil {
+		t.Fatal(err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := indexGenericRepository(canceled, store, repo, map[string][]byte{"main.ts": []byte("export function changed() {}")}, map[string]string{"main.ts": "typescript"}, nil); err == nil {
+		t.Fatal("canceled generic analysis unexpectedly succeeded")
+	}
+	genericEntities, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerGenericGraph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(genericEntities) != 0 {
+		t.Fatalf("stale generic facts survived analyzer failure: %#v", genericEntities)
+	}
+	fivemEntities, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fivemEntities) != 1 || fivemEntities[0].ID != fivemEntity.ID {
+		t.Fatalf("generic failure damaged FiveM facts: %#v", fivemEntities)
+	}
+
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, semantic.Result{Entities: []semantic.Entity{genericEntity}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := indexSemanticRepository(canceled, store, repo, "failure-safety", "local", map[string][]byte{"fxmanifest.lua": []byte("fx_version 'cerulean'"), "client.lua": []byte("TriggerEvent('x')")}, map[string]string{"fxmanifest.lua": "lua", "client.lua": "lua"}, nil); err == nil {
+		t.Fatal("canceled FiveM analysis unexpectedly succeeded")
+	}
+	fivemEntities, err = store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fivemEntities) != 0 {
+		t.Fatalf("stale FiveM facts survived analyzer failure: %#v", fivemEntities)
+	}
+	genericEntities, err = store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerGenericGraph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(genericEntities) != 1 || genericEntities[0].ID != genericEntity.ID {
+		t.Fatalf("FiveM failure damaged generic facts: %#v", genericEntities)
+	}
+}
+
+func TestImpactIgnoresShadowedGenericReference(t *testing.T) {
+	store, err := storage.NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	files := map[string][]byte{
+		"save.ts": []byte(`export function save() {}`),
+		"run.ts": []byte(`import { save } from "./save"
+function run(save) { register(save) }`),
+	}
+	languages := map[string]string{"save.ts": "typescript", "run.ts": "typescript"}
+	symbols := make(map[string][]parser.Symbol)
+	for file, content := range files {
+		symbols[file], err = parser.ParseFile(content, file, languages[file])
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.ReplaceRepoIndex("local", "impact-shadow", "local", "", map[string]string{"save.ts": "a", "run.ts": "b"}, languages, symbols["save.ts"]); err != nil {
+		t.Fatal(err)
+	}
+	repo := "local/impact-shadow"
+	repoID, err := store.GetRepoID(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := generic.NewAnalyzer().AnalyzeRepository(context.Background(), semantic.RepositoryInput{Repo: repo, Files: files, Languages: languages, Symbols: symbols})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, result); err != nil {
+		t.Fatal(err)
+	}
+	save, ok := func() (semantic.Entity, bool) {
+		for _, entity := range result.Entities {
+			if entity.Kind == generic.KindCodeSymbol && entity.File == "save.ts" && entity.Name == "save" {
+				return entity, true
+			}
+		}
+		return semantic.Entity{}, false
+	}()
+	if !ok {
+		t.Fatal("save symbol missing")
+	}
+	response, _, err := AnalyzeImpactHandler(&Deps{Store: store})(context.Background(), nil, AnalyzeImpactArgs{Repo: repo, SymbolID: save.SymbolID, Depth: 2, MaxResults: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded := decodeToolJSON(t, response)
+	if len(decoded["direct_dependents"].([]any)) != 0 || len(decoded["transitive_dependents"].([]any)) != 0 {
+		t.Fatalf("impact graph was contaminated by a shadowed reference: %#v", decoded)
 	}
 }

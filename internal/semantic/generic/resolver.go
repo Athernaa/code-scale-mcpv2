@@ -31,7 +31,16 @@ func ResolveRelationships(entities []semantic.Entity) []semantic.Relationship {
 		}
 		switch entity.Kind {
 		case KindImportSite:
-			for _, target := range resolveImportFiles(entity, idx) {
+			targets := resolveImportFiles(entity, idx)
+			// A Go import denotes one package, which may contain several
+			// indexed files. Without a package entity, emitting one edge per
+			// file would violate import-site uniqueness, so keep only the
+			// deterministic single-file case. Call resolution still searches
+			// all files in the uniquely identified local package.
+			if idx.languages[normalizePath(entity.File)] == "go" && len(targets) != 1 {
+				continue
+			}
+			for _, target := range targets {
 				from, ok := idx.files[entity.File]
 				if !ok {
 					continue
@@ -40,7 +49,7 @@ func ResolveRelationships(entities []semantic.Entity) []semantic.Relationship {
 			}
 		case KindCallSite:
 			target, ok := resolveSiteTarget(entity, idx)
-			if !ok {
+			if !ok || !callableTarget(target, entity) {
 				continue
 			}
 			from, ok := sourceEntity(entity, idx)
@@ -112,12 +121,20 @@ func resolveImportFiles(site semantic.Entity, idx graphIndexes) []semantic.Entit
 	}
 	if language == "lua" {
 		module = strings.ReplaceAll(module, ".", "/")
-		return resolveExactFiles(module, []string{".lua", "/init.lua"}, idx.files)
+		files := resolveExactFiles(module, []string{".lua", "/init.lua"}, idx.files)
+		if len(files) != 1 {
+			return nil
+		}
+		return files
 	}
 	if !strings.HasPrefix(module, ".") {
 		return nil
 	}
-	return resolveJSModule(site.File, module, idx.files)
+	files := resolveJSModule(site.File, module, idx.files)
+	if len(files) != 1 {
+		return nil
+	}
+	return files
 }
 
 func resolveSiteTarget(site semantic.Entity, idx graphIndexes) (semantic.Entity, bool) {
@@ -130,11 +147,17 @@ func resolveSiteTarget(site semantic.Entity, idx graphIndexes) (semantic.Entity,
 	if shadowed, _ := meta["shadowed"].(bool); shadowed {
 		return semantic.Entity{}, false
 	}
+	if localShadowed, _ := meta["local_binding_shadowed"].(bool); localShadowed {
+		return semantic.Entity{}, false
+	}
 	if receiverShadowed, _ := meta["receiver_shadowed"].(bool); receiverShadowed {
 		return semantic.Entity{}, false
 	}
 	path := normalizePath(site.File)
 	imports := idx.imports[path]
+	if importShadowed, _ := meta["import_shadowed"].(bool); importShadowed {
+		imports = nil
+	}
 	if receiver != "" && receiver != "this" {
 		for _, importSite := range imports {
 			local, _ := importSite.Metadata["local"].(string)
@@ -150,7 +173,11 @@ func resolveSiteTarget(site semantic.Entity, idx graphIndexes) (semantic.Entity,
 			if idx.languages[path] == "go" {
 				var candidates []semantic.Entity
 				for _, file := range files {
-					candidates = append(candidates, idx.symbolsByFileName[normalizePath(file.File)+"\x00"+name]...)
+					for _, candidate := range idx.symbolsByFileName[normalizePath(file.File)+"\x00"+name] {
+						if candidate.Metadata["symbol_kind"] == "function" {
+							candidates = append(candidates, candidate)
+						}
+					}
 				}
 				return exactlyOne(candidates)
 			}
@@ -190,12 +217,31 @@ func resolveSiteTarget(site semantic.Entity, idx graphIndexes) (semantic.Entity,
 		var candidates []semantic.Entity
 		for file, packageValue := range idx.packages {
 			if packageValue == packageName {
-				candidates = append(candidates, idx.symbolsByFileName[file+"\x00"+name]...)
+				for _, candidate := range idx.symbolsByFileName[file+"\x00"+name] {
+					if candidate.Metadata["symbol_kind"] == "function" {
+						candidates = append(candidates, candidate)
+					}
+				}
 			}
 		}
 		return exactlyOne(candidates)
 	}
 	return exactlyOne(idx.symbolsByFileName[path+"\x00"+name])
+}
+
+func callableTarget(target semantic.Entity, site semantic.Entity) bool {
+	kind, _ := target.Metadata["symbol_kind"].(string)
+	receiver, _ := site.Metadata["receiver"].(string)
+	if receiver == "this" {
+		return kind == "method"
+	}
+	if receiver != "" {
+		// Namespace/package member calls are resolved only to callable
+		// declarations. Methods require a statically known receiver and are
+		// therefore not accepted here.
+		return kind == "function"
+	}
+	return kind == "function"
 }
 
 func sourceEntity(site semantic.Entity, idx graphIndexes) (semantic.Entity, bool) {
