@@ -1,0 +1,76 @@
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/Athernaa/code-scale-mcpv2/internal/repository"
+	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+func TestIndexFolderAppliesGitignoreAndExtraPatterns(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		".gitignore":          "ignored/\ndist/\n*.generated.ts\nprivate/\n",
+		"keep.go":             "package keep\n\nfunc Keep() {}\n",
+		"ignored/bad.go":      "package bad\n\nfunc Ignored() {}\n",
+		"dist/bad.go":         "package bad\n\nfunc Dist() {}\n",
+		"private/bad.go":      "package bad\n\nfunc Private() {}\n",
+		"generated/bad.go":    "package bad\n\nfunc Generated() {}\n",
+		"client.generated.ts": "const generated = () => {}\n",
+	}
+	for rel, content := range files {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	store, err := storage.NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	deps := &Deps{Store: store}
+	result, _, err := IndexFolderHandler(deps)(context.Background(), nil, IndexFolderArgs{
+		Path:        root,
+		ExtraIgnore: []string{"generated/**"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("index_folder returned an error: %#v", result)
+	}
+
+	id, err := repository.Local(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID(id.Repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filesInIndex, err := store.GetFiles(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filesInIndex) != 1 || filesInIndex[0].Path != "keep.go" {
+		t.Fatalf("ignore rules did not filter repository files: %#v", filesInIndex)
+	}
+
+	var response map[string]any
+	if err := json.Unmarshal([]byte(result.Content[0].(*mcp.TextContent).Text), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["files_discovered"] != float64(1) || response["file_count"] != float64(1) {
+		t.Fatalf("unexpected indexing diagnostics: %#v", response)
+	}
+}

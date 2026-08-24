@@ -10,9 +10,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/Athernaa/code-scale-mcpv2/internal/server"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 var version = "dev"

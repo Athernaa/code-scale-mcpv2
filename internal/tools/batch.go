@@ -8,8 +8,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // BatchOp represents a single operation in a batch request.
@@ -166,11 +166,19 @@ func execGetSymbol(deps *Deps, args GetSymbolArgs) (any, error) {
 			lines := strings.Split(string(fileContent), "\n")
 			startLine, endLine := sym.Line-1, sym.EndLine
 			beforeStart := startLine - args.ContextLines
-			if beforeStart < 0 { beforeStart = 0 }
-			if beforeStart < startLine { contextBefore = strings.Join(lines[beforeStart:startLine], "\n") }
+			if beforeStart < 0 {
+				beforeStart = 0
+			}
+			if beforeStart < startLine {
+				contextBefore = strings.Join(lines[beforeStart:startLine], "\n")
+			}
 			afterEnd := endLine + args.ContextLines
-			if afterEnd > len(lines) { afterEnd = len(lines) }
-			if endLine < afterEnd { contextAfter = strings.Join(lines[endLine:afterEnd], "\n") }
+			if afterEnd > len(lines) {
+				afterEnd = len(lines)
+			}
+			if endLine < afterEnd {
+				contextAfter = strings.Join(lines[endLine:afterEnd], "\n")
+			}
 		}
 	}
 	truncated := false
@@ -183,12 +191,18 @@ func execGetSymbol(deps *Deps, args GetSymbolArgs) (any, error) {
 		"decorators": sym.Decorators, "docstring": sym.Docstring,
 		"source": source,
 	}
-	if contextBefore != "" { result["context_before"] = contextBefore }
-	if contextAfter != "" { result["context_after"] = contextAfter }
+	if contextBefore != "" {
+		result["context_before"] = contextBefore
+	}
+	if contextAfter != "" {
+		result["context_after"] = contextAfter
+	}
 	if args.Verify {
 		result["content_verified"] = parser.ComputeContentHash([]byte(completeSource)) == sym.ContentHash
 	}
-	if truncated { result["truncated"] = true }
+	if truncated {
+		result["truncated"] = true
+	}
 	return result, nil
 }
 
@@ -201,8 +215,12 @@ func execGetSymbols(deps *Deps, args GetSymbolsArgs) (any, error) {
 		return nil, err
 	}
 	limit := args.MaxTotalBytes
-	if limit <= 0 { limit = 1024 * 1024 }
-	if limit > 8*1024*1024 { limit = 8 * 1024 * 1024 }
+	if limit <= 0 {
+		limit = 1024 * 1024
+	}
+	if limit > 8*1024*1024 {
+		limit = 8 * 1024 * 1024
+	}
 	var symbols []map[string]any
 	var errors []string
 	var totalBytes int
@@ -248,7 +266,7 @@ func execSearchSymbols(deps *Deps, args SearchSymbolsArgs) (any, error) {
 			"score": s.Score, "match_tier": string(s.Tier),
 		})
 	}
-	return map[string]any{"results": results, "result_count": len(results)}, nil
+	return map[string]any{"repo": args.Repo, "query": args.Query, "results": results, "result_count": len(results)}, nil
 }
 
 func execSearchText(deps *Deps, args SearchTextArgs) (any, error) {
@@ -268,7 +286,7 @@ func execSearchText(deps *Deps, args SearchTextArgs) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"results": results, "result_count": len(results)}, nil
+	return map[string]any{"repo": args.Repo, "query": args.Query, "results": results, "result_count": len(results)}, nil
 }
 
 func execGetFileOutline(deps *Deps, args GetFileOutlineArgs) (any, error) {
@@ -281,17 +299,29 @@ func execGetFileOutline(deps *Deps, args GetFileOutlineArgs) (any, error) {
 		return nil, err
 	}
 	maxSymbols := args.MaxSymbols
-	if maxSymbols <= 0 { maxSymbols = 200 }
-	if maxSymbols > 2000 { maxSymbols = 2000 }
+	if maxSymbols <= 0 {
+		maxSymbols = 200
+	}
+	if maxSymbols > 2000 {
+		maxSymbols = 2000
+	}
 	truncated := len(symbols) > maxSymbols
-	if truncated { symbols = symbols[:maxSymbols] }
+	if truncated {
+		symbols = symbols[:maxSymbols]
+	}
 	language := ""
-	if len(symbols) > 0 { language = symbols[0].Language }
+	if len(symbols) > 0 {
+		language = symbols[0].Language
+	}
 	var results []OutlineSymbol
 	if args.Flat {
-		for _, node := range parser.FlattenSymbols(symbols) { results = append(results, compactOutline(node.Symbol, node.Depth)) }
+		for _, node := range parser.FlattenSymbols(symbols) {
+			results = append(results, compactOutline(node.Symbol, node.Depth))
+		}
 	} else {
-		for _, node := range parser.BuildSymbolTree(symbols) { results = append(results, compactOutlineTree(node, 0)) }
+		for _, node := range parser.BuildSymbolTree(symbols) {
+			results = append(results, compactOutlineTree(node, 0))
+		}
 	}
 	return map[string]any{"repo": args.Repo, "file": args.FilePath, "language": language, "symbols": results, "truncated": truncated}, nil
 }
@@ -306,15 +336,34 @@ func execGetFileTree(deps *Deps, args GetFileTreeArgs) (any, error) {
 		return nil, err
 	}
 	symCounts, err := deps.Store.GetSymbolCountsByFile(repoID)
-	if err != nil { return nil, err }
-	maxDepth := args.MaxDepth; if maxDepth <= 0 { maxDepth = 20 }; if maxDepth > 100 { maxDepth = 100 }
-	maxEntries := args.MaxEntries; if maxEntries <= 0 { maxEntries = 1000 }; if maxEntries > 10000 { maxEntries = 10000 }
+	if err != nil {
+		return nil, err
+	}
+	maxDepth := args.MaxDepth
+	if maxDepth <= 0 {
+		maxDepth = 20
+	}
+	if maxDepth > 100 {
+		maxDepth = 100
+	}
+	maxEntries := args.MaxEntries
+	if maxEntries <= 0 {
+		maxEntries = 1000
+	}
+	if maxEntries > 10000 {
+		maxEntries = 10000
+	}
 	root := &TreeNode{Type: "dir", Path: "/", Name: "/"}
 	truncated := false
 	entries := 0
 	for _, f := range files {
-		if args.PathPrefix != "" && !strings.HasPrefix(f.Path, args.PathPrefix) { continue }
-		if len(strings.Split(filepath.ToSlash(f.Path), "/")) > maxDepth || entries >= maxEntries { truncated = true; continue }
+		if args.PathPrefix != "" && !strings.HasPrefix(f.Path, args.PathPrefix) {
+			continue
+		}
+		if len(strings.Split(filepath.ToSlash(f.Path), "/")) > maxDepth || entries >= maxEntries {
+			truncated = true
+			continue
+		}
 		addToTree(root, f.Path, f.Language, symCounts[f.Path])
 		entries++
 	}
@@ -330,12 +379,32 @@ func execGetRepoOutline(deps *Deps, args GetRepoOutlineArgs) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	maxDepth := args.MaxDepth; if maxDepth <= 0 { maxDepth = 20 }; if maxDepth > 100 { maxDepth = 100 }
-	maxDirectories := args.MaxDirectories; if maxDirectories <= 0 { maxDirectories = 500 }; if maxDirectories > 10000 { maxDirectories = 10000 }
-	filtered := make(map[string]int); truncated := false
+	maxDepth := args.MaxDepth
+	if maxDepth <= 0 {
+		maxDepth = 20
+	}
+	if maxDepth > 100 {
+		maxDepth = 100
+	}
+	maxDirectories := args.MaxDirectories
+	if maxDirectories <= 0 {
+		maxDirectories = 500
+	}
+	if maxDirectories > 10000 {
+		maxDirectories = 10000
+	}
+	filtered := make(map[string]int)
+	truncated := false
 	for path, count := range dirs {
-		depth := len(strings.Split(filepath.ToSlash(strings.Trim(path, "/")), "/")); if strings.Trim(path, "/") == "" { depth = 0 }
-		if depth > maxDepth || len(filtered) >= maxDirectories { truncated = true; continue }; filtered[path] = count
+		depth := len(strings.Split(filepath.ToSlash(strings.Trim(path, "/")), "/"))
+		if strings.Trim(path, "/") == "" {
+			depth = 0
+		}
+		if depth > maxDepth || len(filtered) >= maxDirectories {
+			truncated = true
+			continue
+		}
+		filtered[path] = count
 	}
 	return map[string]any{
 		"repo": info.Repo, "indexed_at": info.IndexedAt, "file_count": info.FileCount, "symbol_count": info.SymbolCount,

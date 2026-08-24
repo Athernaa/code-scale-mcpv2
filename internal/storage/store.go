@@ -321,15 +321,27 @@ func (s *IndexStore) ReplaceRepoIndex(
 
 func (s *IndexStore) bootstrapFileFTS() error {
 	rows, err := s.db.Query("SELECT f.id, f.repo_id, f.path, r.owner, r.name FROM files f JOIN repos r ON r.id = f.repo_id")
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var fileID, repoID int64
 		var path, owner, name string
-		if err := rows.Scan(&fileID, &repoID, &path, &owner, &name); err != nil { return err }
-		contentDir, err := s.contentDir(owner, name); if err != nil { return err }
-		data, err := os.ReadFile(filepath.Join(contentDir, filepath.FromSlash(path))); if err != nil { continue }
-		if _, err := s.db.Exec("INSERT OR REPLACE INTO files_fts(rowid, repo_id, path, content) VALUES (?, ?, ?, ?)", fileID, repoID, path, string(data)); err != nil { return err }
+		if err := rows.Scan(&fileID, &repoID, &path, &owner, &name); err != nil {
+			return err
+		}
+		contentDir, err := s.contentDir(owner, name)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(filepath.Join(contentDir, filepath.FromSlash(path)))
+		if err != nil {
+			continue
+		}
+		if _, err := s.db.Exec("INSERT OR REPLACE INTO files_fts(rowid, repo_id, path, content) VALUES (?, ?, ?, ?)", fileID, repoID, path, string(data)); err != nil {
+			return err
+		}
 	}
 	return rows.Err()
 }
@@ -429,6 +441,53 @@ func (s *IndexStore) UpsertFileIndex(
 	}
 
 	return tx.Commit()
+}
+
+// UpsertFileIndexWithContent updates the cache and index as one recoverable
+// operation. The new bytes are staged first; if the database update fails, the
+// previous cache file is restored so SQLite offsets continue to describe the
+// bytes returned by GetSymbolContent.
+func (s *IndexStore) UpsertFileIndexWithContent(
+	owner, name, sourceType, gitHead, filePath, contentHash, language string,
+	symbols []parser.Symbol, content []byte, sourcePaths ...string,
+) error {
+	if err := s.SaveContentFile(owner, name, filePath+".codescale-tmp", content); err != nil {
+		return err
+	}
+	contentDir, err := s.contentDir(owner, name)
+	if err != nil {
+		return err
+	}
+	tmpPath := filepath.Join(contentDir, filepath.FromSlash(filePath+".codescale-tmp"))
+	contentPath := filepath.Join(contentDir, filepath.FromSlash(filePath))
+	backupPath := filepath.Join(contentDir, filepath.FromSlash(filePath+".codescale-backup"))
+	oldContent, oldErr := os.ReadFile(contentPath)
+	oldExists := oldErr == nil
+	if oldExists {
+		_ = os.Remove(backupPath)
+		if err := os.Rename(contentPath, backupPath); err != nil {
+			_ = os.Remove(tmpPath)
+			return err
+		}
+	}
+	if err := os.Rename(tmpPath, contentPath); err != nil {
+		if oldExists {
+			_ = os.Rename(backupPath, contentPath)
+		}
+		return err
+	}
+
+	err = s.UpsertFileIndex(owner, name, sourceType, gitHead, filePath, contentHash, language, symbols, sourcePaths...)
+	if err != nil {
+		_ = os.Remove(contentPath)
+		if oldExists {
+			_ = os.WriteFile(contentPath, oldContent, 0644)
+		}
+		_ = os.Remove(backupPath)
+		return err
+	}
+	_ = os.Remove(backupPath)
+	return nil
 }
 
 func (s *IndexStore) syncFileFTSTx(tx *sql.Tx, repoID int64, owner, name string, fileIDs map[string]int64) error {
@@ -1350,6 +1409,9 @@ func (s *IndexStore) DeleteIndex(repo string) error {
 	if _, err := tx.Exec("DELETE FROM files WHERE repo_id = ?", id); err != nil {
 		return fmt.Errorf("delete files: %w", err)
 	}
+	if _, err := tx.Exec("DELETE FROM files_fts WHERE repo_id = ?", id); err != nil {
+		return fmt.Errorf("delete file text index: %w", err)
+	}
 	if _, err := tx.Exec("DELETE FROM repos WHERE id = ?", id); err != nil {
 		return fmt.Errorf("delete repo: %w", err)
 	}
@@ -1361,9 +1423,6 @@ func (s *IndexStore) DeleteIndex(repo string) error {
 	contentDir, err := s.contentDir(owner, name)
 	if err != nil {
 		return err
-	}
-	if _, err := tx.Exec("DELETE FROM files_fts WHERE repo_id = ?", id); err != nil {
-		return fmt.Errorf("delete file text index: %w", err)
 	}
 	_ = os.RemoveAll(contentDir)
 

@@ -8,12 +8,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/Athernaa/code-scale-mcpv2/internal/github"
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
 	"github.com/Athernaa/code-scale-mcpv2/internal/pathfilter"
 	"github.com/Athernaa/code-scale-mcpv2/internal/security"
 	"github.com/Athernaa/code-scale-mcpv2/internal/summarizer"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type IndexRepoArgs struct {
@@ -107,16 +107,25 @@ func IndexRepoHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, In
 		fileHashes := make(map[string]string)
 		fileLangs := make(map[string]string)
 		var allSymbols []parser.Symbol
+		skippedFiles := len(sourcePaths) - len(fileContents)
+		parseFailures := 0
+		var diagnostics []string
 
 		for path, content := range fileContents {
 			// Skip binary content
 			if security.IsBinaryContent(content) {
+				skippedFiles++
 				continue
 			}
 
 			lang := parser.DetectLanguage(path)
 			symbols, err := parser.ParseFile(content, path, lang)
 			if err != nil {
+				skippedFiles++
+				parseFailures++
+				if len(diagnostics) < 3 {
+					diagnostics = append(diagnostics, path+": "+err.Error())
+				}
 				continue
 			}
 
@@ -148,18 +157,24 @@ func IndexRepoHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, In
 		}
 
 		result := map[string]any{
-			"success":      true,
-			"repo":         owner + "/" + repoName,
-			"indexed_at":   time.Now().UTC().Format(time.RFC3339),
-			"file_count":   len(fileHashes),
-			"symbol_count": len(allSymbols),
-			"languages":    langCounts,
+			"success":          true,
+			"repo":             owner + "/" + repoName,
+			"indexed_at":       time.Now().UTC().Format(time.RFC3339),
+			"files_discovered": len(sourcePaths),
+			"file_count":       len(fileHashes),
+			"symbol_count":     len(allSymbols),
+			"languages":        langCounts,
+			"skipped_files":    skippedFiles,
+			"parse_failures":   parseFailures,
 			"_meta": Meta{
 				TimingMs:    t.elapsedMs(),
 				Repo:        owner + "/" + repoName,
 				FileCount:   len(fileHashes),
 				SymbolCount: len(allSymbols),
 			},
+		}
+		if len(diagnostics) > 0 {
+			result["diagnostic_samples"] = diagnostics
 		}
 		r, _ := toTextResult(result)
 		return r, nil, nil

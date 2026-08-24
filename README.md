@@ -26,7 +26,7 @@ code-scale-mcp is an MCP server that indexes codebases at the symbol level using
 - ***Go single binary:*** no Python/pip dependency chain, millisecond startup, true multi-core parallelism
 - 13 languages supported via tree-sitter grammars
 - ***File watching:*** auto-reindexes as you edit, keeping the index fresh
-- ***Token savings tracking:*** every response reports how many tokens were saved and cost avoided
+- ***Measured telemetry:*** compact metadata is default; full mode reports measured response/baseline sizes where defensible, without embedded model pricing
 
 ***In short:*** it turns "read the whole file to find one function" into "fetch exactly that function", making AI coding agents faster, cheaper, and more effective at scale.
 
@@ -46,7 +46,7 @@ code-scale-mcp is an MCP server that indexes codebases at the symbol level using
 - **Batch operations**: Execute multiple tool calls in a single MCP request
 - **Progressive throttling**: Per-tool rate limiting nudges agents toward efficient batch usage
 - **Stale cleanup**: Auto-removes orphaned indexes on startup
-- **Token savings tracking**: Reports tokens saved and cost avoided per request
+- **Measured context telemetry**: Reports response and baseline sizes in opt-in full mode
 
 ## Requirements
 
@@ -142,7 +142,7 @@ search_text       → full-text search with contextual snippet windows
 batch_execute     → combine multiple operations into a single call
 ```
 
-Every response includes `_meta` with `tokens_saved`, `total_tokens_saved`, and `cost_avoided` so you can track the savings.
+Responses use compact `_meta` by default. Full telemetry can report measured response/baseline bytes and estimated context savings when a defensible baseline exists; model pricing is not embedded.
 
 ### Skill Installation (Recommended)
 

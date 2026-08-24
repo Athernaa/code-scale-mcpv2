@@ -4,9 +4,9 @@ import (
 	"context"
 	"os"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/Athernaa/code-scale-mcpv2/internal/repository"
 	"github.com/Athernaa/code-scale-mcpv2/internal/security"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type WatchFolderArgs struct {

@@ -67,3 +67,12 @@ func TestContentDirSeparatesAmbiguousDisplayNames(t *testing.T) {
 		t.Fatal("ambiguous owner/name pairs mapped to the same cache directory")
 	}
 }
+
+func TestContentDirRejectsUnsafeExplicitComponents(t *testing.T) {
+	root := t.TempDir()
+	for _, pair := range [][2]string{{"../escape", "repo"}, {"owner", "a/b"}, {"", "repo"}, {"owner", ".."}} {
+		if _, err := ContentDir(root, pair[0], pair[1]); err == nil {
+			t.Fatalf("expected unsafe components to be rejected: %#v", pair)
+		}
+	}
+}

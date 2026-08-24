@@ -1,11 +1,11 @@
 package server
 
 import (
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/Athernaa/code-scale-mcpv2/internal/ratelimit"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 	"github.com/Athernaa/code-scale-mcpv2/internal/tools"
 	"github.com/Athernaa/code-scale-mcpv2/internal/watcher"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Version is set at build time via ldflags.

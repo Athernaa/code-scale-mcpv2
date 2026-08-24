@@ -1,6 +1,9 @@
 package storage
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
@@ -201,21 +204,46 @@ func TestSearchTextUsesExactVerificationAndRecursivePatterns(t *testing.T) {
 	store := newTestStore(t)
 	files := map[string]string{"src/a.ts": "one exact:event", "src/components/a.ts": "two exact:event", "src/components/deep/a.ts": "three exact:event"}
 	langs := map[string]string{"src/a.ts": "typescript", "src/components/a.ts": "typescript", "src/components/deep/a.ts": "typescript"}
-	for path, content := range files { if err := store.SaveContentFile("test", "text", path, []byte(content)); err != nil { t.Fatal(err) } }
-	if err := store.ReplaceRepoIndex("test", "text", "local", "", files, langs, nil); err != nil { t.Fatal(err) }
-	repoID, err := store.GetRepoID("test/text"); if err != nil { t.Fatal(err) }
+	for i := 0; i < 100; i++ {
+		path := fmt.Sprintf("src/generated/file-%03d.ts", i)
+		files[path] = "unrelated content"
+		langs[path] = "typescript"
+	}
+	for path, content := range files {
+		if err := store.SaveContentFile("test", "text", path, []byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.ReplaceRepoIndex("test", "text", "local", "", files, langs, nil); err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID("test/text")
+	if err != nil {
+		t.Fatal(err)
+	}
 	results, err := store.SearchText(repoID, "exact:event", "src/**/*.ts", 10, 0)
-	if err != nil { t.Fatal(err) }
-	if len(results) != 3 { t.Fatalf("expected all punctuation-heavy exact matches, got %d", len(results)) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("expected all punctuation-heavy exact matches, got %d", len(results))
+	}
+	results, err = store.SearchText(repoID, "unrelated", "src/**/*.ts", 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 10 {
+		t.Fatalf("expected bounded candidate results for indexed query, got %d", len(results))
+	}
 }
 
 func TestReplaceRepoIndexReplacesAllRepositoryData(t *testing.T) {
 	store := newTestStore(t)
 	if err := store.ReplaceRepoIndex("test", "replace", "local", "", map[string]string{
-		"old.lua": "old",
+		"old.lua":  "old",
 		"keep.lua": "keep",
 	}, map[string]string{
-		"old.lua": "lua",
+		"old.lua":  "lua",
 		"keep.lua": "lua",
 	}, []parser.Symbol{testSymbol("old.lua", "oldFunction"), testSymbol("keep.lua", "keepFunction")}); err != nil {
 		t.Fatalf("initial ReplaceRepoIndex: %v", err)
@@ -242,9 +270,9 @@ func TestReplaceRepoIndexReplacesAllRepositoryData(t *testing.T) {
 
 func TestIncrementalFileUpdatesPreserveUnrelatedDataAndFTS(t *testing.T) {
 	store := newTestStore(t)
-	files := map[string]string{"client.lua": "client-v1", "server.lua": "server-v1"}
-	langs := map[string]string{"client.lua": "lua", "server.lua": "lua"}
-	initial := []parser.Symbol{testSymbol("client.lua", "clientFunction"), testSymbol("server.lua", "serverFunction")}
+	files := map[string]string{"client.lua": "client-v1", "server.lua": "server-v1", "shared.lua": "shared-v1"}
+	langs := map[string]string{"client.lua": "lua", "server.lua": "lua", "shared.lua": "lua"}
+	initial := []parser.Symbol{testSymbol("client.lua", "clientFunction"), testSymbol("server.lua", "serverFunction"), testSymbol("shared.lua", "sharedFunction")}
 	if err := store.ReplaceRepoIndex("local", "game", "local", "", files, langs, initial); err != nil {
 		t.Fatalf("initial index: %v", err)
 	}
@@ -254,14 +282,17 @@ func TestIncrementalFileUpdatesPreserveUnrelatedDataAndFTS(t *testing.T) {
 	}
 
 	repos, err := store.ListRepos()
-	if err != nil || len(repos) != 1 || repos[0].FileCount != 2 {
-		t.Fatalf("expected two indexed files, repos=%#v err=%v", repos, err)
+	if err != nil || len(repos) != 1 || repos[0].FileCount != 3 {
+		t.Fatalf("expected three indexed files, repos=%#v err=%v", repos, err)
 	}
 	if _, err := store.GetSymbolByID(repoID, "client.lua::clientFunction#function"); err != nil {
 		t.Fatalf("clientFunction missing: %v", err)
 	}
 	if _, err := store.GetSymbolByID(repoID, "server.lua::serverFunction#function"); err != nil {
 		t.Fatalf("serverFunction missing: %v", err)
+	}
+	if _, err := store.GetSymbolByID(repoID, "shared.lua::sharedFunction#function"); err != nil {
+		t.Fatalf("sharedFunction missing: %v", err)
 	}
 
 	updated := testSymbol("client.lua", "newClientFunction")
@@ -270,14 +301,17 @@ func TestIncrementalFileUpdatesPreserveUnrelatedDataAndFTS(t *testing.T) {
 	}
 
 	repos, err = store.ListRepos()
-	if err != nil || len(repos) != 1 || repos[0].FileCount != 2 {
-		t.Fatalf("expected two files after incremental update, repos=%#v err=%v", repos, err)
+	if err != nil || len(repos) != 1 || repos[0].FileCount != 3 {
+		t.Fatalf("expected three files after incremental update, repos=%#v err=%v", repos, err)
 	}
 	if _, err := store.GetSymbolByID(repoID, updated.ID); err != nil {
 		t.Fatalf("new client symbol missing: %v", err)
 	}
 	if _, err := store.GetSymbolByID(repoID, "server.lua::serverFunction#function"); err != nil {
 		t.Fatalf("unrelated server symbol was lost: %v", err)
+	}
+	if _, err := store.GetSymbolByID(repoID, "shared.lua::sharedFunction#function"); err != nil {
+		t.Fatalf("unrelated shared symbol was lost: %v", err)
 	}
 	if _, err := store.GetSymbolByID(repoID, "client.lua::clientFunction#function"); err == nil {
 		t.Fatal("old client symbol still exists")
@@ -289,12 +323,22 @@ func TestIncrementalFileUpdatesPreserveUnrelatedDataAndFTS(t *testing.T) {
 	if err := store.DeleteFileFromIndex("local", "game", "client.lua"); err != nil {
 		t.Fatalf("delete client file: %v", err)
 	}
-	files, err := store.GetFiles(repoID)
-	if err != nil || len(files) != 1 || files[0].Path != "server.lua" {
-		t.Fatalf("server file did not survive deletion, files=%#v err=%v", files, err)
+	remainingFiles, err := store.GetFiles(repoID)
+	if err != nil || len(remainingFiles) != 2 {
+		t.Fatalf("server and shared files did not survive deletion, files=%#v err=%v", remainingFiles, err)
+	}
+	remainingPaths := map[string]bool{}
+	for _, file := range remainingFiles {
+		remainingPaths[file.Path] = true
+	}
+	if !remainingPaths["server.lua"] || !remainingPaths["shared.lua"] {
+		t.Fatalf("server/shared files did not survive deletion, files=%#v", remainingFiles)
 	}
 	if _, err := store.GetSymbolByID(repoID, "server.lua::serverFunction#function"); err != nil {
 		t.Fatalf("server symbol did not survive deletion: %v", err)
+	}
+	if _, err := store.GetSymbolByID(repoID, "shared.lua::sharedFunction#function"); err != nil {
+		t.Fatalf("shared symbol did not survive deletion: %v", err)
 	}
 	if ftsContains(t, store, "newClientFunction") {
 		t.Fatal("deleted client symbol is still in FTS")
@@ -314,6 +358,33 @@ func TestUpsertFileIndexAddsNewFile(t *testing.T) {
 	if err != nil || len(files) != 2 {
 		t.Fatalf("expected two files after new-file upsert, files=%#v err=%v", files, err)
 	}
+}
+
+func TestUpsertFileIndexWithContentRestoresCacheWhenIndexUpdateFails(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.SaveContentFile("local", "missing", "main.lua", []byte("old content")); err != nil {
+		t.Fatal(err)
+	}
+	err := store.UpsertFileIndexWithContent("local", "missing", "local", "", "main.lua", "new", "lua", nil, []byte("new content"))
+	if err == nil {
+		t.Fatal("expected update against an unindexed repository to fail")
+	}
+	content, readErr := os.ReadFile(filepath.Join(mustContentDir(t, store, "local", "missing"), "main.lua"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(content) != "old content" {
+		t.Fatalf("cache was not restored after failed update: %q", content)
+	}
+}
+
+func mustContentDir(t *testing.T, store *IndexStore, owner, name string) string {
+	t.Helper()
+	dir, err := store.contentDir(owner, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func TestTokenTracker(t *testing.T) {

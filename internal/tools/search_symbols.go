@@ -3,8 +3,8 @@ package tools
 import (
 	"context"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/Athernaa/code-scale-mcpv2/internal/ratelimit"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type SearchSymbolsArgs struct {

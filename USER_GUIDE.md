@@ -255,27 +255,25 @@ IDs are returned by `get_file_outline`, `search_symbols`, and `search_text`. Pas
 
 ## Token Savings
 
-Every tool response includes a `_meta` object showing how many tokens were saved:
+Responses use compact `_meta` telemetry by default. Set `CODE_SCALE_TELEMETRY=full` to include measured response and baseline byte counts where a defensible baseline exists; set it to `off` to omit telemetry.
 
 ```json
 {
   "_meta": {
     "timing_ms": 12,
-    "tokens_saved": 1850,
-    "total_tokens_saved": 4200,
-    "cost_avoided": {
-      "claude_opus": 0.0463,
-      "gpt5_latest": 0.0185
-    }
+    "response_bytes": 740,
+    "baseline_context_bytes": 8200,
+    "estimated_context_saved_bytes": 7460,
+    "estimated_context_saved_tokens": 1865
   }
 }
 ```
 
-- **`tokens_saved`**: Tokens saved by this call (difference between raw file size and response size, divided by 4 bytes per token)
-- **`total_tokens_saved`**: Cumulative savings across all calls, persisted in SQLite
-- **`cost_avoided`**: Dollar amount saved at current model pricing ($25/1M tokens for Opus, $10/1M for GPT-5)
+- **`response_bytes`** and **`baseline_context_bytes`**: Measured byte counts when available
+- **`estimated_context_saved_bytes`** and **`estimated_context_saved_tokens`**: Explicit estimates based on those measurements; tokens use approximately four bytes per token
+- Cumulative tracker fields and model-cost estimates are not emitted by default; pricing is intentionally not embedded in production telemetry
 
-The savings are most dramatic on large repos. A repo with 100 files averaging 300 lines each is ~120K tokens to read fully. With code-scale, a typical investigation touches 5-10 symbols at ~50 tokens each = ~500 tokens total.
+Measure your own workflow when comparing whole-file reads with symbol retrieval; savings depend on file size, symbol size, and the selected response limits.
 
 ---
 
@@ -308,7 +306,10 @@ Files with invalid UTF-8 are handled safely using replacement characters.
 
 Indexes are stored in SQLite at `~/.code-index/code-scale.db` (override with `CODE_INDEX_PATH` environment variable).
 
-Raw source files are cached on the filesystem for byte-offset retrieval:
+Raw source files are cached on the filesystem for byte-offset retrieval. Local
+cache directories include a canonical path hash; indexes created before this
+identity change may need one invalidation and re-index. Source files are not
+deleted.
 
 ```
 ~/.code-index/

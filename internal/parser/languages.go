@@ -14,6 +14,7 @@ import (
 	"github.com/smacker/go-tree-sitter/ruby"
 	"github.com/smacker/go-tree-sitter/rust"
 	"github.com/smacker/go-tree-sitter/swift"
+	"github.com/smacker/go-tree-sitter/typescript/tsx"
 	"github.com/smacker/go-tree-sitter/typescript/typescript"
 )
 
@@ -45,7 +46,7 @@ var LanguageExtensions = map[string]string{
 	".js":    "javascript",
 	".jsx":   "javascript",
 	".ts":    "typescript",
-	".tsx":   "typescript",
+	".tsx":   "tsx",
 	".go":    "go",
 	".rs":    "rust",
 	".java":  "java",
@@ -69,6 +70,7 @@ var LanguageRegistry = map[string]*LanguageSpec{
 	"python":     PythonSpec,
 	"javascript": JavaScriptSpec,
 	"typescript": TypeScriptSpec,
+	"tsx":        TSXSpec,
 	"go":         GoSpec,
 	"rust":       RustSpec,
 	"java":       JavaSpec,
@@ -170,6 +172,22 @@ var TypeScriptSpec = &LanguageSpec{
 	ContainerNodeTypes: []string{"class_declaration", "class"},
 	ConstantPatterns:   []string{"lexical_declaration"},
 	TypePatterns:       []string{"interface_declaration", "type_alias_declaration", "enum_declaration"},
+}
+
+// TSXSpec uses the JSX-capable grammar with the same symbol rules as
+// TypeScript. Keeping it distinct prevents JSX from being parsed as recovery
+// text by the plain TypeScript grammar.
+var TSXSpec = &LanguageSpec{
+	GetLanguage:        tsx.GetLanguage,
+	SymbolNodeTypes:    TypeScriptSpec.SymbolNodeTypes,
+	NameFields:         TypeScriptSpec.NameFields,
+	ParamFields:        TypeScriptSpec.ParamFields,
+	ReturnTypeFields:   TypeScriptSpec.ReturnTypeFields,
+	DocstringStrategy:  TypeScriptSpec.DocstringStrategy,
+	DecoratorNodeType:  TypeScriptSpec.DecoratorNodeType,
+	ContainerNodeTypes: TypeScriptSpec.ContainerNodeTypes,
+	ConstantPatterns:   TypeScriptSpec.ConstantPatterns,
+	TypePatterns:       TypeScriptSpec.TypePatterns,
 }
 
 // GoSpec defines symbol extraction rules for Go.

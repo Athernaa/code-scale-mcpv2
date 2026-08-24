@@ -2,8 +2,8 @@ package ratelimit
 
 import (
 	"os"
-	"sync"
 	"strings"
+	"sync"
 	"time"
 )
 

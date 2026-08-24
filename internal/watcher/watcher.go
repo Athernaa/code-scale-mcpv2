@@ -10,12 +10,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
 	"github.com/Athernaa/code-scale-mcpv2/internal/repository"
 	"github.com/Athernaa/code-scale-mcpv2/internal/security"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 	"github.com/Athernaa/code-scale-mcpv2/internal/summarizer"
+	"github.com/fsnotify/fsnotify"
 )
 
 const debounceInterval = 500 * time.Millisecond
@@ -358,13 +358,10 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 		h := sha256.Sum256(content)
 		hash := hex.EncodeToString(h[:])
 
-		// Save content file
-		if err := m.store.SaveContentFile(owner, repoName, relPath, content); err != nil {
-			log.Printf("watcher: failed to save content for %s: %v", relPath, err)
-		}
-
-		// Save only this file's index; a full replacement would erase unrelated files.
-		err = m.store.UpsertFileIndex(owner, repoName, "local", "", relPath, hash, lang, symbols, localID.CanonicalPath)
+		// Update the cache and only this file's index together; a full replacement
+		// would erase unrelated files and a split cache/index update can leave
+		// stored byte offsets pointing at the wrong source bytes.
+		err = m.store.UpsertFileIndexWithContent(owner, repoName, "local", "", relPath, hash, lang, symbols, content, localID.CanonicalPath)
 		if err != nil {
 			log.Printf("watcher: save error for %s: %v", relPath, err)
 			continue

@@ -11,11 +11,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
 	"github.com/Athernaa/code-scale-mcpv2/internal/ratelimit"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 	"github.com/Athernaa/code-scale-mcpv2/internal/tools"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // ---------------------------------------------------------------------------
@@ -396,6 +396,56 @@ func TestEval_TokenEfficiency(t *testing.T) {
 		// responses can legitimately have negative savings. Do not turn a
 		// measured result into a marketing threshold.
 	})
+}
+
+func TestEval_PunctuationSearchEfficiency(t *testing.T) {
+	store, err := storage.NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+
+	const query = "avenlo:server:createCharacter"
+	files := make(map[string]string, 160)
+	langs := make(map[string]string, 160)
+	var baselineBytes int64
+	for i := 0; i < 160; i++ {
+		path := fmt.Sprintf("lua/file-%03d.lua", i)
+		content := fmt.Sprintf("local value_%03d = 'unrelated'\n", i)
+		if i == 87 {
+			content += "TriggerServerEvent('" + query + "', data)\n"
+		}
+		files[path] = content
+		langs[path] = "lua"
+		baselineBytes += int64(len(content))
+		if err := store.SaveContentFile("eval", "events", path, []byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.ReplaceRepoIndex("eval", "events", "local", "", files, langs, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	deps := &tools.Deps{Store: store, Throttle: ratelimit.NewThrottler()}
+	result, _, err := tools.SearchTextHandler(deps)(context.Background(), nil, tools.SearchTextArgs{
+		Repo: "eval/events", Query: query, MaxResults: 20,
+	})
+	if err != nil || result == nil || result.IsError {
+		t.Fatalf("punctuation search failed: result=%#v err=%v", result, err)
+	}
+	response := resultText(result)
+	if !strings.Contains(response, "lua/file-087.lua") || !strings.Contains(response, query) {
+		t.Fatalf("punctuation search missed exact match: %s", response)
+	}
+	responseBytes := int64(len([]byte(response)))
+	t.Logf("punctuation search: generated_files=%d baseline_bytes=%d response_bytes=%d estimated_saved_bytes=%d estimated_saved_tokens=%d", len(files), baselineBytes, responseBytes, maxInt64(0, baselineBytes-responseBytes), maxInt64(0, baselineBytes-responseBytes)/4)
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // ---------------------------------------------------------------------------

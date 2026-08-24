@@ -8,24 +8,28 @@ import (
 	"strings"
 	"time"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/Athernaa/code-scale-mcpv2/internal/ratelimit"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 	"github.com/Athernaa/code-scale-mcpv2/internal/truncate"
 	"github.com/Athernaa/code-scale-mcpv2/internal/watcher"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Meta contains response metadata.
 type Meta struct {
-	TimingMs    float64            `json:"timing_ms"`
-	Repo        string             `json:"repo,omitempty"`
-	SymbolCount int                `json:"symbol_count,omitempty"`
-	FileCount   int                `json:"file_count,omitempty"`
-	Truncated   bool               `json:"truncated,omitempty"`
-	TokensSaved int64              `json:"tokens_saved,omitempty"`
-	TotalSaved  int64              `json:"total_tokens_saved,omitempty"`
-	CostAvoided map[string]float64 `json:"cost_avoided,omitempty"`
-	TotalCost   map[string]float64 `json:"total_cost_avoided,omitempty"`
+	TimingMs             float64            `json:"timing_ms,omitempty"`
+	Repo                 string             `json:"repo,omitempty"`
+	SymbolCount          int                `json:"symbol_count,omitempty"`
+	FileCount            int                `json:"file_count,omitempty"`
+	Truncated            bool               `json:"truncated,omitempty"`
+	TokensSaved          int64              `json:"tokens_saved,omitempty"`
+	TotalSaved           int64              `json:"total_tokens_saved,omitempty"`
+	CostAvoided          map[string]float64 `json:"cost_avoided,omitempty"`
+	TotalCost            map[string]float64 `json:"total_cost_avoided,omitempty"`
+	ResponseBytes        int64              `json:"response_bytes,omitempty"`
+	BaselineContextBytes int64              `json:"baseline_context_bytes,omitempty"`
+	EstimatedSavedBytes  int64              `json:"estimated_context_saved_bytes,omitempty"`
+	EstimatedSavedTokens int64              `json:"estimated_context_saved_tokens,omitempty"`
 }
 
 // Response wraps a tool result with metadata.
@@ -88,9 +92,20 @@ func (d *Deps) addSavings(rawBytes, responseBytes int64) (int64, int64) {
 func (d *Deps) meta(t *timer, repo string, truncated bool, baselineBytes, responseBytes int64) Meta {
 	meta := Meta{TimingMs: t.elapsedMs(), Truncated: truncated}
 	level := strings.ToLower(strings.TrimSpace(os.Getenv("CODE_SCALE_TELEMETRY")))
-	if level == "" { level = "compact" }
+	if level == "" {
+		level = "compact"
+	}
+	if level == "off" {
+		return Meta{}
+	}
 	if level == "full" {
 		meta.Repo = repo
+		meta.ResponseBytes = responseBytes
+		meta.BaselineContextBytes = baselineBytes
+		if baselineBytes > responseBytes {
+			meta.EstimatedSavedBytes = baselineBytes - responseBytes
+		}
+		meta.EstimatedSavedTokens = meta.EstimatedSavedBytes / 4
 		meta.TokensSaved, meta.TotalSaved = d.addSavings(baselineBytes, responseBytes)
 	}
 	return meta

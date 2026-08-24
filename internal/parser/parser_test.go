@@ -163,7 +163,7 @@ func TestNamedJavaScriptAndTypeScriptFunctionExpressions(t *testing.T) {
 		{"../../testdata/javascript/arrows.js", "javascript", []string{"fetchData", "makeThing", "Service", "Service.run", "outer", "outer.helper"}},
 		{"../../testdata/javascript/arrows.jsx", "javascript", []string{"CharacterCard"}},
 		{"../../testdata/typescript/arrows.ts", "typescript", []string{"fetchNui", "makeThing", "GrandParent", "GrandParent.parent", "GrandParent.parent.childHelper"}},
-		{"../../testdata/typescript/arrows.tsx", "typescript", []string{"CharacterCard"}},
+		{"../../testdata/typescript/arrows.tsx", "tsx", []string{"CharacterCard"}},
 	}
 	for _, tc := range cases {
 		symbols, err := ParseFile(readFixture(t, tc.path), tc.path, tc.language)
@@ -347,7 +347,7 @@ func TestDetectLanguage(t *testing.T) {
 		{"app.js", "javascript"},
 		{"app.jsx", "javascript"},
 		{"index.ts", "typescript"},
-		{"index.tsx", "typescript"},
+		{"index.tsx", "tsx"},
 		{"main.go", "go"},
 		{"lib.rs", "rust"},
 		{"App.java", "java"},

@@ -11,8 +11,8 @@ import (
 type GetFileTreeArgs struct {
 	Repo       string `json:"repo" jsonschema:"Repository name"`
 	PathPrefix string `json:"path_prefix,omitempty" jsonschema:"Filter by path prefix"`
-	MaxDepth   int `json:"max_depth,omitempty" jsonschema:"Maximum directory depth (default 20)"`
-	MaxEntries int `json:"max_entries,omitempty" jsonschema:"Maximum file entries (default 1000)"`
+	MaxDepth   int    `json:"max_depth,omitempty" jsonschema:"Maximum directory depth (default 20)"`
+	MaxEntries int    `json:"max_entries,omitempty" jsonschema:"Maximum file entries (default 1000)"`
 }
 
 type TreeNode struct {
@@ -41,9 +41,24 @@ func GetFileTreeHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 		}
 
 		symCounts, err := deps.Store.GetSymbolCountsByFile(repoID)
-		if err != nil { r, _ := errorResult(err.Error()); return r, nil, nil }
-		maxDepth := args.MaxDepth; if maxDepth <= 0 { maxDepth = 20 }; if maxDepth > 100 { maxDepth = 100 }
-		maxEntries := args.MaxEntries; if maxEntries <= 0 { maxEntries = 1000 }; if maxEntries > 10000 { maxEntries = 10000 }
+		if err != nil {
+			r, _ := errorResult(err.Error())
+			return r, nil, nil
+		}
+		maxDepth := args.MaxDepth
+		if maxDepth <= 0 {
+			maxDepth = 20
+		}
+		if maxDepth > 100 {
+			maxDepth = 100
+		}
+		maxEntries := args.MaxEntries
+		if maxEntries <= 0 {
+			maxEntries = 1000
+		}
+		if maxEntries > 10000 {
+			maxEntries = 10000
+		}
 
 		// Build tree
 		root := &TreeNode{Type: "dir", Path: "/", Name: "/"}
@@ -54,15 +69,21 @@ func GetFileTreeHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 				continue
 			}
 			parts := strings.Split(filepath.ToSlash(f.Path), "/")
-			if len(parts) > maxDepth { truncated = true; continue }
-			if entryCount >= maxEntries { truncated = true; continue }
+			if len(parts) > maxDepth {
+				truncated = true
+				continue
+			}
+			if entryCount >= maxEntries {
+				truncated = true
+				continue
+			}
 			addToTree(root, f.Path, f.Language, symCounts[f.Path])
 			entryCount++
 		}
 
 		result := map[string]any{
-			"repo": args.Repo,
-			"tree": root.Children,
+			"repo":      args.Repo,
+			"tree":      root.Children,
 			"truncated": truncated,
 			"_meta": Meta{
 				TimingMs:  t.elapsedMs(),

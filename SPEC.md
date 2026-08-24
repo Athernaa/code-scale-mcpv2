@@ -11,9 +11,9 @@ Written in Go for single-binary distribution, true parallelism via goroutines, a
 | Scenario                        | Raw dump        | code-scale    | Savings   |
 | ------------------------------- | --------------- | ------------- | --------- |
 | Explore 500-file repo structure | measured by response | compact outline/tree | measured per response |
-| Find a specific function        | ~40,000 tokens  | ~200 tokens   | **99.5%** |
-| Read one function body          | ~40,000 tokens  | ~500 tokens   | **98.7%** |
-| Understand module API           | ~15,000 tokens  | ~800 tokens   | **94.7%** |
+| Find a specific function        | measure native containing-file read | measure search + symbol response | measured per run |
+| Read one function body          | measure native containing-file read | measure symbol response | measured per run |
+| Understand module API           | measure native workflow | measure outline + symbol responses | measured per run |
 
 ---
 
@@ -289,7 +289,7 @@ CREATE TABLE token_savings (
 
 Indexes on `name`, `kind`, `language`, `file_path`, `repo_id` for common query patterns.
 
-Raw source files are stored on the filesystem at `~/.code-index/{owner}-{name}-{identity-digest}/{file_path}` for O(1) byte-offset retrieval. The digest is derived from the unambiguous repository identity.
+Raw source files are stored on the filesystem at `~/.code-index/{owner}-{name}-{identity-digest}/{file_path}` for O(1) byte-offset retrieval. The digest is derived from the unambiguous repository identity. Existing local indexes created before the hashed identity change may need one manual invalidation and re-index; source files are not deleted.
 
 ---
 
@@ -344,34 +344,25 @@ Go's goroutines provide true parallelism (no GIL):
 
 ## Response Envelope
 
-All tools return a `_meta` object with timing, context, and token savings:
+Tools return compact `_meta` timing/truncation telemetry by default. Full telemetry can add measured context sizes when a defensible baseline exists:
 
 ```json
 {
   "_meta": {
     "timing_ms": 42,
-    "repo": "owner/repo",
-    "symbol_count": 387,
-    "file_count": 45,
+    "timing_ms": 4,
     "truncated": false,
-    "tokens_saved": 2450,
-    "total_tokens_saved": 184320,
-    "cost_avoided": {
-      "claude_opus": 0.0613,
-      "gpt5_latest": 0.0245
-    },
-    "total_cost_avoided": {
-      "claude_opus": 4.608,
-      "gpt5_latest": 1.8432
-    }
+    "response_bytes": 740,
+    "baseline_context_bytes": 8200,
+    "estimated_context_saved_bytes": 7460,
+    "estimated_context_saved_tokens": 1865
   }
 }
 ```
 
-- **`tokens_saved`**: Tokens saved by this specific call (raw bytes vs response bytes, divided by 4)
-- **`total_tokens_saved`**: Cumulative tokens saved across all tool calls, persisted in SQLite
-- **`cost_avoided`**: Cost saved this call at model pricing ($25/1M for Opus, $10/1M for GPT-5)
-- **`total_cost_avoided`**: Cumulative cost savings
+- **`response_bytes`** and **`baseline_context_bytes`**: Measured values when available
+- **`estimated_context_saved_bytes`** and **`estimated_context_saved_tokens`**: Explicit estimates derived from those values
+- **`estimated_context_saved_bytes`** and **`estimated_context_saved_tokens`**: Measured estimates emitted only when a defensible full-file baseline is available and full telemetry is enabled
 
 ---
 

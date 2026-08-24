@@ -65,13 +65,25 @@ func CanonicalPath(path string) (string, error) {
 // delimiter and digest make distinct owner/name pairs map to distinct paths,
 // even when their concatenated display names would collide.
 func ContentDir(basePath, owner, name string) (string, error) {
-	if !safeComponent(owner) || !safeComponent(name) {
+	if !isSafeComponent(owner) || !isSafeComponent(name) {
 		return "", fmt.Errorf("invalid repository component: owner=%q name=%q", owner, name)
 	}
 	key := owner + "\x00" + name
 	hash := sha256.Sum256([]byte(key))
 	dirName := fmt.Sprintf("%s-%s-%s", owner, name, hex.EncodeToString(hash[:])[:12])
 	return filepath.Join(basePath, dirName), nil
+}
+
+func isSafeComponent(value string) bool {
+	if value == "" || value == "." || value == ".." {
+		return false
+	}
+	for _, r := range value {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 func identityPath(path string) string {

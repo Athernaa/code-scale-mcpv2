@@ -12,12 +12,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
 	"github.com/Athernaa/code-scale-mcpv2/internal/pathfilter"
 	"github.com/Athernaa/code-scale-mcpv2/internal/repository"
 	"github.com/Athernaa/code-scale-mcpv2/internal/security"
 	"github.com/Athernaa/code-scale-mcpv2/internal/summarizer"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 const DefaultMaxFiles = 10000
@@ -125,12 +125,12 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 
 		// Parse files concurrently
 		type parseResult struct {
-			path     string
-			symbols  []parser.Symbol
-			content  []byte
-			hash     string
-			language string
-			failure  string
+			path         string
+			symbols      []parser.Symbol
+			content      []byte
+			hash         string
+			language     string
+			failure      string
 			parseFailure bool
 		}
 
@@ -227,15 +227,16 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 		}
 
 		result := map[string]any{
-			"success":      true,
-			"repo":         owner + "/" + repoName,
-			"folder_path":  absPath,
-			"indexed_at":   time.Now().UTC().Format(time.RFC3339),
-			"file_count":   len(fileHashes),
-			"symbol_count": len(allSymbols),
-			"languages":    langCounts,
-			"skipped_files": skippedFiles,
-			"parse_failures": parseFailures,
+			"success":          true,
+			"repo":             owner + "/" + repoName,
+			"folder_path":      absPath,
+			"indexed_at":       time.Now().UTC().Format(time.RFC3339),
+			"files_discovered": len(sourceFiles),
+			"file_count":       len(fileHashes),
+			"symbol_count":     len(allSymbols),
+			"languages":        langCounts,
+			"skipped_files":    skippedFiles,
+			"parse_failures":   parseFailures,
 			"_meta": Meta{
 				TimingMs:    t.elapsedMs(),
 				Repo:        owner + "/" + repoName,

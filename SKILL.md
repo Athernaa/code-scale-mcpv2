@@ -1,6 +1,6 @@
 ---
 name: code-scale-mcp
-description: "Use this skill whenever you need to explore, understand, or navigate a codebase — especially when the user asks how something works, where something is defined, what calls a function, or needs to trace logic across multiple files. This skill indexes codebases and lets you retrieve individual functions, classes, and methods instead of reading whole files, saving up to 99% of tokens. Use it for: understanding architecture or code flow, investigating bugs across files, onboarding to unfamiliar repos, finding all usages of a symbol, tracing call chains, exploring large codebases (50+ files), or any task where you would otherwise need to read 3+ files or grep broadly. Supports Python, TypeScript, JavaScript, Go, Rust, Java, and 7 more languages. DO NOT use when: reading a single small file, making a targeted edit to a known location, reading config/README files, or when the file is already in context."
+description: "Use this skill whenever you need to explore, understand, or navigate a codebase — especially when the user asks how something works, where something is defined, what calls a function, or needs to trace logic across multiple files. This skill indexes codebases and lets you retrieve individual functions, classes, and methods instead of reading whole files, reducing context according to measured response and baseline sizes. Use it for: understanding architecture or code flow, investigating bugs across files, onboarding to unfamiliar repos, finding all usages of a symbol, tracing call chains, exploring large codebases (50+ files), or any task where you would otherwise need to read 3+ files or grep broadly. Supports Python, TypeScript, JavaScript, Go, Rust, Java, and 7 more languages. DO NOT use when: reading a single small file, making a targeted edit to a known location, reading config/README files, or when the file is already in context."
 ---
 
 # code-scale-mcp
@@ -13,7 +13,7 @@ You have built-in tools like Read and Grep that work great for small, targeted o
 
 - **Read** shows you an entire file to get one function. That's ~2,000 tokens when you only need ~50. `get_symbol` fetches just the function.
 - **Grep** finds text matches but doesn't understand code structure. `search_symbols` understands functions, classes, methods, and their relationships.
-- **Reading 5 files** to trace a feature costs ~10,000 tokens. Fetching 5 specific symbols costs ~250 tokens — a 97% reduction.
+- **Reading 5 files** to trace a feature can be substantially larger than fetching the relevant symbols; measure actual response sizes for the repository and query.
 
 **The rule of thumb**: if you'd need to read 3+ files or grep across many files to answer a question, index the codebase first and use code-scale tools. You'll get better results with far fewer tokens.
 
