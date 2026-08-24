@@ -17,12 +17,13 @@ import (
 // rewriting. Framework facts commonly refer to one another, so rewriting a
 // reference while entities are still being assigned IDs can leave a dangling
 // ID or make the result depend on iteration order.
-func CanonicalizeResult(repo, resourcePath string, result semantic.Result, sourceEntityIDs map[string]string) semantic.Result {
-	resourcePath = normalizePath(resourcePath)
-	if resourcePath == "." {
-		resourcePath = ""
+func CanonicalizeResult(repo, identityPath, filePrefix string, result semantic.Result, sourceEntityIDs map[string]string) semantic.Result {
+	identityPath = normalizePath(identityPath)
+	filePrefix = normalizePath(filePrefix)
+	if identityPath == "." {
+		identityPath = ""
 	}
-	resourceID := semantic.StableID("workspace_resource", repo, resourcePath)
+	resourceID := semantic.StableID("workspace_resource", repo, identityPath)
 	canonical := semantic.Result{Entities: make([]semantic.Entity, 0, len(result.Entities)), Relationships: make([]semantic.Relationship, 0, len(result.Relationships))}
 	idMap := make(map[string]string, len(result.Entities))
 	entities := make([]semantic.Entity, 0, len(result.Entities))
@@ -35,17 +36,17 @@ func CanonicalizeResult(repo, resourcePath string, result semantic.Result, sourc
 		entity := original
 		entity.Analyzer = semantic.AnalyzerFramework
 		entity.Metadata = cloneMetadata(original.Metadata)
-		relativeFile := relativeResourceFile(resourcePath, original.File)
-		entity.File = joinCanonicalPath(resourcePath, relativeFile)
+		relativeFile := relativeResourceFile(filePrefix, original.File)
+		entity.File = joinCanonicalPath(filePrefix, relativeFile)
 		if entity.Metadata == nil {
 			entity.Metadata = map[string]any{}
 		}
-		entity.Metadata["source_resource_path"] = resourcePath
+		entity.Metadata["source_resource_path"] = identityPath
 		// Ownership metadata is part of the canonical workspace identity too;
 		// raw per-resource analysis may have used the resource basename here.
 		entity.Metadata["source_resource_id"] = resourceID
 		if entity.Kind == KindAPIProvider || entity.Kind == KindCandidate {
-			entity.Metadata["provider_resource_path"] = resourcePath
+			entity.Metadata["provider_resource_path"] = identityPath
 			entity.Metadata["provider_resource_id"] = resourceID
 		}
 
@@ -53,7 +54,7 @@ func CanonicalizeResult(repo, resourcePath string, result semantic.Result, sourc
 		if derived != "" {
 			entity.Metadata["derived_from_entity_id"] = derived
 		}
-		entity.ID = canonicalEntityID(repo, resourcePath, relativeFile, entity, derived)
+		entity.ID = canonicalEntityID(repo, identityPath, relativeFile, entity, derived)
 		idMap[original.ID] = entity.ID
 		entities = append(entities, entity)
 	}
@@ -103,7 +104,7 @@ func CanonicalizeResult(repo, resourcePath string, result semantic.Result, sourc
 		if relationship.FromEntityID == "" || relationship.ToEntityID == "" {
 			continue
 		}
-		relationship.File = joinCanonicalPath(resourcePath, relativeResourceFile(resourcePath, original.File))
+		relationship.File = joinCanonicalPath(filePrefix, relativeResourceFile(filePrefix, original.File))
 		relationship.ID = semantic.StableID("framework_relationship", relationship.FromEntityID, relationship.ToEntityID, relationship.Kind)
 		canonical.Relationships = append(canonical.Relationships, relationship)
 	}

@@ -44,6 +44,7 @@ func indexSemanticRepository(
 		}
 		return 0, err
 	}
+	result, _ = fivem.CanonicalizeResourceResult(repo, fivem.ResourceContext{Name: resource, IdentityPath: resource, FilePrefix: ""}, result)
 	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, result); err != nil {
 		return 0, err
 	}
@@ -60,7 +61,7 @@ func indexSemanticRepository(
 		}
 		return 0, frameworkErr
 	}
-	frameworkResult = framework.CanonicalizeResult(repo, resource, frameworkResult, nil)
+	frameworkResult = framework.CanonicalizeResult(repo, resource, "", frameworkResult, nil)
 	frameworkResult = framework.RebuildFacts(repo, frameworkResult.Entities, []semantic.ResourceIdentity{{Name: resource, Path: resource, ID: semantic.StableID("workspace_resource", repo, resource)}})
 	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, frameworkResult); err != nil {
 		return 0, err

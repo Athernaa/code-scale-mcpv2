@@ -942,6 +942,7 @@ func (m *Manager) updateSemanticFile(repo, resource, filePath, language string, 
 		}
 		return err
 	}
+	result, _ = fivem.CanonicalizeResourceResult(repo, fivem.ResourceContext{Name: resource, IdentityPath: resource, FilePrefix: ""}, result)
 	if err := m.store.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerFiveM, filePath, result.Entities); err != nil {
 		return err
 	}
@@ -1028,6 +1029,7 @@ func (m *Manager) rebuildSemanticRepository(repoID int64, repo, resource string)
 		}
 		return err
 	}
+	result, _ = fivem.CanonicalizeResourceResult(repo, fivem.ResourceContext{Name: resource, IdentityPath: resource, FilePrefix: ""}, result)
 	if err := m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, result); err != nil {
 		return err
 	}
@@ -1064,7 +1066,7 @@ func (m *Manager) rebuildFrameworkRepository(repoID int64, repo, resource string
 		}
 		return err
 	}
-	result = framework.CanonicalizeResult(repo, resource, result, nil)
+	result = framework.CanonicalizeResult(repo, resource, "", result, nil)
 	result = framework.RebuildFacts(repo, result.Entities, []semantic.ResourceIdentity{{Name: resource, Path: resource, ID: semantic.StableID("workspace_resource", repo, resource)}})
 	return m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, result)
 }

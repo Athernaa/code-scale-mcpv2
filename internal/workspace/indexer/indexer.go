@@ -85,44 +85,16 @@ func Index(ctx context.Context, store *storage.IndexStore, repoID int64, repo, r
 			}
 			frameworkEntities = append(frameworkEntities, framework.FailureStatus(repo, r.Name, r.RelativePath))
 		}
-		idMap := map[string]string{}
-		for _, entity := range result.Entities {
-			old := entity.ID
-			entity.File = joinPath(r.RelativePath, entity.File)
-			entity.Analyzer = semantic.AnalyzerFiveM
-			if entity.Metadata == nil {
-				entity.Metadata = map[string]any{}
-			}
-			entity.Metadata["source_resource"] = r.Name
-			entity.Metadata["source_resource_path"] = r.RelativePath
-			entity.Metadata["source_resource_id"] = semantic.StableID("workspace_resource", repo, r.RelativePath)
-			// `resource` is the owning resource in indexed workspace facts. Keep
-			// export targets separate so resource-scoped search and trace output
-			// cannot attribute a call to its callee's resource.
-			if entity.Kind == fivem.KindExportCall {
-				if target, ok := entity.Metadata["resource"].(string); ok && target != "" {
-					entity.Metadata["target_resource"] = target
-				}
-			}
-			entity.Metadata["resource"] = r.Name
-			entity.Metadata["resource_path"] = r.RelativePath
-			entity.ID = semantic.StableID("fivem", repo, r.RelativePath, entity.Kind, entity.Name, fmt.Sprint(entity.Line), fmt.Sprint(entity.EndLine), entity.Side)
-			idMap[old] = entity.ID
-			combined.Entities = append(combined.Entities, entity)
+		canonicalResource, idMap := fivem.CanonicalizeResourceResult(repo, fivem.ResourceContext{Name: r.Name, IdentityPath: r.RelativePath, FilePrefix: r.RelativePath}, result)
+		combined.Entities = append(combined.Entities, canonicalResource.Entities...)
+		combined.Relationships = append(combined.Relationships, canonicalResource.Relationships...)
+		for _, entity := range canonicalResource.Entities {
 			if entity.Kind == fivem.KindManifestResource {
 				manifestByResource[r.RelativePath] = entity
 			}
 		}
 		if frameworkErr == nil {
 			frameworkEntities = append(frameworkEntities, NormalizeFrameworkResult(repo, r, frameworkResult, idMap).Entities...)
-		}
-		for _, rel := range result.Relationships {
-			rel.Analyzer = semantic.AnalyzerFiveM
-			rel.FromEntityID = idMap[rel.FromEntityID]
-			rel.ToEntityID = idMap[rel.ToEntityID]
-			rel.ID = semantic.StableID("relationship", rel.FromEntityID, rel.ToEntityID, rel.Kind)
-			rel.File = joinPath(r.RelativePath, rel.File)
-			combined.Relationships = append(combined.Relationships, rel)
 		}
 	}
 	resourcesWithSemantics, resourcesWithoutSemantics := semanticCoverage(d, combined.Entities)
@@ -194,42 +166,7 @@ func analyzeFramework(ctx context.Context, input semantic.RepositoryInput) (sema
 // NormalizeFrameworkResult is the shared workspace/resource-refresh identity
 // boundary. Callers must use it before persisting framework facts.
 func NormalizeFrameworkResult(repo string, r workspace.Resource, result semantic.Result, sourceEntityIDs map[string]string) semantic.Result {
-	return framework.CanonicalizeResult(repo, r.RelativePath, result, sourceEntityIDs)
-}
-
-func normalizeResourceResult(repo string, r workspace.Resource, result semantic.Result) semantic.Result {
-	normalized := semantic.Result{}
-	idMap := map[string]string{}
-	for _, entity := range result.Entities {
-		oldID := entity.ID
-		entity.File = joinPath(r.RelativePath, entity.File)
-		entity.Analyzer = semantic.AnalyzerFiveM
-		if entity.Metadata == nil {
-			entity.Metadata = map[string]any{}
-		}
-		entity.Metadata["source_resource"] = r.Name
-		entity.Metadata["source_resource_path"] = r.RelativePath
-		entity.Metadata["source_resource_id"] = semantic.StableID("workspace_resource", repo, r.RelativePath)
-		if entity.Kind == fivem.KindExportCall {
-			if target, ok := entity.Metadata["resource"].(string); ok && target != "" {
-				entity.Metadata["target_resource"] = target
-			}
-		}
-		entity.Metadata["resource"] = r.Name
-		entity.Metadata["resource_path"] = r.RelativePath
-		entity.ID = semantic.StableID("fivem", repo, r.RelativePath, entity.Kind, entity.Name, fmt.Sprint(entity.Line), fmt.Sprint(entity.EndLine), entity.Side)
-		idMap[oldID] = entity.ID
-		normalized.Entities = append(normalized.Entities, entity)
-	}
-	for _, relationship := range result.Relationships {
-		relationship.Analyzer = semantic.AnalyzerFiveM
-		relationship.FromEntityID = idMap[relationship.FromEntityID]
-		relationship.ToEntityID = idMap[relationship.ToEntityID]
-		relationship.ID = semantic.StableID("relationship", relationship.FromEntityID, relationship.ToEntityID, relationship.Kind)
-		relationship.File = joinPath(r.RelativePath, relationship.File)
-		normalized.Relationships = append(normalized.Relationships, relationship)
-	}
-	return normalized
+	return framework.CanonicalizeResult(repo, r.RelativePath, r.RelativePath, result, sourceEntityIDs)
 }
 
 // RefreshResource reparses only the changed resource's indexed files. It then
@@ -281,7 +218,7 @@ func RefreshResource(ctx context.Context, store *storage.IndexStore, repoID int6
 		}
 		return Result{}, err
 	}
-	normalized := normalizeResourceResult(repo, resource, result)
+	normalized, _ := fivem.CanonicalizeResourceResult(repo, fivem.ResourceContext{Name: resource.Name, IdentityPath: resource.RelativePath, FilePrefix: resource.RelativePath}, result)
 	if err := store.ReplaceSemanticResourceForAnalyzer(repoID, semantic.AnalyzerFiveM, resource.RelativePath, normalized); err != nil {
 		return Result{}, err
 	}

@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/Athernaa/code-scale-mcpv2/internal/repository"
+	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
+	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/framework"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -195,6 +197,105 @@ func TestIndexFolderPersistsFiveMSemantics(t *testing.T) {
 	response := decodeToolJSON(t, result)
 	if response["mode"] != "fivem_resource" || response["resource"] != "basic_resource" {
 		t.Fatalf("single resource mode metadata is incorrect: %#v", response)
+	}
+}
+
+func TestStandaloneFrameworkFilesRemainRepositoryRelative(t *testing.T) {
+	root := t.TempDir()
+	repoIdentity, err := repository.Local(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "fxmanifest.lua"), []byte("fx_version 'cerulean'\nserver_script 'server.lua'\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	resourceName, err := repository.LocalResourceName(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverSource := "exports('GetValue', function() end)\nexports." + resourceName + ":GetValue()\nexports.ox_inventory:AddItem(source, 'water', 1)\n"
+	if err := os.WriteFile(filepath.Join(root, "server.lua"), []byte(serverSource), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	result, _, err := IndexFolderHandler(&Deps{Store: store})(context.Background(), nil, IndexFolderArgs{Path: root})
+	if err != nil || result.IsError {
+		t.Fatalf("standalone index failed: result=%#v err=%v", result, err)
+	}
+	repoID, err := store.GetRepoID(repoIdentity.Repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := store.GetFiles(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexedFiles := map[string]bool{}
+	for _, file := range files {
+		indexedFiles[file.Path] = true
+	}
+	frameworkFacts, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFramework)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var getValueID string
+	for _, entity := range frameworkFacts {
+		if entity.Kind == framework.KindAPICall && entity.Name == "GetValue" {
+			getValueID = entity.ID
+		}
+		if entity.File != "" && !indexedFiles[entity.File] && entity.Kind != framework.KindStatus {
+			t.Fatalf("standalone framework file is not repository-relative: %#v", entity)
+		}
+		if entity.SymbolID != "" {
+			fileSymbols, symbolErr := store.GetSymbolsByFile(repoID, entity.File)
+			if symbolErr != nil {
+				t.Fatal(symbolErr)
+			}
+			foundSymbol := false
+			for _, symbol := range fileSymbols {
+				if symbol.ID == entity.SymbolID {
+					foundSymbol = true
+					break
+				}
+			}
+			if !foundSymbol {
+				t.Fatalf("framework SymbolID does not belong to its File: %#v", entity)
+			}
+		}
+	}
+	if getValueID == "" {
+		t.Fatalf("standalone framework call was not indexed: %#v", frameworkFacts)
+	}
+	searchResult, _, err := SearchSemanticsHandler(&Deps{Store: store})(context.Background(), nil, SearchSemanticsArgs{Repo: repoIdentity.Repo, Analyzer: semantic.AnalyzerFramework, Kind: framework.KindOperation, Query: "inventory_add_item"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := decodeToolJSON(t, searchResult)["results"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["file"] != "server.lua" {
+		t.Fatalf("standalone framework search used a resource-prefixed file: %#v", items)
+	}
+	trace, _, err := TraceRelationshipsHandler(&Deps{Store: store})(context.Background(), nil, TraceRelationshipsArgs{Repo: repoIdentity.Repo, EntityID: getValueID, Direction: "outgoing", Depth: 1, MaxResults: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	traced := false
+	for _, raw := range decodeToolJSON(t, trace)["results"].([]any) {
+		traced = true
+		item := raw.(map[string]any)
+		from := item["from"].(map[string]any)
+		if from["file"] != "server.lua" {
+			t.Fatalf("standalone trace endpoint was not repository-relative: %#v", item)
+		}
+		if to, ok := item["to"].(map[string]any); ok && to["file"] != "server.lua" {
+			t.Fatalf("standalone trace target used a resource-prefixed file: %#v", item)
+		}
+	}
+	if !traced {
+		t.Fatal("standalone framework trace returned no provider relationship")
 	}
 }
 

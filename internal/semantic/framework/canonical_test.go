@@ -21,13 +21,13 @@ func TestCanonicalizeResultRemapsFrameworkAndFiveMReferences(t *testing.T) {
 	}}
 	input := semantic.Result{Entities: []semantic.Entity{provider, factory, object, operation}, Relationships: []semantic.Relationship{{ID: "raw-rel", FromEntityID: "raw-operation", ToEntityID: "raw-factory", Kind: RelationshipDerivedFrom}}}
 	sourceMap := map[string]string{"raw-export": "fivem-export-canonical"}
-	local := CanonicalizeResult("repo", "resources/[custom]/banana", input, sourceMap)
+	local := CanonicalizeResult("repo", "resources/[custom]/banana", "resources/[custom]/banana", input, sourceMap)
 	full := input
 	full.Entities = append([]semantic.Entity(nil), input.Entities...)
 	for i := range full.Entities {
 		full.Entities[i].File = "resources/[custom]/banana/" + full.Entities[i].File
 	}
-	fullResult := CanonicalizeResult("repo", "resources/[custom]/banana", full, sourceMap)
+	fullResult := CanonicalizeResult("repo", "resources/[custom]/banana", "resources/[custom]/banana", full, sourceMap)
 
 	localByName := map[string]semantic.Entity{}
 	fullByName := map[string]semantic.Entity{}

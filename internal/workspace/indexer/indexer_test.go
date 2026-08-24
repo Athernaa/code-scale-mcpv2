@@ -236,9 +236,13 @@ func TestWorkspaceFrameworkCanonicalQBCoreChainAndReferenceIntegrity(t *testing.
 		"resources/[core]/qb-core/server.lua":      "exports('GetCoreObject', function() end)\nexports('GetPlayer', function() end)\nexports('AddMoney', function() end)\n",
 		"resources/[custom]/banana/fxmanifest.lua": "fx_version 'cerulean'\nserver_script 'server.lua'\n",
 		"resources/[custom]/banana/server.lua":     "exports('GetContext', function() end)\nexports('SetFlag', function() end)\n",
-		"resources/[app]/app/fxmanifest.lua":       "fx_version 'cerulean'\nserver_script 'server.lua'\n",
+		"resources/[app]/app/fxmanifest.lua":       "fx_version 'cerulean'\nserver_script 'server.lua'\nclient_script 'a.lua'\nclient_script 'b.lua'\n",
 		"resources/[app]/app/server.lua":           "local QBCore = exports['qb-core']:GetCoreObject()\nlocal Player = QBCore.Functions.GetPlayer(source)\nPlayer.Functions.AddMoney('cash', 500)\n",
 		"resources/[app]/app/jobs.lua":             "local Context = exports.banana:GetContext(source)\nContext:SetFlag('working', true)\n",
+		"resources/[app]/app/a.lua":                "TriggerServerEvent('avenlo:test')\nAddEventHandler('same:handler', function() end)\n",
+		"resources/[app]/app/b.lua":                "TriggerServerEvent('avenlo:test')\nAddEventHandler('same:handler', function() end)\n",
+		"resources/[custom]/banana/a.lua":          "exports('SameExport', function() end)\n",
+		"resources/[custom]/banana/b.lua":          "exports('SameExport', function() end)\n",
 	}
 	contents := map[string][]byte{}
 	languages := map[string]string{}
@@ -297,6 +301,26 @@ func TestWorkspaceFrameworkCanonicalQBCoreChainAndReferenceIntegrity(t *testing.
 	if !hasFrameworkEntity(first, framework.KindAPICall, "GetContext") || !hasFrameworkEntity(first, framework.KindAPICall, "SetFlag") {
 		t.Fatalf("workspace custom banana chain missing: %#v", first)
 	}
+	fiveM, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexedFiles, err := store.GetFiles(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileSet := map[string]bool{}
+	for _, file := range indexedFiles {
+		fileSet[workspace.NormalizePath(file.Path)] = true
+	}
+	for _, entity := range append(append([]semantic.Entity{}, fiveM...), first...) {
+		if entity.File != "" && entity.Kind != framework.KindStatus && !fileSet[workspace.NormalizePath(entity.File)] {
+			t.Fatalf("source-backed semantic file is absent from repository index: %#v", entity)
+		}
+	}
+	assertDistinctFiveMFacts(t, fiveM, "event_trigger", "avenlo:test", 2)
+	assertDistinctFiveMFacts(t, fiveM, "event_handler", "same:handler", 2)
+	assertDistinctFiveMFacts(t, fiveM, "export_definition", "SameExport", 2)
 	validateFrameworkReferences(t, store, repoID)
 	before := frameworkIDs(first)
 	if _, err := Index(context.Background(), store, repoID, repo, root, contents, languages, symbols, discovery); err != nil {
@@ -324,6 +348,21 @@ func hasFrameworkEntity(entities []semantic.Entity, kind, name string) bool {
 		}
 	}
 	return false
+}
+
+func assertDistinctFiveMFacts(t *testing.T, entities []semantic.Entity, kind, name string, expected int) {
+	t.Helper()
+	ids := map[string]bool{}
+	files := map[string]bool{}
+	for _, entity := range entities {
+		if entity.Kind == kind && entity.Name == name {
+			ids[entity.ID] = true
+			files[entity.File] = true
+		}
+	}
+	if len(ids) != expected || len(files) != expected {
+		t.Fatalf("expected %d distinct %s facts for %s, ids=%v files=%v", expected, kind, name, ids, files)
+	}
 }
 
 func frameworkIDs(entities []semantic.Entity) map[string]bool {
@@ -577,6 +616,45 @@ func TestRefreshResourceFailureClearsStaleWorkspaceEdgesAndPreservesUnrelatedFac
 	}
 	if !info.Incomplete || info.ResourcesWithoutSemantics == 0 {
 		t.Fatalf("failed resource was not reflected in workspace completeness: %#v", info)
+	}
+}
+
+func TestRefreshResourcePreservesUnchangedCanonicalFiveMIDs(t *testing.T) {
+	store, root, repoID, discovery, contents, languages, symbols := setupWorkspaceRefreshFixture(t)
+	defer store.Close()
+	beforeEntities, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := map[string]string{}
+	for _, entity := range beforeEntities {
+		if entity.Metadata["source_resource"] == "source_a" {
+			before[entity.Kind+"\x00"+entity.Name+"\x00"+entity.File] = entity.ID
+		}
+	}
+	beforeRelationships, err := store.GetSemanticRelationshipsForAnalyzer(repoID, semantic.AnalyzerFiveM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RefreshResource(context.Background(), store, repoID, "local/refresh-workspace", root, "resources/[b]/target_b", contents, languages, symbols, discovery); err != nil {
+		t.Fatal(err)
+	}
+	afterEntities, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entity := range afterEntities {
+		key := entity.Kind + "\x00" + entity.Name + "\x00" + entity.File
+		if oldID := before[key]; oldID != "" && oldID != entity.ID {
+			t.Fatalf("unchanged FiveM fact changed identity after resource refresh: %s -> %s", oldID, entity.ID)
+		}
+	}
+	afterRelationships, err := store.GetSemanticRelationshipsForAnalyzer(repoID, semantic.AnalyzerFiveM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterRelationships) != len(beforeRelationships) {
+		t.Fatalf("unchanged resource refresh changed FiveM relationship count: %d -> %d", len(beforeRelationships), len(afterRelationships))
 	}
 }
 
