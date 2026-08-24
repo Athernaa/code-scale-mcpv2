@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
 	"github.com/Athernaa/code-scale-mcpv2/internal/pathfilter"
@@ -485,6 +486,126 @@ func TestWatcherLiveGitignoreReconcilesExcludeAndUnignore(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("removing ignore rule did not reindex visible source: %#v", files)
+	}
+}
+
+func waitForWatcherCondition(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.NewTimer(8 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if condition() {
+			return
+		}
+		select {
+		case <-deadline.C:
+			t.Fatal("watcher condition was not observed before timeout")
+		case <-ticker.C:
+		}
+	}
+}
+
+func TestWatcherGitignoreRealEventPathReconciles(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "server-data")
+	extra := "resources/app/resource_x/extra.lua"
+	store, id, repoID := indexWatcherWorkspace(t, root, map[string]string{
+		".gitignore": "",
+		"resources/app/resource_x/fxmanifest.lua": "fx_version 'cerulean'\nserver_script 'server.lua'\n",
+		"resources/app/resource_x/server.lua":     "RegisterNetEvent('keep:event')\n",
+		extra:                                     "RegisterNetEvent('extra:event')\n",
+	})
+	defer func() { _ = store.Close() }()
+
+	mgr := NewManager(store)
+	if err := mgr.Watch(id.CanonicalPath); err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Close()
+
+	ignorePath := filepath.Join(root, ".gitignore")
+	if err := os.WriteFile(ignorePath, []byte(extra+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	waitForWatcherCondition(t, func() bool {
+		files, err := store.GetFiles(repoID)
+		if err != nil {
+			return false
+		}
+		for _, file := range files {
+			if file.Path == extra {
+				return false
+			}
+		}
+		return true
+	})
+
+	if err := os.Remove(ignorePath); err != nil {
+		t.Fatal(err)
+	}
+	waitForWatcherCondition(t, func() bool {
+		files, err := store.GetFiles(repoID)
+		if err != nil {
+			return false
+		}
+		for _, file := range files {
+			if file.Path == extra {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+func TestWatcherGenericRepositoryEntersWorkspaceOnServerConfig(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	store, id, repoID := indexWatcherFiles(t, root, map[string]string{"main.go": "package main\nfunc Main() {}\n"})
+	defer func() { _ = store.Close() }()
+
+	mainContent := []byte("package main\nfunc Main() {}\n")
+	mainSymbols, err := parser.ParseFile(mainContent, "main.go", "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph, err := generic.NewAnalyzer().AnalyzeRepository(context.Background(), semantic.RepositoryInput{
+		Repo:      id.Repo,
+		Files:     map[string][]byte{"main.go": mainContent},
+		Languages: map[string]string{"main.go": "go"},
+		Symbols:   map[string][]parser.Symbol{"main.go": mainSymbols},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, graph); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := NewManager(store)
+	if err := mgr.Watch(root); err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Close()
+
+	if err := os.WriteFile(filepath.Join(root, "server.cfg"), []byte("ensure missing_resource\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	waitForWatcherCondition(t, func() bool {
+		info, err := store.GetWorkspace(repoID)
+		return err == nil && info.Kind == workspace.KindFiveMWorkspace
+	})
+
+	configs, err := store.GetWorkspaceConfigs(repoID)
+	if err != nil || len(configs) != 1 || configs[0].Path != "server.cfg" {
+		t.Fatalf("server.cfg workspace entry was not persisted: %#v err=%v", configs, err)
+	}
+	files, err := store.GetFiles(repoID)
+	if err != nil || len(files) != 1 || files[0].Path != "main.go" {
+		t.Fatalf("generic source index changed during workspace entry: %#v err=%v", files, err)
+	}
+	graphEntities, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerGenericGraph)
+	if err != nil || len(graphEntities) == 0 {
+		t.Fatalf("generic graph was lost during workspace entry: %#v err=%v", graphEntities, err)
 	}
 }
 

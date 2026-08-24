@@ -277,7 +277,8 @@ func (m *Manager) watchLoop(fw *FolderWatch) {
 
 			// Workspace configuration is indexed as metadata, not as source.
 			lang := parser.DetectLanguage(event.Name)
-			if lang == "" && !strings.EqualFold(filepath.Ext(event.Name), ".cfg") {
+			isGitignore := strings.EqualFold(filepath.Base(event.Name), ".gitignore")
+			if lang == "" && !strings.EqualFold(filepath.Ext(event.Name), ".cfg") && !isGitignore {
 				if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
 					if err := m.handleRemovedDirectory(fw.Path, fw.Repo, event.Name); err != nil {
 						log.Printf("watcher: directory removal refresh failed: %v", err)
@@ -399,8 +400,9 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 		}
 	}
 	workspaceActive := previousWorkspace || mode == workspace.KindFiveMWorkspace
-	workspaceModeTransitioned := previousWorkspace && mode != workspace.KindFiveMWorkspace
-	if workspaceModeTransitioned {
+	workspaceEntered := !previousWorkspace && mode == workspace.KindFiveMWorkspace
+	workspaceExited := previousWorkspace && mode != workspace.KindFiveMWorkspace
+	if workspaceEntered || workspaceExited {
 		workspaceDirty = true
 		workspaceTopologyDirty = true
 	}
@@ -555,7 +557,7 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 	}
 	if workspaceDirty {
 		if workspaceTopologyDirty {
-			if workspaceModeTransitioned {
+			if workspaceExited {
 				if err := m.clearWorkspaceMode(indexedRepoID); err != nil {
 					log.Printf("watcher: workspace mode cleanup failed: %v", err)
 				}
