@@ -4,12 +4,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
 	"github.com/Athernaa/code-scale-mcpv2/internal/pathmatch"
@@ -1601,6 +1603,41 @@ func (s *IndexStore) GetSymbolsByIDs(repoID int64, symbolIDs []string) (map[stri
 	return result, nil
 }
 
+// GetSymbolsByFiles hydrates bounded file outlines in one indexed query.
+func (s *IndexStore) GetSymbolsByFiles(repoID int64, filePaths []string) (map[string][]parser.Symbol, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	unique := map[string]struct{}{}
+	for _, file := range filePaths {
+		if file != "" {
+			unique[file] = struct{}{}
+		}
+	}
+	result := make(map[string][]parser.Symbol, len(unique))
+	if len(unique) == 0 {
+		return result, nil
+	}
+	files := make([]string, 0, len(unique))
+	for file := range unique {
+		files = append(files, file)
+	}
+	sort.Strings(files)
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(files)), ",")
+	args := make([]any, 0, len(files)+1)
+	args = append(args, repoID)
+	for _, file := range files {
+		args = append(args, file)
+	}
+	symbols, err := s.querySymbols("SELECT * FROM symbols WHERE repo_id = ? AND file_path IN ("+placeholders+") ORDER BY file_path, line, symbol_id", args...)
+	if err != nil {
+		return nil, err
+	}
+	for _, symbol := range symbols {
+		result[symbol.File] = append(result[symbol.File], symbol)
+	}
+	return result, nil
+}
+
 // MatchTier indicates which search layer produced a result.
 type MatchTier string
 
@@ -2202,6 +2239,63 @@ func (s *IndexStore) GetFileContent(repoID int64, filePath string) ([]byte, erro
 	}
 
 	return os.ReadFile(contentPath)
+}
+
+// GetFileContentBounded reads at most maxBytes from the indexed content cache.
+// The returned flag is true when more cached bytes exist.
+func (s *IndexStore) GetFileContentBounded(repoID int64, filePath string, maxBytes int64) ([]byte, bool, error) {
+	if maxBytes <= 0 {
+		return nil, false, fmt.Errorf("maxBytes must be positive")
+	}
+	var owner, name string
+	if err := s.db.QueryRow("SELECT owner, name FROM repos WHERE id = ?", repoID).Scan(&owner, &name); err != nil {
+		return nil, false, err
+	}
+	repoDir, err := s.contentDir(owner, name)
+	if err != nil {
+		return nil, false, err
+	}
+	contentPath := filepath.Join(repoDir, filePath)
+	rel, err := filepath.Rel(filepath.Clean(repoDir), filepath.Clean(contentPath))
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return nil, false, fmt.Errorf("path traversal detected: %s", filePath)
+	}
+	file, err := os.Open(contentPath)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	if info.Size() <= maxBytes {
+		content, err := io.ReadAll(io.LimitReader(file, maxBytes))
+		return content, false, err
+	}
+	marker := []byte("\n// ... indexed content omitted by code-scale ...\n")
+	available := maxBytes - int64(len(marker))
+	if available < 2 {
+		available, marker = maxBytes, nil
+	}
+	headSize := available * 3 / 5
+	tailSize := available - headSize
+	head := make([]byte, headSize)
+	if _, err := file.ReadAt(head, 0); err != nil && err != io.EOF {
+		return nil, false, err
+	}
+	tail := make([]byte, tailSize)
+	if _, err := file.ReadAt(tail, info.Size()-tailSize); err != nil && err != io.EOF {
+		return nil, false, err
+	}
+	for len(head) > 0 && !utf8.Valid(head) {
+		head = head[:len(head)-1]
+	}
+	for len(tail) > 0 && !utf8.Valid(tail) {
+		tail = tail[1:]
+	}
+	content := append(append(head, marker...), tail...)
+	return content, true, nil
 }
 
 // SaveContentFile saves a raw source file to the content cache.

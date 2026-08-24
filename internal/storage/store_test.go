@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
@@ -601,6 +603,25 @@ func TestGenericSymbolLookupIgnoresCallFacts(t *testing.T) {
 	resolved, err := store.GetSemanticEntityBySymbolID(repoID, semantic.AnalyzerGenericGraph, symbol.SymbolID)
 	if err != nil || resolved.ID != symbol.ID {
 		t.Fatalf("generic symbol lookup was polluted by call facts: %#v err=%v", resolved, err)
+	}
+}
+
+func TestGetFileContentBoundedDoesNotReadWholeCacheFile(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.ReplaceRepoIndex("local", "bounded-content", "local", "", map[string]string{"large.txt": "x"}, map[string]string{"large.txt": "text"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	content := []byte(strings.Repeat("é", 10000))
+	if err := store.SaveContentFile("local", "bounded-content", "large.txt", content); err != nil {
+		t.Fatal(err)
+	}
+	repoID, _ := store.GetRepoID("local/bounded-content")
+	got, partial, err := store.GetFileContentBounded(repoID, "large.txt", 101)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !partial || len(got) > 101 || !utf8.Valid(got) {
+		t.Fatalf("bounded UTF-8 read failed: bytes=%d partial=%v", len(got), partial)
 	}
 }
 

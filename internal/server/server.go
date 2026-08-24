@@ -28,7 +28,7 @@ func NewCodeScaleServer(store *storage.IndexStore) (*mcp.Server, *watcher.Manage
 		Throttle: ratelimit.NewThrottler(),
 	}
 
-	// Register all 20 tools.
+	// Register all tools.
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "index_repo",
 		Description: "Index a GitHub repository's source code for symbol-level retrieval.",
@@ -98,6 +98,11 @@ func NewCodeScaleServer(store *storage.IndexStore) (*mcp.Server, *watcher.Manage
 		Name:        "plan_context",
 		Description: "Plan bounded, evidence-backed context candidates for a task using indexed repository facts.",
 	}, tools.PlanContextHandler(deps))
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "assemble_context",
+		Description: "Assemble a deterministic source-backed context package within an exact serialized token budget.",
+	}, tools.AssembleContextHandler(deps))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "batch_execute",

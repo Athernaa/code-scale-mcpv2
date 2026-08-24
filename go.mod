@@ -9,10 +9,12 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.4.0
 	github.com/sabhiram/go-gitignore v0.0.0-20210923224102-525f6e181f06
 	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
+	github.com/tiktoken-go/tokenizer v0.7.0
 	modernc.org/sqlite v1.46.1
 )
 
 require (
+	github.com/dlclark/regexp2 v1.11.5 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
