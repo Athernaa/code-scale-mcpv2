@@ -21,10 +21,11 @@ func New(planProvider PlanProvider, store SourceStore) *Assembler {
 }
 
 type stagedCandidate struct {
-	candidate planner.Candidate
-	stage     string
-	stageRank int
-	estimate  int
+	candidate    planner.Candidate
+	stage        string
+	stageRank    int
+	supportClass supportClass
+	estimate     int
 }
 
 func (a *Assembler) Assemble(ctx context.Context, request Request) (Package, error) {
@@ -68,10 +69,12 @@ func (a *Assembler) Assemble(ctx context.Context, request Request) (Package, err
 	if err != nil {
 		return Package{}, err
 	}
-	fileSymbols, err := a.Store.GetSymbolsByFiles(repoID, fileCandidates)
+	fileOutline, err := a.Store.GetSymbolsByFilesBounded(repoID, fileCandidates, DefaultOutlineSymbolsPerFile, DefaultOutlineSymbolsTotal)
 	if err != nil {
 		return Package{}, err
 	}
+	pool = hydrateEstimates(pool, symbols)
+	sortStagedCandidates(pool)
 
 	reserve := metadataReserve(budget)
 	usable := budget - reserve
@@ -80,7 +83,7 @@ func (a *Assembler) Assemble(ctx context.Context, request Request) (Package, err
 	debug := &Debug{}
 	originals := map[string]string{}
 	remaining := usable
-	supportReserve := directSupportReserve(pool, symbols, usable)
+	supportAllocations, supportReserve := directSupportAllocations(pool, usable)
 	seenSymbols, seenRanges := map[string]bool{}, map[string]bool{}
 	stop := "candidates_exhausted"
 	for stageRank, stage := range []string{"anchor", "direct_support", "domain_support", "peripheral"} {
@@ -112,6 +115,11 @@ func (a *Assembler) Assemble(ctx context.Context, request Request) (Package, err
 			if stage == "anchor" && supportReserve < allocation {
 				allocation -= supportReserve
 			}
+			if stage == "direct_support" && item.supportClass == supportCritical {
+				if reserved := supportAllocations[candidate.ID]; reserved > 0 && reserved < allocation {
+					allocation = reserved
+				}
+			}
 			if allocation < 24 {
 				pkg.Omitted.TokenBudget++
 				addOmittedID(&pkg.Omitted, candidate.ID)
@@ -125,7 +133,7 @@ func (a *Assembler) Assemble(ctx context.Context, request Request) (Package, err
 				stop = "source_read_limit"
 				continue
 			}
-			section, original, bytesRead, sourceRead, ok, loadErr := a.loadSection(ctx, repoID, candidate, symbols, fileSymbols, allocation, remainingBytes, counter)
+			section, original, bytesRead, sourceRead, ok, loadErr := a.loadSection(ctx, repoID, candidate, symbols, fileOutline.Symbols, fileOutline.TruncatedFiles[candidate.File], allocation, remainingBytes, counter)
 			if sourceRead {
 				debug.SourceReads++
 			}
@@ -293,15 +301,31 @@ func stagedCandidates(plan planner.Plan) []stagedCandidate {
 	add := func(candidates []planner.Candidate, fallback int) {
 		for _, candidate := range candidates {
 			stage, rank := stageFor(candidate, fallback)
-			all = append(all, stagedCandidate{candidate: candidate, stage: stage, stageRank: rank, estimate: estimateCandidate(candidate)})
+			all = append(all, stagedCandidate{candidate: candidate, stage: stage, stageRank: rank, supportClass: supportClassFor(candidate), estimate: estimateCandidate(candidate)})
 		}
 	}
 	add(plan.Primary, 0)
 	add(plan.Supporting, 2)
 	add(plan.Peripheral, 3)
+	sortStagedCandidates(all)
+	return all
+}
+
+type supportClass int
+
+const (
+	supportNone supportClass = iota
+	supportCritical
+	supportSecondary
+)
+
+func sortStagedCandidates(all []stagedCandidate) {
 	sort.SliceStable(all, func(i, j int) bool {
 		if all[i].stageRank != all[j].stageRank {
 			return all[i].stageRank < all[j].stageRank
+		}
+		if all[i].stageRank == 1 && all[i].supportClass != all[j].supportClass {
+			return all[i].supportClass < all[j].supportClass
 		}
 		if all[i].stageRank > 0 {
 			leftUtility := int64(all[i].candidate.Score) * int64(maxInt(1, all[j].estimate))
@@ -318,7 +342,6 @@ func stagedCandidates(plan planner.Plan) []stagedCandidate {
 		}
 		return all[i].candidate.ID < all[j].candidate.ID
 	})
-	return all
 }
 
 func stageFor(candidate planner.Candidate, fallback int) (string, int) {
@@ -344,29 +367,60 @@ func estimateCandidate(candidate planner.Candidate) int {
 	return 128
 }
 
-func directSupportReserve(pool []stagedCandidate, symbols map[string]parser.Symbol, usable int) int {
-	estimates := []int{}
+func hydrateEstimates(pool []stagedCandidate, symbols map[string]parser.Symbol) []stagedCandidate {
+	for i := range pool {
+		if symbol, ok := symbols[pool[i].candidate.SymbolID]; ok && symbol.ByteLength > 0 {
+			pool[i].estimate = int((symbol.ByteLength+3)/4) + 24
+		}
+	}
+	return pool
+}
+
+func supportClassFor(candidate planner.Candidate) supportClass {
+	for _, reason := range candidate.ReasonCodes {
+		switch reason {
+		case "direct_callee", "direct_caller", "framework_provider", "export_provider", "event_peer", "callback_peer", "impact_direct":
+			return supportCritical
+		}
+	}
+	for _, reason := range candidate.ReasonCodes {
+		if reason == "direct_reference" || reason == "direct_import" {
+			return supportSecondary
+		}
+	}
+	return supportNone
+}
+
+func directSupportAllocations(pool []stagedCandidate, usable int) (map[string]int, int) {
+	allocations := map[string]int{}
+	critical := []stagedCandidate{}
 	for _, item := range pool {
-		if item.stage != "direct_support" {
+		if item.stage != "direct_support" || item.supportClass != supportCritical {
 			continue
 		}
-		estimate := item.estimate
-		if symbol, ok := symbols[item.candidate.SymbolID]; ok && symbol.ByteLength > 0 {
-			estimate = int(symbol.ByteLength/4) + 24
-		}
-		estimates = append(estimates, estimate)
-		if len(estimates) == 3 {
+		critical = append(critical, item)
+		if len(critical) == 3 {
 			break
 		}
 	}
-	total := 0
-	for _, estimate := range estimates {
-		total += minInt(estimate, usable/6)
+	if len(critical) == 0 {
+		return allocations, 0
 	}
-	return minInt(total, usable/3)
+	total := 0
+	supportCap := usable / 3
+	perCandidate := supportCap / len(critical)
+	if perCandidate < 64 {
+		perCandidate = 64
+	}
+	for _, item := range critical {
+		allocation := minInt(item.estimate, perCandidate)
+		allocations[item.candidate.ID] = allocation
+		total += allocation
+	}
+	return allocations, minInt(total, supportCap)
 }
 
-func (a *Assembler) loadSection(ctx context.Context, repoID int64, candidate planner.Candidate, symbols map[string]parser.Symbol, fileSymbols map[string][]parser.Symbol, allocation int, remainingBytes int64, counter TokenCounter) (Section, string, int64, bool, bool, error) {
+func (a *Assembler) loadSection(ctx context.Context, repoID int64, candidate planner.Candidate, symbols map[string]parser.Symbol, fileSymbols map[string][]parser.Symbol, outlineTruncated bool, allocation int, remainingBytes int64, counter TokenCounter) (Section, string, int64, bool, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return Section{}, "", 0, false, false, err
 	}
@@ -390,8 +444,9 @@ func (a *Assembler) loadSection(ctx context.Context, repoID int64, candidate pla
 	} else if candidate.File != "" {
 		symbolsInFile := fileSymbols[candidate.File]
 		if len(symbolsInFile) > 0 {
-			source = fileOutline(symbolsInFile)
+			source = fileOutline(symbolsInFile, outlineTruncated)
 			bytesRead, section.ContentKind = 0, "file_outline"
+			section.OutlineTruncated = outlineTruncated
 		} else {
 			content, bytePartial, err := a.Store.GetFileContentBounded(repoID, candidate.File, remainingBytes)
 			if err != nil {
@@ -422,7 +477,7 @@ func sectionFromCandidate(c planner.Candidate) Section {
 	return Section{CandidateID: c.ID, SymbolID: c.SymbolID, File: c.File, Line: c.Line, EndLine: c.EndLine, Name: c.Name, Kind: c.Kind, Tier: c.Tier, Score: c.Score, ReasonCodes: append([]string(nil), c.ReasonCodes...), Resource: c.Resource, TargetResource: c.TargetResource, Framework: c.Framework, Side: c.Side, Authority: c.Authority, Resources: append([]string(nil), c.Resources...), TargetResources: append([]string(nil), c.TargetResources...), Frameworks: append([]string(nil), c.Frameworks...), Sides: append([]string(nil), c.Sides...), Authorities: append([]string(nil), c.Authorities...), Distance: c.Distance}
 }
 
-func fileOutline(symbols []parser.Symbol) string {
+func fileOutline(symbols []parser.Symbol, truncated bool) string {
 	sort.Slice(symbols, func(i, j int) bool {
 		if symbols[i].Line != symbols[j].Line {
 			return symbols[i].Line < symbols[j].Line
@@ -436,6 +491,9 @@ func fileOutline(symbols []parser.Symbol) string {
 			fmt.Fprintf(&b, ": %s", symbol.Signature)
 		}
 		b.WriteByte('\n')
+	}
+	if truncated {
+		b.WriteString("... additional indexed symbols omitted ...\n")
 	}
 	return strings.TrimSuffix(b.String(), "\n")
 }

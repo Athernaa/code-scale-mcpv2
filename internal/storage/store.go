@@ -1603,8 +1603,15 @@ func (s *IndexStore) GetSymbolsByIDs(repoID int64, symbolIDs []string) (map[stri
 	return result, nil
 }
 
-// GetSymbolsByFiles hydrates bounded file outlines in one indexed query.
-func (s *IndexStore) GetSymbolsByFiles(repoID int64, filePaths []string) (map[string][]parser.Symbol, error) {
+// GetSymbolsByFilesBounded hydrates deterministic file outlines without
+// materializing arbitrary symbol counts. The total cap is distributed fairly
+// across requested files; TruncatedFiles truthfully identifies capped files.
+type SymbolsByFiles struct {
+	Symbols        map[string][]parser.Symbol
+	TruncatedFiles map[string]bool
+}
+
+func (s *IndexStore) GetSymbolsByFilesBounded(repoID int64, filePaths []string, perFileLimit, totalLimit int) (SymbolsByFiles, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	unique := map[string]struct{}{}
@@ -1613,8 +1620,11 @@ func (s *IndexStore) GetSymbolsByFiles(repoID int64, filePaths []string) (map[st
 			unique[file] = struct{}{}
 		}
 	}
-	result := make(map[string][]parser.Symbol, len(unique))
+	result := SymbolsByFiles{Symbols: make(map[string][]parser.Symbol, len(unique)), TruncatedFiles: make(map[string]bool)}
 	if len(unique) == 0 {
+		return result, nil
+	}
+	if perFileLimit < 1 || totalLimit < 1 {
 		return result, nil
 	}
 	files := make([]string, 0, len(unique))
@@ -1622,18 +1632,54 @@ func (s *IndexStore) GetSymbolsByFiles(repoID int64, filePaths []string) (map[st
 		files = append(files, file)
 	}
 	sort.Strings(files)
+	if len(files) > totalLimit {
+		for _, file := range files[totalLimit:] {
+			result.TruncatedFiles[file] = true
+		}
+		files = files[:totalLimit]
+	}
+	fairLimit := totalLimit / len(files)
+	if fairLimit < 1 {
+		fairLimit = 1
+	}
+	if perFileLimit > fairLimit {
+		perFileLimit = fairLimit
+	}
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(files)), ",")
 	args := make([]any, 0, len(files)+1)
 	args = append(args, repoID)
 	for _, file := range files {
 		args = append(args, file)
 	}
-	symbols, err := s.querySymbols("SELECT * FROM symbols WHERE repo_id = ? AND file_path IN ("+placeholders+") ORDER BY file_path, line, symbol_id", args...)
+	countRows, err := s.db.Query("SELECT file_path, COUNT(*) FROM symbols WHERE repo_id = ? AND file_path IN ("+placeholders+") GROUP BY file_path", args...)
 	if err != nil {
-		return nil, err
+		return SymbolsByFiles{}, err
+	}
+	for countRows.Next() {
+		var file string
+		var count int
+		if err := countRows.Scan(&file, &count); err != nil {
+			_ = countRows.Close()
+			return SymbolsByFiles{}, err
+		}
+		if count > perFileLimit {
+			result.TruncatedFiles[file] = true
+		}
+	}
+	if err := countRows.Err(); err != nil {
+		_ = countRows.Close()
+		return SymbolsByFiles{}, err
+	}
+	_ = countRows.Close()
+	columns := "id, repo_id, file_id, symbol_id, file_path, name, qualified_name, kind, language, signature, content_hash, docstring, summary, decorators, keywords, parent_id, line, end_line, byte_offset, byte_length"
+	query := "WITH ranked AS (SELECT " + columns + ", ROW_NUMBER() OVER (PARTITION BY file_path ORDER BY line, symbol_id) AS file_rank FROM symbols WHERE repo_id = ? AND file_path IN (" + placeholders + ")) SELECT " + columns + " FROM ranked WHERE file_rank <= ? ORDER BY file_path, line, symbol_id"
+	queryArgs := append(append([]any(nil), args...), perFileLimit)
+	symbols, err := s.querySymbols(query, queryArgs...)
+	if err != nil {
+		return SymbolsByFiles{}, err
 	}
 	for _, symbol := range symbols {
-		result[symbol.File] = append(result[symbol.File], symbol)
+		result.Symbols[symbol.File] = append(result.Symbols[symbol.File], symbol)
 	}
 	return result, nil
 }

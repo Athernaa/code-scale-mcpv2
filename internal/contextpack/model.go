@@ -5,14 +5,17 @@ import (
 
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
 	"github.com/Athernaa/code-scale-mcpv2/internal/planner"
+	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 )
 
 const (
-	DefaultContextTokenBudget = 8000
-	MinContextTokenBudget     = 512
-	HardMaxContextTokenBudget = 64000
-	DefaultMaxSourceReads     = 64
-	DefaultMaxSourceBytes     = 4 << 20
+	DefaultContextTokenBudget    = 8000
+	MinContextTokenBudget        = 512
+	HardMaxContextTokenBudget    = 64000
+	DefaultMaxSourceReads        = 64
+	DefaultMaxSourceBytes        = 4 << 20
+	DefaultOutlineSymbolsPerFile = 128
+	DefaultOutlineSymbolsTotal   = 512
 )
 
 type Request struct {
@@ -41,34 +44,35 @@ type Budget struct {
 }
 
 type Section struct {
-	CandidateID     string   `json:"candidate_id"`
-	SymbolID        string   `json:"symbol_id,omitempty"`
-	File            string   `json:"file,omitempty"`
-	Line            int      `json:"line,omitempty"`
-	EndLine         int      `json:"end_line,omitempty"`
-	Name            string   `json:"name"`
-	Kind            string   `json:"kind"`
-	Tier            string   `json:"tier"`
-	Stage           string   `json:"stage"`
-	Score           int      `json:"score"`
-	ReasonCodes     []string `json:"reason_codes"`
-	Resource        string   `json:"resource,omitempty"`
-	TargetResource  string   `json:"target_resource,omitempty"`
-	Framework       string   `json:"framework,omitempty"`
-	Side            string   `json:"side,omitempty"`
-	Authority       string   `json:"authority,omitempty"`
-	Resources       []string `json:"resources,omitempty"`
-	TargetResources []string `json:"target_resources,omitempty"`
-	Frameworks      []string `json:"frameworks,omitempty"`
-	Sides           []string `json:"sides,omitempty"`
-	Authorities     []string `json:"authorities,omitempty"`
-	Distance        int      `json:"distance"`
-	ContentKind     string   `json:"content_kind"`
-	Source          string   `json:"source,omitempty"`
-	TokenCount      int      `json:"token_count"`
-	OriginalTokens  int      `json:"original_token_count,omitempty"`
-	Partial         bool     `json:"partial,omitempty"`
-	originalExact   bool
+	CandidateID      string   `json:"candidate_id"`
+	SymbolID         string   `json:"symbol_id,omitempty"`
+	File             string   `json:"file,omitempty"`
+	Line             int      `json:"line,omitempty"`
+	EndLine          int      `json:"end_line,omitempty"`
+	Name             string   `json:"name"`
+	Kind             string   `json:"kind"`
+	Tier             string   `json:"tier"`
+	Stage            string   `json:"stage"`
+	Score            int      `json:"score"`
+	ReasonCodes      []string `json:"reason_codes"`
+	Resource         string   `json:"resource,omitempty"`
+	TargetResource   string   `json:"target_resource,omitempty"`
+	Framework        string   `json:"framework,omitempty"`
+	Side             string   `json:"side,omitempty"`
+	Authority        string   `json:"authority,omitempty"`
+	Resources        []string `json:"resources,omitempty"`
+	TargetResources  []string `json:"target_resources,omitempty"`
+	Frameworks       []string `json:"frameworks,omitempty"`
+	Sides            []string `json:"sides,omitempty"`
+	Authorities      []string `json:"authorities,omitempty"`
+	Distance         int      `json:"distance"`
+	ContentKind      string   `json:"content_kind"`
+	Source           string   `json:"source,omitempty"`
+	TokenCount       int      `json:"token_count"`
+	OriginalTokens   int      `json:"original_token_count,omitempty"`
+	Partial          bool     `json:"partial,omitempty"`
+	OutlineTruncated bool     `json:"outline_truncated,omitempty"`
+	originalExact    bool
 }
 
 type Round struct {
@@ -121,7 +125,7 @@ type PlanProvider interface {
 type SourceStore interface {
 	GetRepoID(string) (int64, error)
 	GetSymbolsByIDs(int64, []string) (map[string]parser.Symbol, error)
-	GetSymbolsByFiles(int64, []string) (map[string][]parser.Symbol, error)
+	GetSymbolsByFilesBounded(int64, []string, int, int) (storage.SymbolsByFiles, error)
 	GetSymbolContent(int64, string) (string, error)
 	GetFileContentBounded(int64, string, int64) ([]byte, bool, error)
 }

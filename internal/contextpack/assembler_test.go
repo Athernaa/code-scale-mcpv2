@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,6 +14,8 @@ import (
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/generic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
+	"github.com/Athernaa/code-scale-mcpv2/internal/workspace"
+	workspaceindex "github.com/Athernaa/code-scale-mcpv2/internal/workspace/indexer"
 )
 
 type staticPlanner struct {
@@ -170,6 +174,97 @@ func TestUnusedDirectSupportReserveRollsBackToPrimary(t *testing.T) {
 	}
 }
 
+func TestCriticalDirectSupportPrecedesTinyReferenceAndImport(t *testing.T) {
+	for _, tc := range []struct {
+		name, criticalReason, weakReason string
+	}{
+		{"verified_provider", "framework_provider", "direct_reference"},
+		{"direct_callee", "direct_callee", "direct_import"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := assemblyStore(t)
+			defer store.Close()
+			repo := "local/critical-" + tc.name
+			primarySource := "func Target() {}\n"
+			criticalSource := "func Critical() {\n" + strings.Repeat("\twork()\n", 700) + "}\n"
+			weakSource := "func Tiny() {}\n"
+			primary := indexedSymbol("target.go", "Target", primarySource)
+			critical := indexedSymbol("critical.go", "Critical", criticalSource)
+			weak := indexedSymbol("tiny.go", "Tiny", weakSource)
+			writeAssemblyRepo(t, store, repo, map[string]string{primary.File: primarySource, critical.File: criticalSource, weak.File: weakSource}, []parser.Symbol{primary, critical, weak})
+			plan := planner.Plan{Repo: repo, TaskClass: "localized_change", IndexState: "complete", Primary: []planner.Candidate{candidate(primary, "primary", 9000, "exact_symbol_match")}, Supporting: []planner.Candidate{candidate(weak, "supporting", 8800, tc.weakReason), candidate(critical, "supporting", 7000, tc.criticalReason)}}
+			pkg, err := New(staticPlanner{plan: plan}, store).Assemble(context.Background(), Request{Repo: repo, Task: "fix Target", MaxContextTokens: 1400})
+			if err != nil {
+				t.Fatal(err)
+			}
+			criticalIndex, weakIndex := sectionIndex(pkg.Sections, critical.ID), sectionIndex(pkg.Sections, weak.ID)
+			if criticalIndex < 0 || (weakIndex >= 0 && criticalIndex > weakIndex) {
+				t.Fatalf("critical direct support lost to tiny %s: %#v", tc.weakReason, pkg.Sections)
+			}
+		})
+	}
+}
+
+func TestDirectSupportReserveSharesCriticalCapacity(t *testing.T) {
+	store := assemblyStore(t)
+	defer store.Close()
+	repo := "local/support-share"
+	sources := map[string]string{
+		"target.go": "func Target() {}\n",
+		"large.go":  "func Large() {\n" + strings.Repeat("\twork()\n", 1800) + "}\n",
+		"two.go":    "func Two() {}\n",
+		"three.go":  "func Three() {}\n",
+	}
+	target := indexedSymbol("target.go", "Target", sources["target.go"])
+	large := indexedSymbol("large.go", "Large", sources["large.go"])
+	two := indexedSymbol("two.go", "Two", sources["two.go"])
+	three := indexedSymbol("three.go", "Three", sources["three.go"])
+	writeAssemblyRepo(t, store, repo, sources, []parser.Symbol{target, large, two, three})
+	plan := planner.Plan{Repo: repo, TaskClass: "localized_change", IndexState: "complete", Primary: []planner.Candidate{candidate(target, "primary", 9000, "exact_symbol_match")}, Supporting: []planner.Candidate{candidate(large, "supporting", 8500, "direct_callee"), candidate(two, "supporting", 8400, "direct_caller"), candidate(three, "supporting", 8300, "event_peer")}}
+	pkg, err := New(staticPlanner{plan: plan}, store).Assemble(context.Background(), Request{Repo: repo, Task: "fix Target", MaxContextTokens: 2200})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{large.ID, two.ID, three.ID} {
+		if !containsSection(pkg.Sections, id) {
+			t.Fatalf("critical support %s was starved by the oversized sibling: %#v", id, pkg.Sections)
+		}
+	}
+}
+
+func TestHydratedByteLengthControlsDirectSupportUtility(t *testing.T) {
+	short := indexedSymbol("short.go", "Short", "func Short() {}\n")
+	long := indexedSymbol("min.go", "Minified", "func Minified(){"+strings.Repeat("x", 20000)+"}\n")
+	pool := []stagedCandidate{
+		{candidate: candidate(long, "supporting", 9000, "direct_callee"), stage: "direct_support", stageRank: 1, supportClass: supportCritical, estimate: 29},
+		{candidate: candidate(short, "supporting", 5000, "direct_callee"), stage: "direct_support", stageRank: 1, supportClass: supportCritical, estimate: 29},
+	}
+	pool = hydrateEstimates(pool, map[string]parser.Symbol{long.ID: long, short.ID: short})
+	sortStagedCandidates(pool)
+	if pool[0].candidate.SymbolID != short.ID || pool[1].estimate <= pool[0].estimate {
+		t.Fatalf("minified source did not use ByteLength estimate: %#v", pool)
+	}
+}
+
+func TestIncreasingBudgetPreservesCriticalSupportOrder(t *testing.T) {
+	store, repo, primary, support, weak := assemblyFixture(t)
+	defer store.Close()
+	provider := candidate(support, "supporting", 8000, "framework_provider")
+	plan := planner.Plan{Repo: repo, TaskClass: "localized_change", IndexState: "complete", Primary: []planner.Candidate{candidate(primary, "primary", 9000, "exact_symbol_match")}, Supporting: []planner.Candidate{candidate(weak, "supporting", 8900, "direct_reference"), provider}}
+	assembler := New(staticPlanner{plan: plan}, store)
+	small, err := assembler.Assemble(context.Background(), Request{Repo: repo, Task: "fix Primary", MaxContextTokens: 2000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	large, err := assembler.Assemble(context.Background(), Request{Repo: repo, Task: "fix Primary", MaxContextTokens: 2400})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sectionIndex(small.Sections, support.ID) < 0 || sectionIndex(large.Sections, support.ID) < 0 || sectionIndex(large.Sections, support.ID) > sectionIndex(large.Sections, weak.ID) {
+		t.Fatalf("increasing budget changed critical support priority: small=%#v large=%#v", small.Sections, large.Sections)
+	}
+}
+
 func TestFileCandidateUsesOutlineWithoutSourceRead(t *testing.T) {
 	store := assemblyStore(t)
 	defer store.Close()
@@ -288,6 +383,82 @@ func TestAssemblerPreservesFiveMFrameworkAuthorityWithoutFabricatingProvider(t *
 	}
 }
 
+func TestAssembleRealisticFiveMWorkspaceContext(t *testing.T) {
+	root := t.TempDir()
+	repo := "local/realistic-fivem"
+	files := map[string]string{
+		"server.cfg": "ensure banana_core\nensure ox_inventory\nensure banana_jobs\nensure banana_ui\n",
+		"resources/[core]/banana_core/fxmanifest.lua":       "fx_version 'cerulean'\nserver_script 'server/player.lua'\nserver_script 'server/inventory.lua'\n",
+		"resources/[core]/banana_core/server/player.lua":    "exports('GetPlayer', function(source) return { source = source } end)\n",
+		"resources/[core]/banana_core/server/inventory.lua": "exports('AddCharacterItem', function(source, item) return true end)\n",
+		"resources/[ox]/ox_inventory/fxmanifest.lua":        "fx_version 'cerulean'\nserver_script 'server/main.lua'\n",
+		"resources/[ox]/ox_inventory/server/main.lua":       "exports('AddItem', function(source, item, count) return true end)\nexports('RemoveItem', function(source, item, count) return true end)\nexports('Search', function(source, item) return {} end)\n",
+		"resources/[jobs]/banana_jobs/fxmanifest.lua":       "fx_version 'cerulean'\nclient_script 'client/main.lua'\nserver_script 'server/main.lua'\n",
+		"resources/[jobs]/banana_jobs/server/main.lua":      "local function LoadCharacter(source)\n local Player = exports.banana_core:GetPlayer(source)\n exports.ox_inventory:AddItem(source, 'water', 1)\n TriggerClientEvent('banana:characterLoaded', source)\n return Player\nend\nRegisterNetEvent('banana:loadCharacter', function() LoadCharacter(source) end)\nexports('LoadCharacter', LoadCharacter)\nlib.callback.register('banana:loadCharacter', function(source) return LoadCharacter(source) end)\nRegisterCommand('loadcharacter', function(source) LoadCharacter(source) end)\n",
+		"resources/[jobs]/banana_jobs/client/main.lua":      "RegisterNetEvent('banana:characterLoaded', function() end)\nTriggerServerEvent('banana:loadCharacter')\nlib.callback.await('banana:loadCharacter', false)\n",
+		"resources/[ui]/banana_ui/fxmanifest.lua":           "fx_version 'cerulean'\nclient_script 'client/main.lua'\n",
+		"resources/[ui]/banana_ui/client/main.lua":          "RegisterNUICallback('purchaseItem', function(data, cb) TriggerServerEvent('banana:loadCharacter'); cb({}) end)\n",
+	}
+	contents, languages, symbols, hashes := map[string][]byte{}, map[string]string{}, map[string][]parser.Symbol{}, map[string]string{}
+	allSymbols := []parser.Symbol{}
+	for path, source := range files {
+		full := filepath.Join(root, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(source), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if path == "server.cfg" {
+			continue
+		}
+		language := parser.DetectLanguage(path)
+		parsed, err := parser.ParseFile([]byte(source), path, language)
+		if err != nil {
+			t.Fatal(err)
+		}
+		contents[path], languages[path], symbols[path], hashes[path] = []byte(source), language, parsed, workspace.ContentHash([]byte(source))
+		allSymbols = append(allSymbols, parsed...)
+	}
+	store := assemblyStore(t)
+	defer store.Close()
+	if err := store.ReplaceRepoIndex("local", "realistic-fivem", "local", "", hashes, languages, allSymbols, root); err != nil {
+		t.Fatal(err)
+	}
+	for path, content := range contents {
+		if err := store.SaveContentFile("local", "realistic-fivem", path, content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	repoID, err := store.GetRepoID(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	discovery, err := workspace.Discover(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspaceindex.Index(context.Background(), store, repoID, repo, root, contents, languages, symbols, discovery); err != nil {
+		t.Fatal(err)
+	}
+	genericResult, err := generic.NewAnalyzer().AnalyzeRepository(context.Background(), semantic.RepositoryInput{Repo: repo, Files: contents, Languages: languages, Symbols: symbols})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, genericResult); err != nil {
+		t.Fatal(err)
+	}
+	pkg, err := New(planner.New(store), store).Assemble(context.Background(), Request{Repo: repo, Task: "inventory_add_item", MaxContextTokens: 4000, IncludeImpact: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter, _ := NewTokenCounter(TokenizerO200K)
+	data, _ := json.Marshal(pkg)
+	if counter.Count(string(data)) > 4000 || !containsFile(pkg.Sections, "resources/[jobs]/banana_jobs/server/main.lua") || !containsFile(pkg.Sections, "resources/[ox]/ox_inventory/server/main.lua") {
+		t.Fatalf("real workspace package lacks bounded cross-resource context: %#v", pkg)
+	}
+}
+
 func TestAssembleCancellationAndBudgetValidation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -364,6 +535,54 @@ func assemblyStore(t *testing.T) *storage.IndexStore {
 	}
 	return store
 }
+
+func writeAssemblyRepo(t *testing.T, store *storage.IndexStore, repo string, sources map[string]string, symbols []parser.Symbol) {
+	t.Helper()
+	parts := strings.Split(repo, "/")
+	if len(parts) != 2 {
+		t.Fatalf("invalid fixture repo %q", repo)
+	}
+	languages := make(map[string]string, len(sources))
+	for file := range sources {
+		languages[file] = "go"
+	}
+	if err := store.ReplaceRepoIndex(parts[0], parts[1], parts[0], "", sources, languages, symbols); err != nil {
+		t.Fatal(err)
+	}
+	for file, source := range sources {
+		if err := store.SaveContentFile(parts[0], parts[1], file, []byte(source)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func sectionIndex(sections []Section, symbolID string) int {
+	for i, section := range sections {
+		if section.SymbolID == symbolID {
+			return i
+		}
+	}
+	return -1
+}
+
+func containsFile(sections []Section, file string) bool {
+	for _, section := range sections {
+		if section.File == file {
+			return true
+		}
+	}
+	return false
+}
+
+func findSymbol(symbols []parser.Symbol, name string) parser.Symbol {
+	for _, symbol := range symbols {
+		if symbol.Name == name {
+			return symbol
+		}
+	}
+	return parser.Symbol{}
+}
+
 func indexedSymbol(file, name, source string) parser.Symbol {
 	return parser.Symbol{ID: parser.MakeSymbolID(file, name, parser.KindFunction), File: file, Name: name, QualifiedName: name, Kind: parser.KindFunction, Language: "go", Signature: fmt.Sprintf("func %s()", name), Line: 1, EndLine: strings.Count(source, "\n") + 1, ByteLength: int64(len(source)), ContentHash: parser.ComputeContentHash([]byte(source))}
 }

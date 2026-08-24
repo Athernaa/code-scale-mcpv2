@@ -625,6 +625,35 @@ func TestGetFileContentBoundedDoesNotReadWholeCacheFile(t *testing.T) {
 	}
 }
 
+func TestGetSymbolsByFilesBoundedCapsLargeOutlineMetadata(t *testing.T) {
+	store, err := NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	const count = 10001
+	source := "package large\n"
+	symbols := make([]parser.Symbol, 0, count)
+	for i := 0; i < count; i++ {
+		name := fmt.Sprintf("Symbol%05d", i)
+		symbols = append(symbols, parser.Symbol{ID: parser.MakeSymbolID("large.go", name, parser.KindFunction), File: "large.go", Name: name, QualifiedName: name, Kind: parser.KindFunction, Language: "go", Line: i + 1, EndLine: i + 1})
+	}
+	if err := store.ReplaceRepoIndex("owner", "outline-large", "owner", "", map[string]string{"large.go": source}, map[string]string{"large.go": "go"}, symbols); err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID("owner/outline-large")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.GetSymbolsByFilesBounded(repoID, []string{"large.go"}, 64, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Symbols["large.go"]) != 64 || !result.TruncatedFiles["large.go"] {
+		t.Fatalf("unbounded or untruthful outline result: %d %#v", len(result.Symbols["large.go"]), result.TruncatedFiles)
+	}
+}
+
 func TestUpsertFileIndexWithContentRestoresCacheWhenIndexUpdateFails(t *testing.T) {
 	store := newTestStore(t)
 	if err := store.SaveContentFile("local", "missing", "main.lua", []byte("old content")); err != nil {
