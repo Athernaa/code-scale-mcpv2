@@ -219,7 +219,7 @@ func evaluateCrossResource(input Input, sections map[string]Section, decision De
 		return blocked(input, decision, "cross_resource_coverage_missing")
 	}
 	for _, peer := range peers {
-		if providerAuthorityBlocked(peer) {
+		if isProvider(peer) && providerAuthorityBlocked(peer) {
 			return blocked(input, decision, providerAuthorityReason(providerAuthority(peer)))
 		}
 		section, ok := sections[peer.ID]
@@ -260,8 +260,10 @@ func providerAuthorityReason(authority string) string {
 		return "provider_local_ambiguous"
 	case "local_api_missing":
 		return "provider_local_api_missing"
+	case "required_provider_unverified":
+		return "required_provider_unverified"
 	default:
-		return "required_provider_missing"
+		return "required_provider_unverified"
 	}
 }
 
@@ -420,31 +422,34 @@ func providerBlocked(input Input, sections map[string]Section, decision Decision
 }
 
 func providerAuthorityBlocked(candidate planner.Candidate) bool {
-	if providerAuthority(candidate) == "local_verified" {
+	if hasAuthority(candidate, "local_verified") {
 		return false
 	}
-	authority := providerAuthority(candidate)
-	return authority == "external_unverified" || authority == "local_ambiguous" || authority == "local_api_missing"
+	return true
 }
 
 func providerAuthority(candidate planner.Candidate) string {
-	if candidate.Authority == "local_verified" {
-		return "local_verified"
-	}
-	for _, authority := range candidate.Authorities {
-		if authority == "local_verified" {
-			return "local_verified"
-		}
-	}
-	if candidate.Authority != "" {
-		return candidate.Authority
-	}
-	for _, authority := range candidate.Authorities {
-		if authority != "" {
+	for _, authority := range []string{"local_verified", "local_ambiguous", "local_api_missing", "external_unverified"} {
+		if hasAuthority(candidate, authority) {
 			return authority
 		}
 	}
-	return ""
+	if candidate.Authority != "" && candidate.Authority != "mixed" {
+		return candidate.Authority
+	}
+	return "required_provider_unverified"
+}
+
+func hasAuthority(candidate planner.Candidate, wanted string) bool {
+	if candidate.Authority == wanted {
+		return true
+	}
+	for _, authority := range candidate.Authorities {
+		if authority == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func completeSource(section Section) bool {
@@ -484,6 +489,8 @@ func providerBlockReason(input Input) string {
 			return "provider_local_ambiguous"
 		case "local_api_missing":
 			return "provider_local_api_missing"
+		case "required_provider_unverified":
+			return "required_provider_unverified"
 		}
 	}
 	for _, candidate := range append(append(append([]planner.Candidate{}, input.Plan.Primary...), input.Plan.Supporting...), input.Plan.Peripheral...) {
@@ -497,9 +504,11 @@ func providerBlockReason(input Input) string {
 			return "provider_local_ambiguous"
 		case "local_api_missing":
 			return "provider_local_api_missing"
+		case "required_provider_unverified":
+			return "required_provider_unverified"
 		}
 	}
-	return "required_provider_missing"
+	return "required_provider_unverified"
 }
 
 func relevantDirection(candidate planner.Candidate, direction string) bool {

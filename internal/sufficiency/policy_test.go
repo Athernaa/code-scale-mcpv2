@@ -88,7 +88,7 @@ func TestExactSemanticOperationRequiresLocalProviderFact(t *testing.T) {
 	call.TargetResource, call.Authority = "inventory", "local_verified"
 	input := Input{Plan: planner.Plan{TaskClass: "exact_semantic", TaskConfidence: "high", IndexState: "complete", Primary: []planner.Candidate{call}}, Stage: "anchor", Sections: []Section{completeSection(call)}}
 	decision := New().Evaluate(input)
-	if decision.Status != StatusBlocked || !hasReasonCode(decision, "required_provider_missing") {
+	if decision.Status != StatusBlocked || (!hasReasonCode(decision, "required_provider_missing") && !hasReasonCode(decision, "required_provider_unverified")) {
 		t.Fatalf("missing local provider was not blocked: %+v", decision)
 	}
 	provider := testCandidate("provider", "supporting", "framework_provider")
@@ -185,6 +185,9 @@ func TestCrossResourceNeedsActualPeerCoverage(t *testing.T) {
 	for _, reason := range []string{"event_peer", "callback_peer", "export_provider"} {
 		flow := testCandidate("flow-"+reason, "supporting", reason)
 		flow.Resource = "inventory"
+		if reason == "export_provider" {
+			flow.Authority = "local_verified"
+		}
 		flowAnchor := anchor
 		flowAnchor.ReasonCodes = []string{"event_trigger"}
 		flowInput := base
@@ -224,6 +227,38 @@ func TestMixedProviderAuthorityIsMonotonic(t *testing.T) {
 	input.Plan.Supporting[0].Authorities = []string{"external_unverified"}
 	if downgraded := New().Evaluate(input); downgraded.Status == StatusSufficient {
 		t.Fatalf("authority downgrade improved sufficiency: %+v", downgraded)
+	}
+}
+
+func TestProviderAuthorityRequiresPositiveLocalVerifiedProof(t *testing.T) {
+	anchor := testCandidate("caller", "primary", "framework_operation_match")
+	anchor.Resource, anchor.TargetResource, anchor.Authority = "jobs", "inventory", "local_verified"
+	cases := []struct {
+		name        string
+		authority   string
+		authorities []string
+		reason      string
+	}{
+		{"mixed_ambiguous", "mixed", []string{"external_unverified", "local_ambiguous"}, "provider_local_ambiguous"},
+		{"mixed_missing", "mixed", []string{"external_unverified", "local_api_missing"}, "provider_local_api_missing"},
+		{"empty", "", nil, "required_provider_unverified"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := testCandidate("provider-"+tc.name, "supporting", "framework_provider")
+			provider.Resource, provider.Authority, provider.Authorities = "inventory", tc.authority, tc.authorities
+			input := Input{Plan: planner.Plan{TaskClass: "cross_resource", TaskConfidence: "high", IndexState: "complete", Primary: []planner.Candidate{anchor}, Supporting: []planner.Candidate{provider}}, Stage: "direct_support", Sections: []Section{completeSection(anchor), completeSection(provider)}}
+			decision := New().Evaluate(input)
+			if decision.Status != StatusBlocked || !hasReasonCode(decision, tc.reason) {
+				t.Fatalf("unverified authority was accepted: %+v", decision)
+			}
+		})
+	}
+	verified := testCandidate("verified", "supporting", "export_provider")
+	verified.Resource, verified.Authority, verified.Authorities = "inventory", "mixed", []string{"local_verified", "external_unverified"}
+	input := Input{Plan: planner.Plan{TaskClass: "cross_resource", TaskConfidence: "high", IndexState: "complete", Primary: []planner.Candidate{anchor}, Supporting: []planner.Candidate{verified}}, Stage: "direct_support", Sections: []Section{completeSection(anchor), completeSection(verified)}}
+	if decision := New().Evaluate(input); decision.Status != StatusSufficient {
+		t.Fatalf("local verified export provider was not accepted: %+v", decision)
 	}
 }
 
