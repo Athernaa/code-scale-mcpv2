@@ -1119,11 +1119,14 @@ func finalize(result Plan, acc map[string]*candidateAccumulator, max int, focusF
 		}
 		return all[i].ID < all[j].ID
 	})
+	overflow := len(all) > max
 	if intent.TaskClass == "broad_unknown" {
 		all = diversityOrder(all, max)
 	}
-	if len(all) > max {
+	if overflow {
 		result.Truncated = true
+	}
+	if len(all) > max {
 		all = all[:max]
 	}
 	result.rankingDebug = result.rankingDebug[:0]

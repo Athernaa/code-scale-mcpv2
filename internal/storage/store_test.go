@@ -514,6 +514,76 @@ func TestAnalyzerScopedSemanticStorageAndIndexedTrace(t *testing.T) {
 	}
 }
 
+func TestRankedSemanticAdjacencyQueryIsStorageBounded(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.ReplaceRepoIndex("local", "bounded-hub", "local", "", map[string]string{"hub.go": "x"}, map[string]string{"hub.go": "go"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	repo := "local/bounded-hub"
+	repoID, err := store.GetRepoID(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := semantic.Entity{ID: "hub", Analyzer: semantic.AnalyzerGenericGraph, Repo: repo, File: "hub.go", Kind: "code_symbol", Name: "Hub"}
+	entities := make([]semantic.Entity, 1, 10001)
+	entities[0] = root
+	relationships := make([]semantic.Relationship, 0, 10000)
+	for i := 0; i < 10000; i++ {
+		target := semantic.Entity{ID: fmt.Sprintf("target-%05d", i), Analyzer: semantic.AnalyzerGenericGraph, Repo: repo, File: "hub.go", Kind: "code_symbol", Name: fmt.Sprintf("Target%05d", i)}
+		entities = append(entities, target)
+		relationships = append(relationships, semantic.Relationship{ID: fmt.Sprintf("edge-%05d", i), Analyzer: semantic.AnalyzerGenericGraph, Repo: repo, FromEntityID: root.ID, ToEntityID: target.ID, Kind: "references", Dynamic: true, Confidence: 0.1, File: "hub.go"})
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, semantic.Result{Entities: entities, Relationships: relationships}); err != nil {
+		t.Fatal(err)
+	}
+	store.mu.RLock()
+	edges, err := store.querySemanticEdgesLocked(repoID, semantic.AnalyzerGenericGraph, "outgoing", nil, []string{root.ID}, true, 26)
+	store.mu.RUnlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(edges) != 26 {
+		t.Fatalf("ranked adjacency query ignored its storage limit: got %d", len(edges))
+	}
+}
+
+func TestRankedSemanticAdjacencyPrefersStaticResolvedEdgeWithinKind(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.ReplaceRepoIndex("local", "ranked-static", "local", "", map[string]string{"hub.go": "x"}, map[string]string{"hub.go": "go"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	repo := "local/ranked-static"
+	repoID, err := store.GetRepoID(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := semantic.Entity{ID: "hub", Analyzer: semantic.AnalyzerGenericGraph, Repo: repo, File: "hub.go", Kind: "code_symbol", Name: "Hub"}
+	staticTarget := semantic.Entity{ID: "static-target", Analyzer: semantic.AnalyzerGenericGraph, Repo: repo, File: "hub.go", Kind: "code_symbol", Name: "StaticTarget"}
+	entities := []semantic.Entity{root, staticTarget}
+	relationships := []semantic.Relationship{{ID: "zzzz-static", Analyzer: semantic.AnalyzerGenericGraph, Repo: repo, FromEntityID: root.ID, ToEntityID: staticTarget.ID, Kind: "references", Confidence: 1, File: "hub.go"}}
+	for i := 0; i < 40; i++ {
+		target := semantic.Entity{ID: fmt.Sprintf("dynamic-target-%02d", i), Analyzer: semantic.AnalyzerGenericGraph, Repo: repo, File: "hub.go", Kind: "code_symbol", Name: fmt.Sprintf("Dynamic%02d", i)}
+		entities = append(entities, target)
+		relationships = append(relationships, semantic.Relationship{ID: fmt.Sprintf("aaaa-dynamic-%02d", i), Analyzer: semantic.AnalyzerGenericGraph, Repo: repo, FromEntityID: root.ID, ToEntityID: target.ID, Kind: "references", Dynamic: true, Confidence: 0.1, File: "hub.go"})
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, semantic.Result{Entities: entities, Relationships: relationships}); err != nil {
+		t.Fatal(err)
+	}
+	edges, truncated, err := store.TraceSemanticRankedWithOptions(repoID, root.ID, semantic.AnalyzerGenericGraph, "outgoing", []string{"references"}, 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !truncated {
+		t.Fatal("ranked adjacency did not report truncation")
+	}
+	for _, edge := range edges {
+		if edge.Relationship.ID == "zzzz-static" {
+			return
+		}
+	}
+	t.Fatalf("static resolved edge was starved by dynamic peers: %#v", edges)
+}
+
 func TestGenericSymbolLookupIgnoresCallFacts(t *testing.T) {
 	store := newTestStore(t)
 	if err := store.ReplaceRepoIndex("local", "symbol-lookup", "local", "", map[string]string{"main.ts": "x"}, map[string]string{"main.ts": "typescript"}, nil); err != nil {

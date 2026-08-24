@@ -1067,6 +1067,31 @@ func TestBroadDiversityOnlyReordersWeakCandidates(t *testing.T) {
 	}
 }
 
+func TestBroadDiversityTruncationIsReported(t *testing.T) {
+	acc := make(map[string]*candidateAccumulator)
+	files := make(map[string]bool)
+	work := newPlannerBudget()
+	for i := 0; i < 12; i++ {
+		file := fmt.Sprintf("entry-%02d.go", i)
+		item := newAccumulator("file:"+file, "local/diversity-truncation")
+		item.file, item.name, item.kind = file, fmt.Sprintf("Entry%02d", i), "file"
+		addEvidence(item, Evidence{Kind: "fallback", SourceID: file, Strength: 100, NoteCode: "lexical_fallback"}, work)
+		acc[item.key] = item
+		files[file] = true
+	}
+	plan := finalize(Plan{}, acc, 5, "", "", files, TaskIntent{TaskClass: "broad_unknown", BroadIntent: true})
+	if !plan.Truncated || candidateCount(plan) != 5 {
+		t.Fatalf("diversity truncation was not reported: %#v", plan)
+	}
+}
+
+func TestDiversityTreatsMixedStrongAndWeakEvidenceAsStrong(t *testing.T) {
+	candidate := Candidate{ID: "mixed", ReasonCodes: []string{"direct_reference", "exact_symbol_match"}}
+	if candidateWeakForDiversity(candidate) {
+		t.Fatalf("mixed strong and weak evidence was classified as weak: %#v", candidate)
+	}
+}
+
 func plannerStore(t *testing.T, owner, name string) *storage.IndexStore {
 	t.Helper()
 	store, err := storage.NewIndexStore(t.TempDir())

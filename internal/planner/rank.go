@@ -421,6 +421,12 @@ func isWeakAccumulator(a *candidateAccumulator) bool {
 func candidateWeakForDiversity(candidate Candidate) bool {
 	for _, reason := range candidate.ReasonCodes {
 		switch reason {
+		case "explicit_focus", "exact_symbol_match", "exact_semantic_match", "framework_operation_match", "direct_callee", "direct_caller", "framework_provider", "export_provider", "event_peer", "callback_peer":
+			return false
+		}
+	}
+	for _, reason := range candidate.ReasonCodes {
+		switch reason {
 		case "lexical_fallback", "broad_entry_point", "weak_exact_match", "direct_reference", "direct_import", "usage_match":
 			return true
 		}

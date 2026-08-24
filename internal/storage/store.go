@@ -1240,7 +1240,8 @@ func (s *IndexStore) traceSemanticWithOptions(repoID int64, entityID, analyzer, 
 		if current.depth >= depth {
 			continue
 		}
-		edges, err := s.querySemanticEdgesLocked(repoID, analyzer, direction, relationshipKinds, []string{current.id}, ranked)
+		remaining := maxResults + 1 - len(result)
+		edges, err := s.querySemanticEdgesLocked(repoID, analyzer, direction, relationshipKinds, []string{current.id}, ranked, remaining)
 		if err != nil {
 			return nil, false, err
 		}
@@ -1295,8 +1296,8 @@ func (s *IndexStore) traceSemanticWithOptions(repoID int64, entityID, analyzer, 
 	return result, truncated, nil
 }
 
-func (s *IndexStore) querySemanticEdgesLocked(repoID int64, analyzer, direction string, kinds, frontier []string, ranked bool) ([]semantic.Relationship, error) {
-	if len(frontier) == 0 {
+func (s *IndexStore) querySemanticEdgesLocked(repoID int64, analyzer, direction string, kinds, frontier []string, ranked bool, limit int) ([]semantic.Relationship, error) {
+	if len(frontier) == 0 || limit <= 0 {
 		return nil, nil
 	}
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(frontier)), ",")
@@ -1330,10 +1331,15 @@ func (s *IndexStore) querySemanticEdgesLocked(repoID int64, analyzer, direction 
 			WHEN kind IN ('triggers', 'handles', 'registers', 'uses_export', 'defines') THEN 1
 			WHEN kind = 'references' THEN 2
 			WHEN kind = 'imports' THEN 3
-			ELSE 4 END, id`
+			ELSE 4 END,
+			CASE WHEN dynamic = 0 THEN 0 ELSE 1 END,
+			CASE WHEN to_entity_id <> '' THEN 0 ELSE 1 END,
+			confidence DESC, id`
 	} else {
 		query += " ORDER BY id"
 	}
+	query += " LIMIT ?"
+	args = append(args, limit)
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
