@@ -265,6 +265,28 @@ func TestKnownAdapterOperationMappings(t *testing.T) {
 	}
 }
 
+func TestKnownFingerprintAndTargetAPIRequireStrongEvidence(t *testing.T) {
+	searchOnly := analyzeFixture(t, "ox_inventory", map[string][]byte{
+		"fxmanifest.lua": []byte("fx_version 'cerulean'\nserver_script 'inventory.lua'\n"),
+		"inventory.lua":  []byte("exports('Search', function() end)\n"),
+	}, []semantic.Entity{manifest("ox_inventory"), exportDefinition("ox_inventory", "inventory.lua", "Search", 1)})
+	for _, entity := range searchOnly.Entities {
+		if entity.Kind == KindAPIProvider && entity.Name == "Search" && entity.Framework == "ox_inventory" {
+			t.Fatalf("one generic Search API falsely fingerprinted ox_inventory: %#v", entity)
+		}
+	}
+
+	target := analyzeFixture(t, "ox_target", map[string][]byte{
+		"fxmanifest.lua": []byte("fx_version 'cerulean'\nserver_script 'target.lua'\n"),
+		"target.lua":     []byte("exports('addCustomThing', function() end)\n"),
+	}, []semantic.Entity{manifest("ox_target"), exportDefinition("ox_target", "target.lua", "addCustomThing", 1)})
+	for _, entity := range target.Entities {
+		if entity.Kind == KindAPIProvider && entity.Name == "addCustomThing" && entity.Framework == "ox_target" {
+			t.Fatalf("arbitrary add* API falsely fingerprinted ox_target: %#v", entity)
+		}
+	}
+}
+
 func TestRebuildFactsGatesKnownOperationsByLocalResourceRegistry(t *testing.T) {
 	provider := semantic.Entity{Analyzer: semantic.AnalyzerFramework, Repo: "r", File: "inventory/api.lua", Kind: KindAPIProvider, Name: "CustomInventoryAPI", Framework: FrameworkCustom, Metadata: map[string]any{"provider_resource": "ox_inventory", "provider_resource_path": "inventory"}}
 	call := semantic.Entity{Analyzer: semantic.AnalyzerFramework, Repo: "r", File: "app.lua", Kind: KindAPICall, Name: "AddItem", Framework: "ox_inventory", Metadata: map[string]any{"source_resource": "app", "source_resource_path": "app", "target_resource": "ox_inventory", "api": "AddItem", "mechanism": "export", "operation": "inventory_add_item"}}

@@ -29,6 +29,8 @@ type semanticEndpoint struct {
 	SourceResourcePath string `json:"source_resource_path,omitempty"`
 	ResourceID         string `json:"resource_id,omitempty"`
 	TargetResource     string `json:"target_resource,omitempty"`
+	ProviderStatus     string `json:"provider_status,omitempty"`
+	ProviderVerified   *bool  `json:"provider_verified,omitempty"`
 	Side               string `json:"side,omitempty"`
 	File               string `json:"file"`
 	Line               int    `json:"line"`
@@ -121,7 +123,8 @@ func TraceRelationshipsHandler(deps *Deps) func(context.Context, *mcp.CallToolRe
 
 func endpoint(entity semantic.Entity) semanticEndpoint {
 	operation, resource, sourceResource, sourceResourcePath, resourceID, targetResource := semanticMetadata(entity)
-	return semanticEndpoint{ID: entity.ID, Kind: entity.Kind, Name: entity.Name, Operation: operation, Framework: entity.Framework, Resource: resource, SourceResource: sourceResource, SourceResourcePath: sourceResourcePath, ResourceID: resourceID, TargetResource: targetResource, Side: entity.Side, File: entity.File, Line: entity.Line, SymbolID: entity.SymbolID, Dynamic: entity.Dynamic}
+	providerStatus, providerVerified := providerAuthority(entity)
+	return semanticEndpoint{ID: entity.ID, Kind: entity.Kind, Name: entity.Name, Operation: operation, Framework: entity.Framework, Resource: resource, SourceResource: sourceResource, SourceResourcePath: sourceResourcePath, ResourceID: resourceID, TargetResource: targetResource, ProviderStatus: providerStatus, ProviderVerified: providerVerified, Side: entity.Side, File: entity.File, Line: entity.Line, SymbolID: entity.SymbolID, Dynamic: entity.Dynamic}
 }
 
 func normalizedDirection(direction string) string {

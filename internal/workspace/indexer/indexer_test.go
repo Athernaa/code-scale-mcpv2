@@ -228,6 +228,156 @@ func TestWorkspaceCrossResourceFactsAndIsolation(t *testing.T) {
 	}
 }
 
+func TestWorkspaceFrameworkCanonicalQBCoreChainAndReferenceIntegrity(t *testing.T) {
+	root := t.TempDir()
+	texts := map[string]string{
+		"server.cfg": "ensure qb-core\nensure banana\nensure app\n",
+		"resources/[core]/qb-core/fxmanifest.lua":  "fx_version 'cerulean'\nserver_script 'server.lua'\n",
+		"resources/[core]/qb-core/server.lua":      "exports('GetCoreObject', function() end)\nexports('GetPlayer', function() end)\nexports('AddMoney', function() end)\n",
+		"resources/[custom]/banana/fxmanifest.lua": "fx_version 'cerulean'\nserver_script 'server.lua'\n",
+		"resources/[custom]/banana/server.lua":     "exports('GetContext', function() end)\nexports('SetFlag', function() end)\n",
+		"resources/[app]/app/fxmanifest.lua":       "fx_version 'cerulean'\nserver_script 'server.lua'\n",
+		"resources/[app]/app/server.lua":           "local QBCore = exports['qb-core']:GetCoreObject()\nlocal Player = QBCore.Functions.GetPlayer(source)\nPlayer.Functions.AddMoney('cash', 500)\n",
+		"resources/[app]/app/jobs.lua":             "local Context = exports.banana:GetContext(source)\nContext:SetFlag('working', true)\n",
+	}
+	contents := map[string][]byte{}
+	languages := map[string]string{}
+	symbols := map[string][]parser.Symbol{}
+	hashes := map[string]string{}
+	var allSymbols []parser.Symbol
+	for path, text := range texts {
+		full := filepath.Join(root, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(text), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if filepath.Ext(path) == ".cfg" {
+			continue
+		}
+		lang := parser.DetectLanguage(path)
+		parsed, err := parser.ParseFile([]byte(text), path, lang)
+		if err != nil {
+			t.Fatal(err)
+		}
+		contents[path] = []byte(text)
+		languages[path] = lang
+		symbols[path] = parsed
+		hashes[path] = workspace.ContentHash([]byte(text))
+		allSymbols = append(allSymbols, parsed...)
+	}
+	store, err := storage.NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.ReplaceRepoIndex("local", "canonical-chain", "local", "", hashes, languages, allSymbols, root); err != nil {
+		t.Fatal(err)
+	}
+	repo := "local/canonical-chain"
+	repoID, err := store.GetRepoID(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	discovery, err := workspace.Discover(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Index(context.Background(), store, repoID, repo, root, contents, languages, symbols, discovery); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFramework)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasFrameworkEntity(first, framework.KindAPICall, "GetCoreObject") || !hasFrameworkEntity(first, framework.KindAPICall, "GetPlayer") || !hasFrameworkEntity(first, framework.KindAPICall, "AddMoney") {
+		t.Fatalf("workspace QBCore chain missing: %#v", first)
+	}
+	if !hasFrameworkEntity(first, framework.KindAPICall, "GetContext") || !hasFrameworkEntity(first, framework.KindAPICall, "SetFlag") {
+		t.Fatalf("workspace custom banana chain missing: %#v", first)
+	}
+	validateFrameworkReferences(t, store, repoID)
+	before := frameworkIDs(first)
+	if _, err := Index(context.Background(), store, repoID, repo, root, contents, languages, symbols, discovery); err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFramework)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := frameworkIDs(after)
+	if len(got) != len(before) {
+		t.Fatalf("idempotent index changed framework fact count: %d != %d", len(got), len(before))
+	}
+	for id := range before {
+		if !got[id] {
+			t.Fatalf("idempotent index lost framework ID %s", id)
+		}
+	}
+}
+
+func hasFrameworkEntity(entities []semantic.Entity, kind, name string) bool {
+	for _, entity := range entities {
+		if entity.Kind == kind && entity.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func frameworkIDs(entities []semantic.Entity) map[string]bool {
+	result := map[string]bool{}
+	for _, entity := range entities {
+		result[entity.ID] = true
+	}
+	return result
+}
+
+func validateFrameworkReferences(t *testing.T, store *storage.IndexStore, repoID int64) {
+	t.Helper()
+	frameworkFacts, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFramework)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fiveMFacts, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]semantic.Entity{}
+	for _, entity := range frameworkFacts {
+		byID[entity.ID] = entity
+	}
+	fiveMByID := map[string]semantic.Entity{}
+	for _, entity := range fiveMFacts {
+		fiveMByID[entity.ID] = entity
+	}
+	for _, entity := range frameworkFacts {
+		for _, field := range []string{"origin_factory_id", "backing_call_id"} {
+			if ref, _ := entity.Metadata[field].(string); ref != "" {
+				target, ok := byID[ref]
+				if !ok || target.Kind != framework.KindAPICall {
+					t.Fatalf("dangling %s on %#v", field, entity)
+				}
+			}
+		}
+		if entity.Metadata["provider_verified"] == true {
+			if ref, _ := entity.Metadata["provider_entity_id"].(string); ref != "" {
+				target, ok := byID[ref]
+				if !ok || target.Kind != framework.KindAPIProvider {
+					t.Fatalf("dangling provider_entity_id on %#v", entity)
+				}
+			}
+		}
+		if ref, _ := entity.Metadata["derived_from_entity_id"].(string); ref != "" {
+			target, ok := fiveMByID[ref]
+			if !ok || target.Kind != "export_definition" {
+				t.Fatalf("dangling FiveM bridge on %#v", entity)
+			}
+		}
+	}
+}
+
 func TestFrameworkAnalysisFailureIsResourceScoped(t *testing.T) {
 	store, root, repoID, discovery, contents, languages, symbols := setupWorkspaceRefreshFixture(t)
 	defer store.Close()

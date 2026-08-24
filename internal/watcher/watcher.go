@@ -752,6 +752,11 @@ func (m *Manager) refreshFrameworkResource(repoID int64, repo, root, resourcePat
 		}
 		return analysisErr
 	}
+	// Resource refreshes must cross the same canonical identity boundary as
+	// full workspace indexing before persistence. The FiveM facts supplied to
+	// this analysis are already persisted/canonical, so no source ID map is
+	// needed for the derived_from bridge here.
+	result = workspaceindex.NormalizeFrameworkResult(repo, resource, result, nil)
 	if err := m.store.ReplaceSemanticResourceForAnalyzer(repoID, semantic.AnalyzerFramework, resourcePath, result); err != nil {
 		return err
 	}
@@ -1059,6 +1064,7 @@ func (m *Manager) rebuildFrameworkRepository(repoID int64, repo, resource string
 		}
 		return err
 	}
+	result = framework.CanonicalizeResult(repo, resource, result, nil)
 	result = framework.RebuildFacts(repo, result.Entities, []semantic.ResourceIdentity{{Name: resource, Path: resource, ID: semantic.StableID("workspace_resource", repo, resource)}})
 	return m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, result)
 }

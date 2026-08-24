@@ -219,10 +219,11 @@ func TestFrameworkSearchTraceAndImpactExposeOwnerAndProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider := semantic.Entity{ID: "framework-provider", Analyzer: semantic.AnalyzerFramework, Repo: "local/framework-tools", File: "core.lua", Kind: "framework_api_provider", Name: "GetPlayer", Framework: "custom", Line: 3, Metadata: map[string]any{"source_resource": "core", "source_resource_path": "resources/core", "provider_resource": "core", "provider_resource_path": "resources/core"}}
-	call := semantic.Entity{ID: "framework-call", Analyzer: semantic.AnalyzerFramework, Repo: provider.Repo, File: "app.lua", SymbolID: "app.lua::run#function", Kind: "framework_api_call", Name: "GetPlayer", Framework: "custom", Line: 8, Metadata: map[string]any{"source_resource": "app", "source_resource_path": "resources/app", "target_resource": "core", "operation": "player_lookup", "api": "GetPlayer"}}
-	op := semantic.Entity{ID: "framework-op", Analyzer: semantic.AnalyzerFramework, Repo: provider.Repo, File: "app.lua", SymbolID: call.SymbolID, Kind: "framework_operation", Name: "player_lookup", Framework: "custom", Line: 8, Metadata: map[string]any{"source_resource": "app", "source_resource_path": "resources/app", "target_resource": "core", "provider_resource": "core"}}
+	call := semantic.Entity{ID: "framework-call", Analyzer: semantic.AnalyzerFramework, Repo: provider.Repo, File: "app.lua", SymbolID: "app.lua::run#function", Kind: "framework_api_call", Name: "GetPlayer", Framework: "custom", Line: 8, Metadata: map[string]any{"source_resource": "app", "source_resource_path": "resources/app", "target_resource": "core", "operation": "player_lookup", "api": "GetPlayer", "provider_status": "local_verified", "provider_verified": true}}
+	op := semantic.Entity{ID: "framework-op", Analyzer: semantic.AnalyzerFramework, Repo: provider.Repo, File: "app.lua", SymbolID: call.SymbolID, Kind: "framework_operation", Name: "player_lookup", Framework: "custom", Line: 8, Metadata: map[string]any{"source_resource": "app", "source_resource_path": "resources/app", "target_resource": "core", "provider_resource": "core", "provider_status": "local_verified", "provider_verified": true}}
+	external := semantic.Entity{ID: "external-call", Analyzer: semantic.AnalyzerFramework, Repo: provider.Repo, File: "app.lua", Kind: "framework_api_call", Name: "AddItem", Framework: "ox_inventory", Line: 12, Metadata: map[string]any{"source_resource": "app", "source_resource_path": "resources/app", "target_resource": "ox_inventory", "api": "AddItem", "provider_status": "external_unverified", "provider_verified": false}}
 	edges := []semantic.Relationship{{ID: "framework-edge", Analyzer: semantic.AnalyzerFramework, Repo: provider.Repo, FromEntityID: call.ID, ToEntityID: provider.ID, Kind: "framework_calls", Name: "GetPlayer", Confidence: 1, File: call.File, Line: call.Line}}
-	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, semantic.Result{Entities: []semantic.Entity{provider, call, op}, Relationships: edges}); err != nil {
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, semantic.Result{Entities: []semantic.Entity{provider, call, op, external}, Relationships: edges}); err != nil {
 		t.Fatal(err)
 	}
 	deps := &Deps{Store: store}
@@ -234,6 +235,9 @@ func TestFrameworkSearchTraceAndImpactExposeOwnerAndProvider(t *testing.T) {
 	items := search["results"].([]any)
 	if len(items) != 1 || items[0].(map[string]any)["resource"] != "app" {
 		t.Fatalf("framework owner filter/bridge incorrect: %#v", search)
+	}
+	if items[0].(map[string]any)["provider_status"] != "local_verified" || items[0].(map[string]any)["provider_verified"] != true {
+		t.Fatalf("framework authority was not exposed through search: %#v", search)
 	}
 	traceResult, _, err := TraceRelationshipsHandler(deps)(context.Background(), nil, TraceRelationshipsArgs{Repo: provider.Repo, EntityID: call.ID, Direction: "outgoing", Depth: 1, MaxResults: 10})
 	if err != nil {
@@ -248,6 +252,17 @@ func TestFrameworkSearchTraceAndImpactExposeOwnerAndProvider(t *testing.T) {
 	}
 	if from["framework"] != "custom" || to["framework"] != "custom" {
 		t.Fatalf("trace framework bridge incorrect: %#v", trace)
+	}
+	if from["provider_status"] != "local_verified" || from["provider_verified"] != true {
+		t.Fatalf("framework authority was not exposed through trace: %#v", trace)
+	}
+	externalResult, _, err := SearchSemanticsHandler(deps)(context.Background(), nil, SearchSemanticsArgs{Repo: provider.Repo, Analyzer: semantic.AnalyzerFramework, Resource: "app", Query: "AddItem", Kind: "framework_api_call"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	externalItems := decodeToolJSON(t, externalResult)["results"].([]any)
+	if len(externalItems) != 1 || externalItems[0].(map[string]any)["provider_status"] != "external_unverified" || externalItems[0].(map[string]any)["provider_verified"] != false {
+		t.Fatalf("external authority was not exposed through search: %#v", externalItems)
 	}
 	impactResult, _, err := AnalyzeImpactHandler(deps)(context.Background(), nil, AnalyzeImpactArgs{Repo: provider.Repo, EntityID: provider.ID, Depth: 1, MaxResults: 10})
 	if err != nil {

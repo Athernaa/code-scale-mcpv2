@@ -14,6 +14,7 @@ import (
 	"github.com/Athernaa/code-scale-mcpv2/internal/repository"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/fivem"
+	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/framework"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/generic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 	"github.com/Athernaa/code-scale-mcpv2/internal/workspace"
@@ -1033,7 +1034,13 @@ func TestWatcherWorkspaceSourceEditPreservesUnrelatedResourceFacts(t *testing.T)
 		if err := os.WriteFile(filepath.Join(dir, "fxmanifest.lua"), []byte("fx_version 'cerulean'\nserver_script 'server.lua'\n"), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, "server.lua"), []byte("RegisterNetEvent('"+event+"')\n"), 0600); err != nil {
+		content := "RegisterNetEvent('" + event + "')\n"
+		if name == "resource_a" {
+			content = "exports('GetValue', function() end)\n" + content
+		} else {
+			content = "exports.resource_a:GetValue()\n" + content
+		}
+		if err := os.WriteFile(filepath.Join(dir, "server.lua"), []byte(content), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1063,8 +1070,26 @@ func TestWatcherWorkspaceSourceEditPreservesUnrelatedResourceFacts(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	frameworkBefore, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFramework)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stable := map[string]string{}
+	for _, entity := range frameworkBefore {
+		if entity.Kind == framework.KindAPIProvider || entity.Kind == framework.KindAPICall {
+			stable[entity.Name+"\x00"+entity.File] = entity.ID
+		}
+	}
+	relationshipsBefore, err := store.GetSemanticRelationshipsForAnalyzer(repoID, semantic.AnalyzerFramework)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stableRelationships := map[string]string{}
+	for _, relationship := range relationshipsBefore {
+		stableRelationships[relationship.FromEntityID+"\x00"+relationship.ToEntityID+"\x00"+relationship.Kind] = relationship.ID
+	}
 	updatedPath := filepath.Join(root, "resources", "group", "resource_b", "server.lua")
-	if err := os.WriteFile(updatedPath, []byte("RegisterNetEvent('b:updated')\n"), 0600); err != nil {
+	if err := os.WriteFile(updatedPath, []byte("exports.resource_a:GetValue()\nRegisterNetEvent('b:updated')\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	mgr.reindexFiles(watch, []string{updatedPath})
@@ -1087,5 +1112,24 @@ func TestWatcherWorkspaceSourceEditPreservesUnrelatedResourceFacts(t *testing.T)
 	}
 	if !oldA || !newB || oldB {
 		t.Fatalf("resource-scoped refresh was incorrect: oldA=%v newB=%v oldB=%v entities=%#v", oldA, newB, oldB, entities)
+	}
+	frameworkAfter, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFramework)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entity := range frameworkAfter {
+		if oldID := stable[entity.Name+"\x00"+entity.File]; oldID != "" && oldID != entity.ID {
+			t.Fatalf("resource refresh changed unchanged framework identity: old=%s new=%s entity=%#v", oldID, entity.ID, entity)
+		}
+	}
+	relationshipsAfter, err := store.GetSemanticRelationshipsForAnalyzer(repoID, semantic.AnalyzerFramework)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, relationship := range relationshipsAfter {
+		key := relationship.FromEntityID + "\x00" + relationship.ToEntityID + "\x00" + relationship.Kind
+		if oldID := stableRelationships[key]; oldID != "" && oldID != relationship.ID {
+			t.Fatalf("resource refresh changed unchanged framework relationship identity: old=%s new=%s", oldID, relationship.ID)
+		}
 	}
 }

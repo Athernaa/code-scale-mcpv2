@@ -56,14 +56,25 @@ func (a *Analyzer) AnalyzeRepository(ctx context.Context, input semantic.Reposit
 			return semantic.Result{}, err
 		}
 		owner := state.ownerByFile[path]
+		if owner.name == "" {
+			owner.name = input.Resource
+		}
+		if owner.path == "" {
+			owner.path = input.Resource
+		}
+		if owner.id == "" {
+			owner.id = semantic.StableID("workspace_resource", input.Repo, owner.path)
+		}
 		result, err := a.analyzeLuaFile(ctx, semantic.FileInput{Repo: input.Repo, File: path, Language: input.Languages[path], Content: input.Files[path], Symbols: input.Symbols[path], Side: owner.side, Resource: owner.name}, state, owner, input.SemanticEntities)
 		if err != nil {
 			return semantic.Result{}, fmt.Errorf("framework analysis %s: %w", path, err)
 		}
 		state.entities = append(state.entities, result.Entities...)
 	}
-	state.finish()
-	return semantic.Result{Entities: state.entities, Relationships: state.relationships}, nil
+	// Keep source analysis responsible for extracting compact raw provider and
+	// call facts. RebuildFacts is the single indexed finalizer for provider
+	// authority, object lineage, operations, candidates, and relationships.
+	return RebuildFacts(input.Repo, state.entities, input.ResourceRegistry), nil
 }
 
 type resourceOwner struct{ name, path, id, side string }
@@ -77,7 +88,6 @@ type analysisState struct {
 	providers        map[string]semantic.Entity
 	providerAPIs     map[string]map[string]bool
 	entities         []semantic.Entity
-	relationships    []semantic.Relationship
 }
 
 func hasFiveMEvidence(entities []semantic.Entity) bool {
@@ -182,6 +192,7 @@ func stringValues(value any) []string {
 }
 
 func (s *analysisState) addProviders() {
+	providerKeysByPath := map[string][]string{}
 	for _, fact := range s.knownFacts {
 		if fact.Analyzer != semantic.AnalyzerFiveM || fact.Kind != fivem.KindExportDefinition || fact.Dynamic || fact.Name == "" {
 			continue
@@ -211,154 +222,25 @@ func (s *analysisState) addProviders() {
 			},
 		}
 		provider.ID = semantic.StableID("framework_provider", s.input.Repo, path, fact.Name, fact.ID, strconv.Itoa(fact.Line))
+		if _, exists := s.providers[key]; exists {
+			continue
+		}
 		s.providers[key] = provider
+		providerKeysByPath[path] = append(providerKeysByPath[path], key)
 	}
 	for path, apis := range s.providerAPIs {
-		owner := resourceOwner{}
-		for _, provider := range s.providers {
-			if provider.Metadata["provider_resource_path"] == path {
-				owner.name, _ = provider.Metadata["provider_resource"].(string)
-				break
-			}
+		ownerName := ""
+		if keys := providerKeysByPath[path]; len(keys) > 0 {
+			ownerName, _ = s.providers[keys[0]].Metadata["provider_resource"].(string)
 		}
-		framework, _ := s.registry.provider(owner.name, apis, s.manifestEvidence[path])
-		for key, provider := range s.providers {
-			if provider.Metadata["provider_resource_path"] == path {
-				provider.Framework = framework
-				s.providers[key] = provider
-				s.entities = append(s.entities, provider)
-			}
+		framework, _ := s.registry.provider(ownerName, apis, s.manifestEvidence[path])
+		for _, key := range providerKeysByPath[path] {
+			provider := s.providers[key]
+			provider.Framework = framework
+			s.providers[key] = provider
+			s.entities = append(s.entities, provider)
 		}
 	}
-}
-
-func (s *analysisState) finish() {
-	// Providers are already in the entity list. Resolve local providers only
-	// when both resource name and API are unique.
-	byTarget := map[string][]semantic.Entity{}
-	for _, provider := range s.entities {
-		if provider.Kind != KindAPIProvider {
-			continue
-		}
-		resource, _ := provider.Metadata["provider_resource"].(string)
-		byTarget[resource] = append(byTarget[resource], provider)
-	}
-	for i := range s.entities {
-		entity := &s.entities[i]
-		if entity.Kind != KindAPICall {
-			continue
-		}
-		mechanism, _ := entity.Metadata["mechanism"].(string)
-		target, _ := entity.Metadata["target_resource"].(string)
-		api, _ := entity.Metadata["api"].(string)
-		if mechanism == "object_method" {
-			factoryID, _ := entity.Metadata["origin_factory_id"].(string)
-			factoryAPI, _ := entity.Metadata["origin_factory_api"].(string)
-			var factory *semantic.Entity
-			for j := range s.entities {
-				candidate := &s.entities[j]
-				if candidate.Kind != KindAPICall || candidate.File != entity.File || candidate.Line > entity.Line {
-					continue
-				}
-				if factoryID != "" && candidate.ID == factoryID {
-					factory = candidate
-					break
-				}
-				candidateMechanism, _ := candidate.Metadata["mechanism"].(string)
-				if factoryID == "" && candidateMechanism == "export" && candidate.Name == factoryAPI && candidate.Line <= entity.Line {
-					if factory != nil && factory.Line == candidate.Line {
-						factory = nil
-						break
-					}
-					factory = candidate
-				}
-			}
-			if factory != nil {
-				if ambiguous, _ := factory.Metadata["provider_ambiguous"].(bool); ambiguous {
-					entity.Metadata["origin_ambiguous"] = true
-					entity.Metadata["object_origin"] = false
-				} else {
-					s.relationships = append(s.relationships, frameworkRelationship(*entity, *factory, RelationshipObjectCall, api))
-				}
-			}
-		} else {
-			candidates := make([]semantic.Entity, 0)
-			for _, provider := range byTarget[target] {
-				if provider.Name == api {
-					candidates = append(candidates, provider)
-				}
-			}
-			if len(candidates) == 1 {
-				provider := candidates[0]
-				entity.Metadata["provider_verified"] = true
-				entity.Metadata["provider_entity_id"] = provider.ID
-				entity.Metadata["provider_resource"] = target
-				entity.Metadata["provider_resource_path"] = provider.Metadata["provider_resource_path"]
-				entity.Framework = provider.Framework
-				s.relationships = append(s.relationships, frameworkRelationship(*entity, provider, RelationshipFrameworkCalls, api))
-			} else if len(candidates) > 1 {
-				entity.Metadata["provider_ambiguous"] = true
-				entity.Metadata["provider_verified"] = false
-			}
-		}
-		if operation, _ := entity.Metadata["operation"].(string); operation != "" {
-			op := semantic.Entity{Analyzer: semantic.AnalyzerFramework, Repo: entity.Repo, File: entity.File, SymbolID: entity.SymbolID, Kind: KindOperation, Name: operation, Framework: entity.Framework, Side: entity.Side, Line: entity.Line, EndLine: entity.EndLine, Metadata: cloneMetadata(entity.Metadata)}
-			op.Metadata["api"] = api
-			op.Metadata["backing_call_id"] = entity.ID
-			op.ID = semantic.StableID("framework_operation", entity.ID, operation)
-			s.entities = append(s.entities, op)
-			s.relationships = append(s.relationships, frameworkRelationship(op, *entity, RelationshipDerivedFrom, operation))
-		}
-	}
-	s.addCandidates(byTarget)
-	s.sortFacts()
-}
-
-func (s *analysisState) addCandidates(byTarget map[string][]semantic.Entity) {
-	for resource, providers := range byTarget {
-		paths := map[string]bool{}
-		apis := map[string]bool{}
-		framework := FrameworkCustom
-		for _, provider := range providers {
-			path, _ := provider.Metadata["provider_resource_path"].(string)
-			paths[path] = true
-			apis[provider.Name] = true
-			if provider.Framework != "" && provider.Framework != FrameworkCustom {
-				framework = provider.Framework
-			}
-		}
-		if len(paths) != 1 || framework != FrameworkCustom || len(apis) < 3 {
-			continue
-		}
-		consumers := map[string]bool{}
-		for _, entity := range s.entities {
-			if entity.Kind != KindAPICall {
-				continue
-			}
-			if target, _ := entity.Metadata["target_resource"].(string); target == resource {
-				if source, _ := entity.Metadata["source_resource_path"].(string); source != "" {
-					consumers[source] = true
-				}
-			}
-		}
-		path, _ := providers[0].Metadata["provider_resource_path"].(string)
-		candidate := semantic.Entity{Analyzer: semantic.AnalyzerFramework, Repo: s.input.Repo, File: providers[0].File, Kind: KindCandidate, Name: resource, Framework: FrameworkCustom, Side: "shared", Line: providers[0].Line, Metadata: map[string]any{"source_resource": resource, "source_resource_path": path, "provider_resource": resource, "provider_resource_path": path, "api_count": len(apis), "consumer_count": len(consumers), "classification": "custom", "evidence": "deterministic"}}
-		candidate.ID = semantic.StableID("framework_candidate", s.input.Repo, path, resource)
-		s.entities = append(s.entities, candidate)
-	}
-}
-
-func (s *analysisState) sortFacts() {
-	sort.Slice(s.entities, func(i, j int) bool {
-		if s.entities[i].File != s.entities[j].File {
-			return s.entities[i].File < s.entities[j].File
-		}
-		if s.entities[i].Line != s.entities[j].Line {
-			return s.entities[i].Line < s.entities[j].Line
-		}
-		return s.entities[i].ID < s.entities[j].ID
-	})
-	sort.Slice(s.relationships, func(i, j int) bool { return s.relationships[i].ID < s.relationships[j].ID })
 }
 
 // RebuildFacts re-resolves framework relationships from persisted compact
@@ -407,7 +289,7 @@ func RebuildFacts(repo string, input []semantic.Entity, registries ...[]semantic
 	}
 
 	resourceRegistry := map[string][]semantic.ResourceIdentity{}
-	hasRegistry := len(registries) > 0
+	hasRegistry := len(registries) > 0 && len(registries[0]) > 0
 	if hasRegistry {
 		for _, identity := range registries[0] {
 			resourceRegistry[identity.Name] = append(resourceRegistry[identity.Name], identity)

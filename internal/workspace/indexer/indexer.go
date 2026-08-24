@@ -84,8 +84,6 @@ func Index(ctx context.Context, store *storage.IndexStore, repoID int64, repo, r
 				failedFrameworkResources = append(failedFrameworkResources, r.Name)
 			}
 			frameworkEntities = append(frameworkEntities, framework.FailureStatus(repo, r.Name, r.RelativePath))
-		} else {
-			frameworkEntities = append(frameworkEntities, normalizeFrameworkResult(repo, r, frameworkResult).Entities...)
 		}
 		idMap := map[string]string{}
 		for _, entity := range result.Entities {
@@ -115,6 +113,9 @@ func Index(ctx context.Context, store *storage.IndexStore, repoID int64, repo, r
 				manifestByResource[r.RelativePath] = entity
 			}
 		}
+		if frameworkErr == nil {
+			frameworkEntities = append(frameworkEntities, NormalizeFrameworkResult(repo, r, frameworkResult, idMap).Entities...)
+		}
 		for _, rel := range result.Relationships {
 			rel.Analyzer = semantic.AnalyzerFiveM
 			rel.FromEntityID = idMap[rel.FromEntityID]
@@ -128,6 +129,13 @@ func Index(ctx context.Context, store *storage.IndexStore, repoID int64, repo, r
 	workspaceEntities, workspaceRelationships := resolveWorkspace(repo, d, combined.Entities, manifestByResource)
 	workspaceResult := semantic.Result{Entities: workspaceEntities, Relationships: workspaceRelationships}
 	frameworkResult := framework.RebuildFacts(repo, frameworkEntities, resourceRegistry(repo, d))
+	seenFrameworkIDs := map[string]semantic.Entity{}
+	for _, entity := range frameworkResult.Entities {
+		if previous, exists := seenFrameworkIDs[entity.ID]; exists {
+			return Result{}, fmt.Errorf("duplicate framework entity ID %s: %#v and %#v", entity.ID, previous, entity)
+		}
+		seenFrameworkIDs[entity.ID] = entity
+	}
 	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, combined); err != nil {
 		return Result{}, err
 	}
@@ -183,38 +191,10 @@ func analyzeFramework(ctx context.Context, input semantic.RepositoryInput) (sema
 	return framework.NewAnalyzer().AnalyzeRepository(ctx, input)
 }
 
-func normalizeFrameworkResult(repo string, r workspace.Resource, result semantic.Result) semantic.Result {
-	normalized := semantic.Result{}
-	idMap := map[string]string{}
-	resourceID := semantic.StableID("workspace_resource", repo, r.RelativePath)
-	for _, entity := range result.Entities {
-		oldID := entity.ID
-		entity.Analyzer = semantic.AnalyzerFramework
-		entity.File = joinPath(r.RelativePath, entity.File)
-		if entity.Metadata == nil {
-			entity.Metadata = map[string]any{}
-		}
-		entity.Metadata["source_resource"] = r.Name
-		entity.Metadata["source_resource_path"] = r.RelativePath
-		entity.Metadata["source_resource_id"] = resourceID
-		if entity.Kind == framework.KindAPIProvider || entity.Kind == framework.KindCandidate {
-			entity.Metadata["provider_resource"] = r.Name
-			entity.Metadata["provider_resource_path"] = r.RelativePath
-			entity.Metadata["provider_resource_id"] = resourceID
-		}
-		entity.ID = semantic.StableID("framework", repo, r.RelativePath, entity.Kind, entity.Name, fmt.Sprint(entity.Line), fmt.Sprint(entity.EndLine), oldID)
-		idMap[oldID] = entity.ID
-		normalized.Entities = append(normalized.Entities, entity)
-	}
-	for _, relationship := range result.Relationships {
-		relationship.Analyzer = semantic.AnalyzerFramework
-		relationship.FromEntityID = idMap[relationship.FromEntityID]
-		relationship.ToEntityID = idMap[relationship.ToEntityID]
-		relationship.ID = semantic.StableID("framework_relationship", repo, relationship.FromEntityID, relationship.ToEntityID, relationship.Kind)
-		relationship.File = joinPath(r.RelativePath, relationship.File)
-		normalized.Relationships = append(normalized.Relationships, relationship)
-	}
-	return normalized
+// NormalizeFrameworkResult is the shared workspace/resource-refresh identity
+// boundary. Callers must use it before persisting framework facts.
+func NormalizeFrameworkResult(repo string, r workspace.Resource, result semantic.Result, sourceEntityIDs map[string]string) semantic.Result {
+	return framework.CanonicalizeResult(repo, r.RelativePath, result, sourceEntityIDs)
 }
 
 func normalizeResourceResult(repo string, r workspace.Resource, result semantic.Result) semantic.Result {

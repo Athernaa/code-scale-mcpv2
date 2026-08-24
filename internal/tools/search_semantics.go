@@ -32,6 +32,8 @@ type semanticSearchResult struct {
 	ResourceID         string `json:"resource_id,omitempty"`
 	TargetResource     string `json:"target_resource,omitempty"`
 	Framework          string `json:"framework,omitempty"`
+	ProviderStatus     string `json:"provider_status,omitempty"`
+	ProviderVerified   *bool  `json:"provider_verified,omitempty"`
 	Side               string `json:"side,omitempty"`
 	File               string `json:"file"`
 	Line               int    `json:"line"`
@@ -56,10 +58,11 @@ func SearchSemanticsHandler(deps *Deps) func(context.Context, *mcp.CallToolReque
 		results := make([]semanticSearchResult, 0, len(entities))
 		for _, entity := range entities {
 			operation, resource, sourceResource, sourceResourcePath, resourceID, targetResource := semanticMetadata(entity)
+			providerStatus, providerVerified := providerAuthority(entity)
 			results = append(results, semanticSearchResult{
 				ID: entity.ID, Analyzer: entity.Analyzer, Kind: entity.Kind, Name: entity.Name, Framework: entity.Framework,
 				Side: entity.Side, File: entity.File, Line: entity.Line, EndLine: entity.EndLine,
-				SymbolID: entity.SymbolID, Operation: operation, Resource: resource, SourceResource: sourceResource, SourceResourcePath: sourceResourcePath, ResourceID: resourceID, TargetResource: targetResource, Dynamic: entity.Dynamic,
+				SymbolID: entity.SymbolID, Operation: operation, Resource: resource, SourceResource: sourceResource, SourceResourcePath: sourceResourcePath, ResourceID: resourceID, TargetResource: targetResource, ProviderStatus: providerStatus, ProviderVerified: providerVerified, Dynamic: entity.Dynamic,
 			})
 		}
 		result := map[string]any{
@@ -71,6 +74,18 @@ func SearchSemanticsHandler(deps *Deps) func(context.Context, *mcp.CallToolReque
 		r, _ := toTextResult(result)
 		return r, nil, nil
 	}
+}
+
+func providerAuthority(entity semantic.Entity) (string, *bool) {
+	if entity.Metadata == nil {
+		return "", nil
+	}
+	status, _ := entity.Metadata["provider_status"].(string)
+	value, ok := entity.Metadata["provider_verified"].(bool)
+	if !ok {
+		return status, nil
+	}
+	return status, &value
 }
 
 func semanticMetadata(entity semantic.Entity) (operation, resource, sourceResource, sourceResourcePath, resourceID, targetResource string) {

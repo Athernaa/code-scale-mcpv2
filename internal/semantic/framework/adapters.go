@@ -139,10 +139,11 @@ func (oxInventoryAdapter) ProviderFramework(resource string, apis map[string]boo
 			known++
 		}
 	}
-	// A literal locally implemented stock API is enough to verify that
-	// particular API. The local surface, not the basename alone, remains the
-	// gate; custom-only resources named ox_inventory still classify custom.
-	return "ox_inventory", known >= 1
+	// A single common method is not a reliable fingerprint: a custom resource
+	// named ox_inventory may expose Search (or another generic method) without
+	// implementing the stock library. Require multiple characteristic APIs;
+	// individual calls remain available as generic provider facts.
+	return "ox_inventory", known >= 2
 }
 func (oxInventoryAdapter) CallOperation(framework, api string, args []literalValue) (string, map[string]any, bool) {
 	if framework != "ox_inventory" {
@@ -204,13 +205,20 @@ func (oxLibAdapter) CallOperation(framework, api string, args []literalValue) (s
 
 type oxTargetAdapter struct{}
 
+var oxTargetRegistrationAPIs = map[string]bool{
+	"addGlobalObject": true, "addGlobalPed": true, "addGlobalPlayer": true,
+	"addGlobalVehicle": true, "addGlobalEntity": true, "addModel": true, "addEntity": true,
+	"addLocalEntity": true, "addSphereZone": true, "addBoxZone": true,
+	"addPolyZone": true, "addComboZone": true,
+}
+
 func (oxTargetAdapter) Name() string { return "ox_target" }
 func (oxTargetAdapter) ProviderFramework(resource string, apis map[string]bool, evidence Evidence) (string, bool) {
 	if !knownResource(resource, "ox_target") {
 		return "", false
 	}
 	for api := range apis {
-		if strings.HasPrefix(api, "add") || strings.HasPrefix(api, "Add") || api == "removeGlobalOption" {
+		if oxTargetRegistrationAPIs[api] {
 			return "ox_target", true
 		}
 	}
@@ -220,7 +228,7 @@ func (oxTargetAdapter) CallOperation(framework, api string, args []literalValue)
 	if framework != "ox_target" {
 		return "", nil, false
 	}
-	if strings.HasPrefix(api, "add") || strings.HasPrefix(api, "Add") {
+	if oxTargetRegistrationAPIs[api] {
 		return mapOperation("interaction_register", nil)
 	}
 	return "", nil, false

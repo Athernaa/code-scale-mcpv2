@@ -112,6 +112,7 @@ func (s *analysisState) newCall(input semantic.FileInput, owner resourceOwner, n
 	metadata := map[string]any{
 		"source_resource": owner.name, "source_resource_path": owner.path, "source_resource_id": owner.id,
 		"target_resource": target, "api": api, "mechanism": mechanism, "raw_operation": api,
+		"source_offset":     int(node.StartByte()),
 		"provider_verified": false,
 	}
 	if framework == "" {

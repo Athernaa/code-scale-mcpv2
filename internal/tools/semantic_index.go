@@ -60,6 +60,7 @@ func indexSemanticRepository(
 		}
 		return 0, frameworkErr
 	}
+	frameworkResult = framework.CanonicalizeResult(repo, resource, frameworkResult, nil)
 	frameworkResult = framework.RebuildFacts(repo, frameworkResult.Entities, []semantic.ResourceIdentity{{Name: resource, Path: resource, ID: semantic.StableID("workspace_resource", repo, resource)}})
 	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, frameworkResult); err != nil {
 		return 0, err
