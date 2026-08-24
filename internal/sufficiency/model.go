@@ -22,6 +22,8 @@ type Coverage struct {
 	FlowPeersSatisfied       int `json:"flow_peers_satisfied"`
 	ImpactRequired           int `json:"impact_required"`
 	ImpactSatisfied          int `json:"impact_satisfied"`
+	CrossResourceRequired    int `json:"cross_resource_required"`
+	CrossResourceSatisfied   int `json:"cross_resource_satisfied"`
 }
 
 type Missing struct {
@@ -73,6 +75,7 @@ type Input struct {
 	Omitted       Omitted
 	Stage         string
 	FocusSymbolID string
+	FocusAnchor   string
 	FocusResource string
 	IncludeImpact bool
 }

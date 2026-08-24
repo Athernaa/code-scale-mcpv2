@@ -115,6 +115,13 @@ func TestPlannerFindIsMinimalAndAmbiguityIsPreserved(t *testing.T) {
 	if len(result.Primary) != 2 || len(result.Supporting) != 0 || len(result.Ambiguities) == 0 {
 		t.Fatalf("find task over-expanded or lost ambiguity: %#v", result)
 	}
+	if len(result.Ambiguities[0].AnchorIDs) != 2 {
+		t.Fatalf("source ambiguity lost anchor identity: %#v", result.Ambiguities[0])
+	}
+	focused, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "find init", FocusSymbolID: first.ID})
+	if err != nil || focused.FocusedAnchor == "" || len(focused.Ambiguities) == 0 || len(focused.Ambiguities[0].AnchorIDs) != 2 {
+		t.Fatalf("focused ambiguity metadata was not preserved: %#v %v", focused, err)
+	}
 	fileScoped, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "find init in a.lua"})
 	if err != nil {
 		t.Fatal(err)

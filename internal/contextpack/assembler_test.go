@@ -25,6 +25,14 @@ type staticPlanner struct {
 	err  error
 }
 
+type fixedSufficiencyEvaluator struct {
+	decision sufficiency.Decision
+}
+
+func (e fixedSufficiencyEvaluator) Evaluate(sufficiency.Input) sufficiency.Decision {
+	return e.decision
+}
+
 func (p staticPlanner) Plan(ctx context.Context, request planner.Request) (planner.Plan, error) {
 	return p.plan, p.err
 }
@@ -109,6 +117,60 @@ func TestPostSerializationGuardRevokesStaleSufficiency(t *testing.T) {
 	}
 	if pkg.Budget.UsedTokens > MinContextTokenBudget || pkg.Sufficiency.Status == sufficiency.StatusSufficient {
 		t.Fatalf("final serialization retained stale sufficiency or exceeded budget: %+v", pkg)
+	}
+}
+
+func TestMinimumBudgetCompactsSufficiencyMetadataWithoutChangingTruth(t *testing.T) {
+	store := assemblyStore(t)
+	defer store.Close()
+	repo := "local/minimum-sufficiency"
+	primarySource := "func Primary() {}\n"
+	primary := indexedSymbol("primary.go", "Primary", primarySource)
+	writeAssemblyRepo(t, store, repo, map[string]string{"primary.go": primarySource}, []parser.Symbol{primary})
+	missingCandidates := make([]planner.Candidate, 0, sufficiency.MaxMissing+4)
+	for i := 0; i < sufficiency.MaxMissing+4; i++ {
+		missingCandidates = append(missingCandidates, planner.Candidate{ID: strings.Repeat(fmt.Sprintf("missing-%02d-", i), 20), SymbolID: fmt.Sprintf("missing-%02d::Provider", i), File: fmt.Sprintf("missing-%02d.go", i), Name: "Provider", Kind: "function", Tier: "supporting", Score: 100, ReasonCodes: []string{"framework_provider"}})
+	}
+	plan := planner.Plan{Repo: repo, TaskClass: "localized_change", TaskConfidence: "high", IndexState: "complete", Primary: []planner.Candidate{candidate(primary, "primary", 9000, "exact_symbol_match")}, Supporting: missingCandidates}
+	assembler := New(staticPlanner{plan: plan}, store)
+	pkg, err := assembler.Assemble(context.Background(), Request{Repo: repo, Task: "fix Primary", MaxContextTokens: MinContextTokenBudget})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(pkg)
+	counter, _ := NewTokenCounter(TokenizerO200K)
+	if counter.Count(string(data)) > MinContextTokenBudget || pkg.Sufficiency.Status != sufficiency.StatusBlocked || pkg.Sufficiency.Coverage.CriticalSupportRequired != len(missingCandidates) || len(pkg.Sufficiency.Missing) >= sufficiency.MaxMissing || len(pkg.Sufficiency.ReasonCodes) >= sufficiency.MaxReasonCodes {
+		t.Fatalf("minimum-budget sufficiency metadata was not compacted truthfully: tokens=%d package=%+v", counter.Count(string(data)), pkg)
+	}
+}
+
+func TestMinimumBudgetCompactsManySufficiencyReasonsAndMissing(t *testing.T) {
+	store := assemblyStore(t)
+	defer store.Close()
+	repo := "local/minimum-sufficiency-many"
+	source := "func Primary() {}\n"
+	primary := indexedSymbol("primary.go", "Primary", source)
+	writeAssemblyRepo(t, store, repo, map[string]string{"primary.go": source}, []parser.Symbol{primary})
+	reasons := make([]string, 0, sufficiency.MaxReasonCodes)
+	for i := 0; i < sufficiency.MaxReasonCodes; i++ {
+		reasons = append(reasons, fmt.Sprintf("reason_%02d_%s", i, strings.Repeat("with_detail_", 12)))
+	}
+	missing := make([]sufficiency.Missing, 0, sufficiency.MaxMissing)
+	for i := 0; i < sufficiency.MaxMissing; i++ {
+		missing = append(missing, sufficiency.Missing{Kind: "provider", CandidateID: strings.Repeat(fmt.Sprintf("missing-%02d-", i), 20), Reason: "required_provider_missing", Resource: "long-resource", TargetResource: "long-target"})
+	}
+	decision := sufficiency.Decision{Status: sufficiency.StatusBlocked, EvaluatedAfterStage: "anchor", ReasonCodes: reasons, Coverage: sufficiency.Coverage{AnchorsRequired: 1, AnchorsSatisfied: 1, CriticalSupportRequired: 99, CriticalSupportSatisfied: 1, ProvidersRequired: 88, ProvidersSatisfied: 2}, Missing: missing}
+	plan := planner.Plan{Repo: repo, TaskClass: "localized_change", TaskConfidence: "high", IndexState: "complete", Primary: []planner.Candidate{candidate(primary, "primary", 9000, "exact_symbol_match")}}
+	assembler := New(staticPlanner{plan: plan}, store)
+	assembler.Evaluator = fixedSufficiencyEvaluator{decision: decision}
+	pkg, err := assembler.Assemble(context.Background(), Request{Repo: repo, Task: "fix Primary", MaxContextTokens: MinContextTokenBudget})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(pkg)
+	counter, _ := NewTokenCounter(TokenizerO200K)
+	if counter.Count(string(data)) > MinContextTokenBudget || pkg.Sufficiency.Status != sufficiency.StatusBlocked || pkg.Sufficiency.Coverage.ProvidersRequired != 88 || len(pkg.Sufficiency.Missing) >= sufficiency.MaxMissing || len(pkg.Sufficiency.ReasonCodes) >= sufficiency.MaxReasonCodes {
+		t.Fatalf("many sufficiency metadata fields were not compacted truthfully: tokens=%d package=%+v", counter.Count(string(data)), pkg)
 	}
 }
 
@@ -655,12 +717,12 @@ func TestAssembleRealisticFiveMWorkspaceContext(t *testing.T) {
 			break
 		}
 	}
-	focused, err := New(planner.New(store), store).Assemble(context.Background(), Request{Repo: repo, Task: "find LoadCharacter", FocusSymbolID: loadCharacterID, MaxContextTokens: 4000, IncludeImpact: true})
+	focused, err := New(planner.New(store), store).Assemble(context.Background(), Request{Repo: repo, Task: "fix character inventory loading", FocusSymbolID: loadCharacterID, MaxContextTokens: 4000, IncludeImpact: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if focused.Sufficiency.Status != sufficiency.StatusSufficient {
-		t.Fatalf("trusted focused character task did not reach sufficient evidence: %+v", focused.Sufficiency)
+	if focused.Sufficiency.Status != sufficiency.StatusBlocked || !containsFile(focused.Sections, "resources/[jobs]/banana_jobs/server/main.lua") || !strings.Contains(strings.Join(focused.Sufficiency.ReasonCodes, ","), "required_source_partial") {
+		t.Fatalf("focused implementation task falsely claimed sufficient or lost target: %+v", focused.Sufficiency)
 	}
 }
 

@@ -19,6 +19,16 @@ func (Policy) Evaluate(input Input) Decision {
 	}
 	stageRank := stageRank(input.Stage)
 	taskClass := effectiveTaskClass(input)
+	baseline := requiredCandidates(input)
+	decision.Coverage.CriticalSupportRequired = len(baseline.critical)
+	decision.Coverage.ProvidersRequired = len(baseline.providers)
+	decision.Coverage.FlowPeersRequired = len(baseline.flow)
+	if input.IncludeImpact {
+		decision.Coverage.ImpactRequired = countImpact(baseline.critical)
+	}
+	if taskClass == "cross_resource" {
+		decision.Coverage.CrossResourceRequired = 1
+	}
 
 	if input.Plan.IndexIncomplete || (input.Plan.IndexState != "" && input.Plan.IndexState != "complete") {
 		return blocked(input, decision, "index_incomplete")
@@ -26,7 +36,7 @@ func (Policy) Evaluate(input Input) Decision {
 	if input.Plan.Truncated {
 		return blocked(input, decision, "planner_truncated")
 	}
-	if relevantAmbiguity(input.Plan.Ambiguities, input.FocusSymbolID) {
+	if relevantAmbiguity(input.Plan.Ambiguities, input.FocusAnchor) {
 		return blocked(input, decision, "source_ambiguity")
 	}
 	if len(input.Plan.UnresolvedHighSignal) > 0 {
@@ -152,6 +162,12 @@ func (Policy) Evaluate(input Input) Decision {
 	if len(decision.Missing) > 0 {
 		return finalizeIncomplete(input, decision, stageRank, 1)
 	}
+	if taskClass == "cross_resource" {
+		decision = evaluateCrossResource(input, sections, decision, stageRank)
+		if decision.Status != StatusSufficient {
+			return decision
+		}
+	}
 	if taskClass == "relationship_trace" || taskClass == "cross_resource" || taskClass == "localized_change" {
 		if providerRequirementNeeded(input) && len(required.providers) == 0 {
 			return blocked(input, decision, providerBlockReason(input))
@@ -166,6 +182,87 @@ func (Policy) Evaluate(input Input) Decision {
 	decision.Status = StatusSufficient
 	decision.ReasonCodes = addReason(decision.ReasonCodes, "required_evidence_covered")
 	return decision
+}
+
+func evaluateCrossResource(input Input, sections map[string]Section, decision Decision, currentStage int) Decision {
+	decision.Coverage.CrossResourceRequired = 1
+	anchorID := anchorCandidateID(input)
+	var sourceResource, targetResource string
+	all := append(append(append([]planner.Candidate{}, input.Plan.Primary...), input.Plan.Supporting...), input.Plan.Peripheral...)
+	for _, candidate := range all {
+		if candidate.ID != anchorID {
+			continue
+		}
+		sourceResource = candidate.Resource
+		targetResource = candidate.TargetResource
+		if targetResource == "" && len(candidate.TargetResources) > 0 {
+			targetResource = candidate.TargetResources[0]
+		}
+		break
+	}
+	if targetResource == "" {
+		decision = addMissing(decision, Missing{Kind: "cross_resource", CandidateID: anchorID, Reason: "target_resource_missing", Resource: sourceResource})
+		return blocked(input, decision, "target_resource_missing")
+	}
+	peers := make([]planner.Candidate, 0, 4)
+	for _, candidate := range all {
+		if candidate.ID == anchorID || !planner.IsCriticalSupportReason(firstCriticalReason(candidate)) {
+			continue
+		}
+		if !crossPeer(candidate, sourceResource, targetResource) {
+			continue
+		}
+		peers = append(peers, candidate)
+	}
+	if len(peers) == 0 {
+		decision = addMissing(decision, Missing{Kind: "cross_resource", CandidateID: anchorID, Reason: "cross_resource_coverage_missing", Resource: sourceResource, TargetResource: targetResource})
+		return blocked(input, decision, "cross_resource_coverage_missing")
+	}
+	for _, peer := range peers {
+		if providerAuthorityBlocked(peer) {
+			return blocked(input, decision, providerAuthorityReason(providerAuthority(peer)))
+		}
+		section, ok := sections[peer.ID]
+		if !ok {
+			if candidateStage(peer) > currentStage {
+				decision = addMissing(decision, Missing{Kind: "cross_resource", CandidateID: peer.ID, Reason: "cross_resource_coverage_missing", Resource: peer.Resource, TargetResource: targetResource})
+				decision.Status = StatusNeedsMoreContext
+				decision.CanContinue = true
+				return decision
+			}
+			return blocked(input, decision, "cross_resource_coverage_missing")
+		}
+		if !completeSource(section) {
+			return blocked(input, decision, sourceReason(section))
+		}
+	}
+	decision.Coverage.CrossResourceSatisfied = 1
+	decision.Status = StatusSufficient
+	decision.CanContinue = false
+	return decision
+}
+
+func crossPeer(candidate planner.Candidate, sourceResource, targetResource string) bool {
+	if candidate.TargetResource == targetResource || containsString(candidate.TargetResources, targetResource) {
+		return true
+	}
+	if isProvider(candidate) && candidate.Resource == targetResource {
+		return true
+	}
+	return isFlow(candidate) && candidate.Resource != "" && candidate.Resource != sourceResource
+}
+
+func providerAuthorityReason(authority string) string {
+	switch authority {
+	case "external_unverified":
+		return "provider_external_unverified"
+	case "local_ambiguous":
+		return "provider_local_ambiguous"
+	case "local_api_missing":
+		return "provider_local_api_missing"
+	default:
+		return "required_provider_missing"
+	}
 }
 
 func effectiveTaskClass(input Input) string {
@@ -185,12 +282,13 @@ func requiredCandidates(input Input) requiredSet {
 	result := requiredSet{}
 	all := append(append(append([]planner.Candidate{}, input.Plan.Primary...), input.Plan.Supporting...), input.Plan.Peripheral...)
 	seen := map[string]bool{}
+	anchorID := anchorCandidateID(input)
 	for _, candidate := range all {
 		if seen[candidate.ID] {
 			continue
 		}
 		seen[candidate.ID] = true
-		if candidate.Tier == "primary" {
+		if candidate.ID == anchorID {
 			continue
 		}
 		if !relevantDirection(candidate, input.Plan.TraceDirection) {
@@ -208,6 +306,21 @@ func requiredCandidates(input Input) requiredSet {
 	}
 	sort.Slice(result.critical, func(i, j int) bool { return result.critical[i].ID < result.critical[j].ID })
 	return result
+}
+
+func anchorCandidateID(input Input) string {
+	anchors := anchorCandidates(input.Plan, input.FocusSymbolID)
+	if input.FocusSymbolID != "" {
+		for _, candidate := range anchors {
+			if candidate.SymbolID == input.FocusSymbolID {
+				return candidate.ID
+			}
+		}
+	}
+	if len(anchors) > 0 {
+		return anchors[0].ID
+	}
+	return ""
 }
 
 func anchorCandidates(plan planner.Plan, focus string) []planner.Candidate {
@@ -250,7 +363,16 @@ func relevantAmbiguity(values []planner.Ambiguity, focus string) bool {
 		return true
 	}
 	for _, value := range values {
-		if value.Kind != "source_anchor" {
+		if value.Kind != "source_anchor" || len(value.AnchorIDs) == 0 || !containsString(value.AnchorIDs, focus) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
 			return true
 		}
 	}
@@ -287,19 +409,42 @@ func relevantDegradation(input Input) bool {
 
 func providerBlocked(input Input, sections map[string]Section, decision Decision) bool {
 	for _, candidate := range requiredCandidates(input).providers {
-		if candidate.Authority == "external_unverified" || candidate.Authority == "local_ambiguous" || candidate.Authority == "local_api_missing" {
+		if providerAuthorityBlocked(candidate) {
 			return true
-		}
-		for _, authority := range candidate.Authorities {
-			if authority == "external_unverified" || authority == "local_ambiguous" || authority == "local_api_missing" {
-				return true
-			}
 		}
 		if section, ok := sections[candidate.ID]; ok && !completeSource(section) {
 			return true
 		}
 	}
 	return false
+}
+
+func providerAuthorityBlocked(candidate planner.Candidate) bool {
+	if providerAuthority(candidate) == "local_verified" {
+		return false
+	}
+	authority := providerAuthority(candidate)
+	return authority == "external_unverified" || authority == "local_ambiguous" || authority == "local_api_missing"
+}
+
+func providerAuthority(candidate planner.Candidate) string {
+	if candidate.Authority == "local_verified" {
+		return "local_verified"
+	}
+	for _, authority := range candidate.Authorities {
+		if authority == "local_verified" {
+			return "local_verified"
+		}
+	}
+	if candidate.Authority != "" {
+		return candidate.Authority
+	}
+	for _, authority := range candidate.Authorities {
+		if authority != "" {
+			return authority
+		}
+	}
+	return ""
 }
 
 func completeSource(section Section) bool {
@@ -332,7 +477,7 @@ func requiresProvider(candidate planner.Candidate) bool {
 
 func providerBlockReason(input Input) string {
 	for _, candidate := range requiredCandidates(input).providers {
-		switch candidate.Authority {
+		switch providerAuthority(candidate) {
 		case "external_unverified":
 			return "provider_external_unverified"
 		case "local_ambiguous":
@@ -345,7 +490,7 @@ func providerBlockReason(input Input) string {
 		if !requiresProvider(candidate) {
 			continue
 		}
-		switch candidate.Authority {
+		switch providerAuthority(candidate) {
 		case "external_unverified":
 			return "provider_external_unverified"
 		case "local_ambiguous":

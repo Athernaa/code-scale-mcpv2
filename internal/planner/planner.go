@@ -296,6 +296,7 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 			return Plan{}, fmt.Errorf("focus_symbol_id: %w", lookupErr)
 		}
 		entity := genericEntityForSymbol(request.Repo, *symbol)
+		result.FocusedAnchor = entitySourceAnchor(entity)
 		collector.add(entity, "symbol", "explicit_focus", 0, true)
 		addSymbolCandidate(acc, request.Repo, *symbol, []string{"explicit_focus"}, 0, work)
 		exactSymbolAnchors[entitySourceAnchor(entity)] = true
@@ -493,7 +494,7 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 			count++
 		}
 		if count > 1 {
-			addAmbiguity(&result, Ambiguity{Kind: "source_anchor", Query: hint, CandidateCount: count, Truncated: declarationTruncatedByHint[hint]})
+			addAmbiguity(&result, Ambiguity{Kind: "source_anchor", Query: hint, CandidateCount: count, Truncated: declarationTruncatedByHint[hint], AnchorIDs: sortedBoolKeys(anchors)})
 			for anchor := range anchors {
 				collector.markAmbiguous(anchor)
 			}
@@ -1613,6 +1614,7 @@ func addAmbiguity(result *Plan, ambiguity Ambiguity) {
 				result.Ambiguities[index].CandidateCount = ambiguity.CandidateCount
 			}
 			result.Ambiguities[index].Truncated = existing.Truncated || ambiguity.Truncated
+			result.Ambiguities[index].AnchorIDs = mergeSortedStrings(existing.AnchorIDs, ambiguity.AnchorIDs)
 			return
 		}
 	}
@@ -1622,6 +1624,30 @@ func addAmbiguity(result *Plan, ambiguity Ambiguity) {
 		return
 	}
 	result.Ambiguities = append(result.Ambiguities, ambiguity)
+}
+
+func sortedBoolKeys(values map[string]bool) []string {
+	result := make([]string, 0, len(values))
+	for value := range values {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func mergeSortedStrings(left, right []string) []string {
+	seen := map[string]bool{}
+	for _, value := range left {
+		if value != "" {
+			seen[value] = true
+		}
+	}
+	for _, value := range right {
+		if value != "" {
+			seen[value] = true
+		}
+	}
+	return sortedBoolKeys(seen)
 }
 
 func appendUnresolved(result *Plan, hint string) {

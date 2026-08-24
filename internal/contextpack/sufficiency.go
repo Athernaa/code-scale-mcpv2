@@ -21,7 +21,7 @@ func sufficiencyInput(plan planner.Plan, pkg Package, request Request, stage str
 	return sufficiency.Input{
 		Plan: plan, Sections: sections,
 		Omitted: sufficiency.Omitted{TokenBudget: pkg.Omitted.TokenBudget, SourceUnavailable: pkg.Omitted.SourceUnavailable, SourceReadLimit: pkg.Omitted.SourceReadLimit},
-		Stage:   stage, FocusSymbolID: request.FocusSymbolID, FocusResource: request.FocusResource,
+		Stage:   stage, FocusSymbolID: request.FocusSymbolID, FocusAnchor: plan.FocusedAnchor, FocusResource: request.FocusResource,
 		IncludeImpact: request.IncludeImpact,
 	}
 }

@@ -170,6 +170,13 @@ func (a *Assembler) Assemble(ctx context.Context, request Request) (Package, err
 			}
 		}
 		pkg.Rounds = append(pkg.Rounds, round)
+		if stage == "direct_support" && supportReserveRemaining > 0 {
+			reclaimCapacity := minInt(remaining, supportReserveRemaining)
+			reclaimRemaining := reclaimAnchorReserve(pkg.Sections, originals, reclaimCapacity, counter)
+			reclaimed := maxInt(0, reclaimCapacity-reclaimRemaining)
+			remaining -= reclaimed
+			supportReserveRemaining -= reclaimed
+		}
 		evaluatedStage = stage
 		decision := a.evaluateSufficiency(plan, pkg, request, stage)
 		pkg.Sufficiency = decision
@@ -180,13 +187,6 @@ func (a *Assembler) Assemble(ctx context.Context, request Request) (Package, err
 		if decision.Status == sufficiency.StatusBlocked {
 			stop = "blocked_by_sufficiency"
 			break
-		}
-		if stage == "direct_support" && supportReserveRemaining > 0 {
-			reclaimCapacity := minInt(remaining, supportReserveRemaining)
-			reclaimRemaining := reclaimAnchorReserve(pkg.Sections, originals, reclaimCapacity, counter)
-			reclaimed := maxInt(0, reclaimCapacity-reclaimRemaining)
-			remaining -= reclaimed
-			supportReserveRemaining -= reclaimed
 		}
 	}
 	if evaluatedStage == "" {
@@ -214,7 +214,6 @@ func (a *Assembler) Assemble(ctx context.Context, request Request) (Package, err
 		}
 		after := a.evaluateSufficiency(plan, pkg, request, evaluatedStage)
 		if reflect.DeepEqual(decision, after) && before == sectionFingerprint(pkg.Sections) {
-			pkg.Sufficiency = after
 			break
 		}
 		pkg.Sufficiency = after
@@ -588,6 +587,9 @@ func enforceSerializedBudget(ctx context.Context, pkg *Package, originals map[st
 			pkg.Budget.OverheadTokens = maxInt(0, finalUsed-pkg.Budget.SourceTokens)
 			continue
 		}
+		if compactSufficiencyMetadata(pkg) {
+			continue
+		}
 		if len(pkg.Sections) == 0 {
 			if shrinkMetadata(pkg) {
 				pkg.ContextTruncated, pkg.Truncated = true, true
@@ -651,6 +653,74 @@ func shrinkMetadata(pkg *Package) bool {
 		return true
 	}
 	return false
+}
+
+func compactSufficiencyMetadata(pkg *Package) bool {
+	if len(pkg.Sufficiency.Missing) > 0 {
+		index := lowestMissingIndex(pkg.Sufficiency.Missing)
+		if len(pkg.Sufficiency.Missing) > 1 {
+			pkg.Sufficiency.Missing = append(pkg.Sufficiency.Missing[:index], pkg.Sufficiency.Missing[index+1:]...)
+			return true
+		}
+		missing := &pkg.Sufficiency.Missing[0]
+		if missing.CandidateID != "" {
+			missing.CandidateID = ""
+			return true
+		}
+		if missing.TargetResource != "" {
+			missing.TargetResource = ""
+			return true
+		}
+		if missing.Resource != "" {
+			missing.Resource = ""
+			return true
+		}
+		pkg.Sufficiency.Missing = nil
+		return true
+	}
+	if len(pkg.Sufficiency.ReasonCodes) > 1 {
+		index := lowestReasonIndex(pkg.Sufficiency.ReasonCodes)
+		pkg.Sufficiency.ReasonCodes = append(pkg.Sufficiency.ReasonCodes[:index], pkg.Sufficiency.ReasonCodes[index+1:]...)
+		return true
+	}
+	if len(pkg.UnresolvedHints) > 0 {
+		pkg.UnresolvedHints = pkg.UnresolvedHints[:len(pkg.UnresolvedHints)-1]
+		return true
+	}
+	return false
+}
+
+func lowestMissingIndex(values []sufficiency.Missing) int {
+	index := 0
+	for i := 1; i < len(values); i++ {
+		if sufficiencyReasonPriority(values[i].Reason) < sufficiencyReasonPriority(values[index].Reason) || (sufficiencyReasonPriority(values[i].Reason) == sufficiencyReasonPriority(values[index].Reason) && values[i].CandidateID > values[index].CandidateID) {
+			index = i
+		}
+	}
+	return index
+}
+
+func lowestReasonIndex(values []string) int {
+	index := 0
+	for i := 1; i < len(values); i++ {
+		if sufficiencyReasonPriority(values[i]) < sufficiencyReasonPriority(values[index]) || (sufficiencyReasonPriority(values[i]) == sufficiencyReasonPriority(values[index]) && values[i] > values[index]) {
+			index = i
+		}
+	}
+	return index
+}
+
+func sufficiencyReasonPriority(reason string) int {
+	switch reason {
+	case "planner_truncated", "index_incomplete", "source_ambiguity", "provider_external_unverified", "provider_local_ambiguous", "provider_local_api_missing", "required_source_unavailable", "required_source_partial", "target_resource_missing":
+		return 100
+	case "cross_resource_coverage_missing", "required_provider_missing", "required_direct_support_missing", "source_read_limit", "token_budget_exhausted":
+		return 80
+	case "low_confidence_weak_anchor", "broad_task_open_ended":
+		return 60
+	default:
+		return 20
+	}
 }
 
 func recomputeRoundTotals(pkg *Package) {

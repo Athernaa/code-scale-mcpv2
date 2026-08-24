@@ -68,6 +68,7 @@ type Plan struct {
 	AnchorStrength       string   `json:"-"`
 	BroadIntent          bool     `json:"-"`
 	RequestedTaskClass   string   `json:"-"`
+	FocusedAnchor        string   `json:"-"`
 	UnresolvedHighSignal []string `json:"-"`
 
 	// rankingDebug is populated only while finalizing a plan. It is deliberately
@@ -119,10 +120,11 @@ type Candidate struct {
 }
 
 type Ambiguity struct {
-	Kind           string `json:"kind"`
-	Query          string `json:"query"`
-	CandidateCount int    `json:"candidate_count"`
-	Truncated      bool   `json:"truncated,omitempty"`
+	Kind           string   `json:"kind"`
+	Query          string   `json:"query"`
+	CandidateCount int      `json:"candidate_count"`
+	Truncated      bool     `json:"truncated,omitempty"`
+	AnchorIDs      []string `json:"-"`
 }
 
 type DebugDetails struct {
