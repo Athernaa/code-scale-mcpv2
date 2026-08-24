@@ -1688,9 +1688,10 @@ func (s *IndexStore) GetSymbolsByFilesBounded(repoID int64, filePaths []string, 
 type MatchTier string
 
 const (
-	MatchTierFTS5      MatchTier = "fts5"
-	MatchTierSubstring MatchTier = "substring"
-	MatchTierFuzzy     MatchTier = "fuzzy"
+	MatchTierFTS5        MatchTier = "fts5"
+	MatchTierSubstring   MatchTier = "substring"
+	MatchTierFuzzy       MatchTier = "fuzzy"
+	MatchTierIndexedPath MatchTier = "indexed_path"
 )
 
 // ScoredSymbol wraps a symbol with its score and match tier.
@@ -1727,36 +1728,126 @@ func (s *IndexStore) SearchSymbolsWithTier(repoID int64, query string, kind stri
 }
 
 // SearchSymbolsLexicalBounded performs the planner's weak lexical lookup
-// without falling through to the repository-wide fuzzy scan. Both stages are
-// indexed/bounded and return only a small deterministic result window.
+// through bounded FTS5 and workspace-resource path-prefix queries. It
+// intentionally has no substring or fuzzy fallback, since those paths can
+// require repository-wide work.
 func (s *IndexStore) SearchSymbolsLexicalBounded(repoID int64, query string, kind string, language string, filePattern string, maxResults int) ([]ScoredSymbol, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if maxResults <= 0 {
 		return nil, nil
 	}
-	results, err := s.searchFTS5(repoID, query, kind, language, filePattern, maxResults)
+	results, err := s.searchFTS5Prefix(repoID, query, kind, language, filePattern, maxResults)
 	if err != nil {
-		results = nil
+		return nil, err
 	}
 	if len(results) >= maxResults {
 		return results[:maxResults], nil
 	}
-	substring, err := s.searchSubstring(repoID, query, kind, language, filePattern, maxResults-len(results))
+	pathResults, err := s.searchWorkspaceResourceSymbols(repoID, query, kind, language, filePattern, maxResults-len(results))
 	if err != nil {
 		return nil, err
 	}
-	seen := make(map[string]bool, len(results)+len(substring))
+	seen := make(map[string]bool, len(results)+len(pathResults))
 	for _, item := range results {
 		seen[item.Symbol.ID] = true
 	}
-	for _, item := range substring {
+	for _, item := range pathResults {
 		if !seen[item.Symbol.ID] {
 			results = append(results, item)
 			seen[item.Symbol.ID] = true
 		}
 	}
 	return results, nil
+}
+
+func (s *IndexStore) searchWorkspaceResourceSymbols(repoID int64, query string, kind string, language string, filePattern string, limit int) ([]ScoredSymbol, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	term := strings.ToLower(strings.TrimSpace(query))
+	if term == "" {
+		return nil, nil
+	}
+	resourceRows, err := s.db.Query(`SELECT r.name, r.relative_path
+		FROM workspace_resources r
+		JOIN workspaces w ON w.id = r.workspace_id
+		WHERE w.repo_id = ?
+		ORDER BY r.relative_path
+		LIMIT 64`, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer resourceRows.Close()
+	prefixes := make([]string, 0, 4)
+	for resourceRows.Next() {
+		var name, path string
+		if err := resourceRows.Scan(&name, &path); err != nil {
+			return nil, err
+		}
+		if strings.Contains(strings.ToLower(name), term) || strings.Contains(strings.ToLower(path), term) {
+			path = strings.TrimRight(strings.ReplaceAll(path, "\\", "/"), "/")
+			if path != "" {
+				prefixes = append(prefixes, path+"/%")
+			}
+		}
+	}
+	if err := resourceRows.Err(); err != nil || len(prefixes) == 0 {
+		return nil, err
+	}
+	where := "repo_id = ? AND ("
+	args := []any{repoID}
+	for i, prefix := range prefixes {
+		if i > 0 {
+			where += " OR "
+		}
+		where += "file_path LIKE ?"
+		args = append(args, prefix)
+	}
+	where += ")"
+	if kind != "" {
+		where += " AND kind = ?"
+		args = append(args, strings.ToLower(kind))
+	}
+	if language != "" {
+		where += " AND language = ?"
+		args = append(args, strings.ToLower(language))
+	}
+	if filePattern != "" && !strings.ContainsAny(filePattern, "*?[") {
+		where += " AND file_path = ?"
+		args = append(args, filePattern)
+	}
+	args = append(args, limit)
+	symbols, err := s.querySymbols("SELECT * FROM symbols WHERE "+where+" ORDER BY file_path, line, symbol_id LIMIT ?", args...)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]ScoredSymbol, 0, len(symbols))
+	for _, symbol := range symbols {
+		if filePattern != "" && !matchFilePattern(symbol.File, filePattern) {
+			continue
+		}
+		results = append(results, ScoredSymbol{Symbol: symbol, Score: scoreSymbol(symbol, term, strings.Fields(term)), Tier: MatchTierIndexedPath})
+	}
+	return results, nil
+}
+
+func (s *IndexStore) searchFTS5Prefix(repoID int64, query string, kind string, language string, filePattern string, maxResults int) ([]ScoredSymbol, error) {
+	words := strings.Fields(query)
+	if len(words) == 0 {
+		return nil, nil
+	}
+	parts := make([]string, 0, len(words))
+	for _, word := range words {
+		clean := strings.NewReplacer(`"`, "", "*", "", "(", "", ")", "", ":", "", "^", "", "{", "", "}", "").Replace(word)
+		if clean != "" {
+			parts = append(parts, `"`+clean+`"*`)
+		}
+	}
+	if len(parts) == 0 {
+		return nil, nil
+	}
+	return s.searchFTS5Query(repoID, strings.Join(parts, " OR "), kind, language, filePattern, maxResults)
 }
 
 func (s *IndexStore) searchSymbolsLayered(repoID int64, query string, kind string, language string, filePattern string, maxResults int) ([]ScoredSymbol, error) {
@@ -1810,6 +1901,13 @@ func (s *IndexStore) searchFTS5(repoID int64, query string, kind string, languag
 	if ftsQuery == "" {
 		return nil, nil
 	}
+	return s.searchFTS5Query(repoID, ftsQuery, kind, language, filePattern, limit)
+}
+
+func (s *IndexStore) searchFTS5Query(repoID int64, ftsQuery string, kind string, language string, filePattern string, limit int) ([]ScoredSymbol, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
 
 	// BM25 weights: name=10, qualified_name=5, signature=3, summary=2, docstring=1
 	sqlQuery := `
@@ -1828,7 +1926,7 @@ func (s *IndexStore) searchFTS5(repoID int64, query string, kind string, languag
 		args = append(args, strings.ToLower(language))
 	}
 
-	sqlQuery += " ORDER BY rank LIMIT ?"
+	sqlQuery += " ORDER BY rank, s.file_path, s.line, s.symbol_id LIMIT ?"
 	args = append(args, limit)
 
 	rows, err := s.db.Query(sqlQuery, args...)

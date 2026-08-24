@@ -692,7 +692,13 @@ func TestSearchSymbolsLexicalBoundedReturnsSmallIndexedWindow(t *testing.T) {
 	const count = 10000
 	symbols := make([]parser.Symbol, 0, count)
 	for i := 0; i < count; i++ {
-		name := fmt.Sprintf("CharacterEntry%05d", i)
+		name := fmt.Sprintf("UnrelatedEntry%05d", i)
+		if i == 0 {
+			name = "Character"
+		}
+		if i == 1 {
+			name = "InventoryLoader"
+		}
 		symbols = append(symbols, parser.Symbol{ID: parser.MakeSymbolID("large.go", name, parser.KindFunction), File: "large.go", Name: name, QualifiedName: name, Kind: parser.KindFunction, Language: "go", Line: i + 1, EndLine: i + 1})
 	}
 	if err := store.ReplaceRepoIndex("owner", "lexical-large", "owner", "", map[string]string{"large.go": "package large\n"}, map[string]string{"large.go": "go"}, symbols); err != nil {
@@ -702,12 +708,20 @@ func TestSearchSymbolsLexicalBoundedReturnsSmallIndexedWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	results, err := store.SearchSymbolsLexicalBounded(repoID, "character", "", "", "", 8)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(results) > 8 || len(results) == 0 {
-		t.Fatalf("lexical fallback window was not bounded/useful: %d", len(results))
+	for _, query := range []string{"character", "inventory"} {
+		results, err := store.SearchSymbolsLexicalBounded(repoID, query, "", "", "", 8)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(results) > 8 || len(results) == 0 {
+			t.Fatalf("lexical fallback window was not bounded/useful for %s: %d", query, len(results))
+		}
+		if query == "character" && results[0].Symbol.Name != "Character" {
+			t.Fatalf("character lexical recovery selected the wrong entry point: %#v", results[0].Symbol)
+		}
+		if query == "inventory" && results[0].Symbol.Name != "InventoryLoader" {
+			t.Fatalf("inventory lexical recovery selected the wrong entry point: %#v", results[0].Symbol)
+		}
 	}
 }
 
