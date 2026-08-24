@@ -503,9 +503,11 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 	// Weak prose is never allowed to create a large exact-seed set. Fallback
 	// lookup is deliberately small and reuses the indexed symbol search tiers.
 	fallbackTerms := append([]string{}, intent.HighSignalHints...)
-	if intent.BroadIntent {
+	weakFallbackAllowed := intent.BroadIntent || (intent.TaskClass == "localized_change" && len(exactSymbolAnchors) == 0 && len(semanticFamilies) == 0)
+	if weakFallbackAllowed {
 		fallbackTerms = append(fallbackTerms, intent.WeakTerms...)
 	}
+	expandedFallbacks := 0
 	for _, hint := range sortedUnique(fallbackTerms) {
 		if matchedHints[hint] || !work.allowFallbackQuery() || work.fallbackMatches >= work.maxFallbackMatches {
 			if work.fallbackMatches >= work.maxFallbackMatches {
@@ -518,7 +520,7 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 		}
 		work.fallbackQueries++
 		perQuery := minInt(work.maxFallbackPerTerm, work.maxFallbackMatches-work.fallbackMatches)
-		fallback, searchErr := p.Store.SearchSymbolsWithTier(repoID, hint, "", "", fileHint, perQuery)
+		fallback, searchErr := p.Store.SearchSymbolsLexicalBounded(repoID, hint, "", "", fileHint, perQuery)
 		if searchErr != nil {
 			return Plan{}, searchErr
 		}
@@ -529,9 +531,13 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 				continue
 			}
 			entity := genericEntityForSymbol(request.Repo, item.Symbol)
-			collector.add(entity, "symbol", "lexical_fallback", 80, false)
+			expand := expandedFallbacks < 2
+			collector.add(entity, "symbol", "lexical_fallback", 80, expand)
 			addSymbolCandidate(acc, request.Repo, item.Symbol, []string{"lexical_fallback", "broad_entry_point"}, 0, work)
 			accepted++
+			if expand {
+				expandedFallbacks++
+			}
 			if accepted >= work.maxFallbackPerTerm {
 				break
 			}

@@ -683,6 +683,34 @@ func TestGetSymbolsByFilesBoundedCapsLargeOutlineMetadata(t *testing.T) {
 	}
 }
 
+func TestSearchSymbolsLexicalBoundedReturnsSmallIndexedWindow(t *testing.T) {
+	store, err := NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	const count = 10000
+	symbols := make([]parser.Symbol, 0, count)
+	for i := 0; i < count; i++ {
+		name := fmt.Sprintf("CharacterEntry%05d", i)
+		symbols = append(symbols, parser.Symbol{ID: parser.MakeSymbolID("large.go", name, parser.KindFunction), File: "large.go", Name: name, QualifiedName: name, Kind: parser.KindFunction, Language: "go", Line: i + 1, EndLine: i + 1})
+	}
+	if err := store.ReplaceRepoIndex("owner", "lexical-large", "owner", "", map[string]string{"large.go": "package large\n"}, map[string]string{"large.go": "go"}, symbols); err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID("owner/lexical-large")
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := store.SearchSymbolsLexicalBounded(repoID, "character", "", "", "", 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) > 8 || len(results) == 0 {
+		t.Fatalf("lexical fallback window was not bounded/useful: %d", len(results))
+	}
+}
+
 func TestUpsertFileIndexWithContentRestoresCacheWhenIndexUpdateFails(t *testing.T) {
 	store := newTestStore(t)
 	if err := store.SaveContentFile("local", "missing", "main.lua", []byte("old content")); err != nil {

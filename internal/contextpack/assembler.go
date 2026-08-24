@@ -437,7 +437,7 @@ func (a *Assembler) loadSection(ctx context.Context, repoID int64, candidate pla
 		if !ok || symbol.File != candidate.File {
 			return Section{}, "", 0, false, false, nil
 		}
-		if symbol.ByteLength > remainingBytes {
+		if symbol.ByteLength > DefaultMaxSymbolBytes || symbol.ByteLength > remainingBytes {
 			boundedBytes := remainingBytes
 			if boundedBytes > DefaultMaxSymbolBytes {
 				boundedBytes = DefaultMaxSymbolBytes

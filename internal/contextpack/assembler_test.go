@@ -88,7 +88,7 @@ func TestAssembleOversizedPrimaryUsesDeterministicHeadTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first.Sections) != 1 || !first.Sections[0].Partial || first.Sections[0].OriginalTokens <= first.Sections[0].TokenCount || !strings.Contains(first.Sections[0].Source, omissionMarker) {
+	if len(first.Sections) != 1 || !first.Sections[0].Partial || first.Sections[0].OriginalTokens != 0 || !strings.Contains(first.Sections[0].Source, omissionMarker) {
 		t.Fatalf("oversized primary was not represented truthfully: %#v", first)
 	}
 	a, _ := json.Marshal(first)
@@ -359,6 +359,29 @@ func TestOversizedFocusedSymbolPreservesBoundedHeadTail(t *testing.T) {
 	}
 }
 
+func TestMidSizedPrimaryUsesPerSymbolBoundBeforeGlobalBudget(t *testing.T) {
+	store := assemblyStore(t)
+	defer store.Close()
+	repo := "local/midsized-primary"
+	unit := "middle🙂\n"
+	source := "HEAD_MID_SYMBOL_🙂\n" + strings.Repeat(unit, 1500000/len(unit)+1) + "TAIL_MID_SYMBOL_終\n"
+	symbol := indexedSymbol("mid.go", "MidSized", source)
+	writeAssemblyRepo(t, store, repo, map[string]string{symbol.File: source}, []parser.Symbol{symbol})
+	plan := planner.Plan{Repo: repo, TaskClass: "exact_symbol", TaskConfidence: "high", IndexState: "complete", Primary: []planner.Candidate{candidate(symbol, "primary", 10000, "exact_symbol_match")}}
+	pkg, err := New(staticPlanner{plan: plan}, store).Assemble(context.Background(), Request{Repo: repo, Task: "MidSized", MaxContextTokens: 8000, Debug: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pkg.Sections) != 1 || !pkg.Sections[0].Partial || pkg.Sections[0].OriginalTokens != 0 || pkg.Debug.SourceBytesRead > DefaultMaxSymbolBytes || !strings.Contains(pkg.Sections[0].Source, "HEAD_MID_SYMBOL") || !strings.Contains(pkg.Sections[0].Source, "TAIL_MID_SYMBOL") || !utf8.ValidString(pkg.Sections[0].Source) {
+		t.Fatalf("mid-sized symbol bypassed per-symbol bound: %#v", pkg)
+	}
+	data, _ := json.Marshal(pkg)
+	counter, _ := NewTokenCounter(TokenizerO200K)
+	if counter.Count(string(data)) > 8000 {
+		t.Fatalf("mid-sized package exceeded serialized budget: %d", counter.Count(string(data)))
+	}
+}
+
 func TestAssemblerUsesRealPlannerGenericRelationships(t *testing.T) {
 	store := assemblyStore(t)
 	defer store.Close()
@@ -505,14 +528,21 @@ func TestAssembleRealisticFiveMWorkspaceContext(t *testing.T) {
 	if counter.Count(string(data)) > 4000 || !containsFile(pkg.Sections, "resources/[jobs]/banana_jobs/server/main.lua") || !containsFile(pkg.Sections, "resources/[ox]/ox_inventory/server/main.lua") {
 		t.Fatalf("real workspace package lacks bounded cross-resource context: %#v", pkg)
 	}
-	loadSymbol := findSymbol(allSymbols, "LoadCharacter")
-	natural, err := New(planner.New(store), store).Assemble(context.Background(), Request{Repo: repo, Task: "fix character inventory loading", FocusSymbolID: loadSymbol.ID, MaxContextTokens: 4000, IncludeImpact: true})
+	natural, err := New(planner.New(store), store).Assemble(context.Background(), Request{Repo: repo, Task: "fix character inventory loading", MaxContextTokens: 4000, IncludeImpact: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	naturalData, _ := json.Marshal(natural)
-	if counter.Count(string(naturalData)) > 4000 || !containsFile(natural.Sections, "resources/[jobs]/banana_jobs/server/main.lua") || !sectionsContainText(natural.Sections, "exports.banana_core:GetPlayer") || !sectionsContainText(natural.Sections, "exports.ox_inventory:AddItem") {
+	if natural.TaskClass != "broad_unknown" || natural.TaskConfidence != "low" || counter.Count(string(naturalData)) > 4000 || !containsFile(natural.Sections, "resources/[jobs]/banana_jobs/server/main.lua") || !containsFile(natural.Sections, "resources/[ox]/ox_inventory/server/main.lua") || !sectionsContainText(natural.Sections, "exports.banana_core:GetPlayer") || !sectionsContainText(natural.Sections, "exports.ox_inventory:AddItem") {
 		t.Fatalf("natural workspace task lacked bounded character/inventory context: %#v", natural)
+	}
+	naturalAgain, err := New(planner.New(store), store).Assemble(context.Background(), Request{Repo: repo, Task: "fix character inventory loading", MaxContextTokens: 4000, IncludeImpact: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	naturalAgainData, _ := json.Marshal(naturalAgain)
+	if string(naturalData) != string(naturalAgainData) {
+		t.Fatal("natural workspace context assembly was not deterministic")
 	}
 }
 
@@ -638,15 +668,6 @@ func sectionsContainText(sections []Section, text string) bool {
 		}
 	}
 	return false
-}
-
-func findSymbol(symbols []parser.Symbol, name string) parser.Symbol {
-	for _, symbol := range symbols {
-		if symbol.Name == name {
-			return symbol
-		}
-	}
-	return parser.Symbol{}
 }
 
 func indexedSymbol(file, name, source string) parser.Symbol {

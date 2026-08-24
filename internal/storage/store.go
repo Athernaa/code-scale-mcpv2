@@ -1726,6 +1726,39 @@ func (s *IndexStore) SearchSymbolsWithTier(repoID int64, query string, kind stri
 	return s.searchSymbolsLayered(repoID, query, kind, language, filePattern, maxResults)
 }
 
+// SearchSymbolsLexicalBounded performs the planner's weak lexical lookup
+// without falling through to the repository-wide fuzzy scan. Both stages are
+// indexed/bounded and return only a small deterministic result window.
+func (s *IndexStore) SearchSymbolsLexicalBounded(repoID int64, query string, kind string, language string, filePattern string, maxResults int) ([]ScoredSymbol, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if maxResults <= 0 {
+		return nil, nil
+	}
+	results, err := s.searchFTS5(repoID, query, kind, language, filePattern, maxResults)
+	if err != nil {
+		results = nil
+	}
+	if len(results) >= maxResults {
+		return results[:maxResults], nil
+	}
+	substring, err := s.searchSubstring(repoID, query, kind, language, filePattern, maxResults-len(results))
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(results)+len(substring))
+	for _, item := range results {
+		seen[item.Symbol.ID] = true
+	}
+	for _, item := range substring {
+		if !seen[item.Symbol.ID] {
+			results = append(results, item)
+			seen[item.Symbol.ID] = true
+		}
+	}
+	return results, nil
+}
+
 func (s *IndexStore) searchSymbolsLayered(repoID int64, query string, kind string, language string, filePattern string, maxResults int) ([]ScoredSymbol, error) {
 	seen := make(map[string]bool)
 	var results []ScoredSymbol
@@ -1844,8 +1877,13 @@ func (s *IndexStore) searchFTS5(repoID int64, query string, kind string, languag
 	return results, rows.Err()
 }
 
-// searchSubstring uses the existing in-memory substring scoring.
+// searchSubstring uses a bounded SQL candidate window before in-memory
+// scoring. It must not materialize the repository symbol table for planner
+// fallback queries.
 func (s *IndexStore) searchSubstring(repoID int64, query string, kind string, language string, filePattern string, limit int) ([]ScoredSymbol, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
 	where := "repo_id = ?"
 	args := []any{repoID}
 	if kind != "" {
@@ -1857,7 +1895,30 @@ func (s *IndexStore) searchSubstring(repoID int64, query string, kind string, la
 		args = append(args, strings.ToLower(language))
 	}
 
-	symbols, err := s.querySymbols("SELECT * FROM symbols WHERE "+where, args...)
+	queryLower := strings.ToLower(strings.TrimSpace(query))
+	if queryLower == "" {
+		return nil, nil
+	}
+	like := "%" + queryLower + "%"
+	where += " AND (LOWER(name) LIKE ? OR LOWER(qualified_name) LIKE ? OR LOWER(signature) LIKE ? OR LOWER(summary) LIKE ? OR LOWER(docstring) LIKE ? OR LOWER(file_path) LIKE ?)"
+	for i := 0; i < 6; i++ {
+		args = append(args, like)
+	}
+	if filePattern != "" && !strings.ContainsAny(filePattern, "*?[") {
+		where += " AND file_path = ?"
+		args = append(args, filePattern)
+	}
+	prefetch := limit * 8
+	if prefetch < limit {
+		prefetch = limit
+	}
+	if prefetch > 256 {
+		prefetch = 256
+	}
+	orderArgs := []any{queryLower, like, like}
+	args = append(args, orderArgs...)
+	args = append(args, prefetch)
+	symbols, err := s.querySymbols("SELECT * FROM symbols WHERE "+where+" ORDER BY CASE WHEN LOWER(name) = ? THEN 0 WHEN LOWER(name) LIKE ? THEN 1 WHEN LOWER(file_path) LIKE ? THEN 2 ELSE 3 END, file_path, line, symbol_id LIMIT ?", args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1872,7 +1933,6 @@ func (s *IndexStore) searchSubstring(repoID int64, query string, kind string, la
 		symbols = filtered
 	}
 
-	queryLower := strings.ToLower(query)
 	queryWords := strings.Fields(queryLower)
 
 	type scored struct {
@@ -2020,6 +2080,7 @@ func (s *IndexStore) GetSymbolCountsByFile(repoID int64) (map[string]int, error)
 func scoreSymbol(sym parser.Symbol, queryLower string, queryWords []string) float64 {
 	var score float64
 	nameLower := strings.ToLower(sym.Name)
+	fileLower := strings.ToLower(sym.File)
 	sigLower := strings.ToLower(sym.Signature)
 	summaryLower := strings.ToLower(sym.Summary)
 	docLower := strings.ToLower(sym.Docstring)
@@ -2030,9 +2091,15 @@ func scoreSymbol(sym parser.Symbol, queryLower string, queryWords []string) floa
 	} else if strings.Contains(nameLower, queryLower) {
 		score += 10
 	}
+	if strings.Contains(fileLower, queryLower) {
+		score += 4
+	}
 	for _, w := range queryWords {
 		if strings.Contains(nameLower, w) {
 			score += 5
+		}
+		if strings.Contains(fileLower, w) {
+			score++
 		}
 	}
 
