@@ -44,7 +44,7 @@ type Deps struct {
 
 // toTextResult converts any value to an MCP CallToolResult with JSON TextContent.
 func toTextResult(v any) (*mcp.CallToolResult, error) {
-	data, err := json.MarshalIndent(v, "", "  ")
+	data, err := json.Marshal(v)
 	if err != nil {
 		return nil, err
 	}
@@ -77,9 +77,23 @@ func (t *timer) elapsedMs() float64 {
 
 // addSavings records token savings and returns meta with costs.
 func (d *Deps) addSavings(rawBytes, responseBytes int64) (int64, int64) {
+	if strings.ToLower(strings.TrimSpace(os.Getenv("CODE_SCALE_TELEMETRY"))) != "full" || d.Tracker == nil {
+		return 0, 0
+	}
 	saved := storage.EstimateSavings(rawBytes, responseBytes)
 	total, _ := d.Tracker.AddSavings(saved)
 	return saved, total
+}
+
+func (d *Deps) meta(t *timer, repo string, truncated bool, baselineBytes, responseBytes int64) Meta {
+	meta := Meta{TimingMs: t.elapsedMs(), Truncated: truncated}
+	level := strings.ToLower(strings.TrimSpace(os.Getenv("CODE_SCALE_TELEMETRY")))
+	if level == "" { level = "compact" }
+	if level == "full" {
+		meta.Repo = repo
+		meta.TokensSaved, meta.TotalSaved = d.addSavings(baselineBytes, responseBytes)
+	}
+	return meta
 }
 
 // expandHomePath expands a leading ~/ in the path to the user's home directory.

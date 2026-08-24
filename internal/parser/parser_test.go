@@ -154,6 +154,46 @@ func TestParseTypeScript(t *testing.T) {
 	}
 }
 
+func TestNamedJavaScriptAndTypeScriptFunctionExpressions(t *testing.T) {
+	cases := []struct {
+		path     string
+		language string
+		names    []string
+	}{
+		{"../../testdata/javascript/arrows.js", "javascript", []string{"fetchData", "makeThing", "Service", "Service.run", "outer", "outer.helper"}},
+		{"../../testdata/javascript/arrows.jsx", "javascript", []string{"CharacterCard"}},
+		{"../../testdata/typescript/arrows.ts", "typescript", []string{"fetchNui", "makeThing", "GrandParent", "GrandParent.parent", "GrandParent.parent.childHelper"}},
+		{"../../testdata/typescript/arrows.tsx", "typescript", []string{"CharacterCard"}},
+	}
+	for _, tc := range cases {
+		symbols, err := ParseFile(readFixture(t, tc.path), tc.path, tc.language)
+		if err != nil {
+			t.Fatalf("ParseFile(%s): %v", tc.path, err)
+		}
+		byName := make(map[string]Symbol)
+		for _, symbol := range symbols {
+			byName[symbol.QualifiedName] = symbol
+			if symbol.Name == "" {
+				t.Errorf("%s produced an unnamed symbol", tc.path)
+			}
+		}
+		for _, name := range tc.names {
+			if _, ok := byName[name]; !ok {
+				t.Errorf("%s missing symbol %s", tc.path, name)
+			}
+		}
+		if _, ok := byName["values.map"]; ok {
+			t.Errorf("%s incorrectly named an anonymous callback", tc.path)
+		}
+	}
+	jsSymbols, _ := ParseFile(readFixture(t, "../../testdata/javascript/arrows.js"), "arrows.js", "javascript")
+	for _, symbol := range jsSymbols {
+		if symbol.Name == "helper" && symbol.Kind == KindMethod {
+			t.Error("nested JavaScript helper was incorrectly classified as a method")
+		}
+	}
+}
+
 func TestParseRust(t *testing.T) {
 	src := readFixture(t, "../../testdata/rust/sample.rs")
 	symbols, err := ParseFile(src, "sample.rs", "rust")

@@ -183,12 +183,12 @@ func TestEval_TokenEfficiency(t *testing.T) {
 	allSelfFiles := allTestdataFiles(t, env.internal) // reuse helper — it checks DetectLanguage
 
 	scenarios := []tokenScenario{
-		// --- Testdata scenarios: baseline = grep all files (realistic agent behavior) ---
+		// --- Testdata scenarios: compare both repository-wide and containing-file baselines ---
 		{
-			name:          "Find authenticate function (search all)",
+			name:          "Find authenticate function (native search + containing file)",
 			repo:          "eval/testdata",
 			baseDir:       env.testdata,
-			baselineFiles: allTD, // agent would grep all files to find it
+			baselineFiles: []string{"python/sample.py"},
 			codeScaleFn: func(env *evalEnv) string {
 				searchH := tools.SearchSymbolsHandler(env.deps)
 				r, _, _ := searchH(ctx, nil, tools.SearchSymbolsArgs{Repo: "eval/testdata", Query: "authenticate"})
@@ -392,9 +392,9 @@ func TestEval_TokenEfficiency(t *testing.T) {
 		if !allCorrect {
 			t.Error("some scenarios returned incorrect results")
 		}
-		if avgSavings < 50 {
-			t.Errorf("average savings %.1f%% is below 50%% threshold", avgSavings)
-		}
+		// This is an observational benchmark: small files and metadata-heavy
+		// responses can legitimately have negative savings. Do not turn a
+		// measured result into a marketing threshold.
 	})
 }
 

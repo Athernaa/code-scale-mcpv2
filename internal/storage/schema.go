@@ -105,5 +105,13 @@ CREATE TRIGGER IF NOT EXISTS symbols_au AFTER UPDATE ON symbols BEGIN
 END;
 `
 
+// MigrateV5SQL adds a file-level content index used only to shortlist text
+// search candidates. Exact substring matching remains the final authority.
+const MigrateV5SQL = `
+CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
+    repo_id UNINDEXED, path UNINDEXED, content
+);
+`
+
 // CurrentSchemaVersion is the current schema version.
-const CurrentSchemaVersion = 4
+const CurrentSchemaVersion = 5

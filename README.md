@@ -1,6 +1,6 @@
 # code-scale-mcp
 
-A high-performance MCP server that indexes codebases via tree-sitter AST parsing and provides token-efficient symbol retrieval. Reduces agent token costs by up to 99% by letting agents retrieve individual symbols instead of whole files.
+A high-performance MCP server that indexes codebases via tree-sitter AST parsing and provides measured, token-efficient symbol retrieval. Agents can retrieve individual symbols instead of whole files.
 
 **Inspiration and thanks to [jcodemunch-mcp](https://github.com/jgravelle/jcodemunch-mcp)** — awesome work that inspired me to build my version of his original tool!
 
@@ -20,7 +20,7 @@ code-scale-mcp is an MCP server that indexes codebases at the symbol level using
 - ***Search precisely:*** find symbols by name, type, or full-text content with 3-layer search (BM25 → substring → fuzzy)
 - ***Retrieve surgically:*** fetch just the one function they need, with byte-level precision
 
-***The result:*** up to 99% token reduction per retrieval, without losing any code comprehension quality. The agent gets exactly the code it needs, nothing more.
+***The result:*** compact, targeted retrieval without losing the implementation context the requested symbol requires. Response metadata reports measured sizes where a defensible baseline exists.
 
 ## Key Design Choices
 - ***Go single binary:*** no Python/pip dependency chain, millisecond startup, true multi-core parallelism

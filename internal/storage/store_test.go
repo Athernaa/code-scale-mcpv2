@@ -197,6 +197,18 @@ func TestDetectChanges(t *testing.T) {
 	}
 }
 
+func TestSearchTextUsesExactVerificationAndRecursivePatterns(t *testing.T) {
+	store := newTestStore(t)
+	files := map[string]string{"src/a.ts": "one exact:event", "src/components/a.ts": "two exact:event", "src/components/deep/a.ts": "three exact:event"}
+	langs := map[string]string{"src/a.ts": "typescript", "src/components/a.ts": "typescript", "src/components/deep/a.ts": "typescript"}
+	for path, content := range files { if err := store.SaveContentFile("test", "text", path, []byte(content)); err != nil { t.Fatal(err) } }
+	if err := store.ReplaceRepoIndex("test", "text", "local", "", files, langs, nil); err != nil { t.Fatal(err) }
+	repoID, err := store.GetRepoID("test/text"); if err != nil { t.Fatal(err) }
+	results, err := store.SearchText(repoID, "exact:event", "src/**/*.ts", 10, 0)
+	if err != nil { t.Fatal(err) }
+	if len(results) != 3 { t.Fatalf("expected all punctuation-heavy exact matches, got %d", len(results)) }
+}
+
 func TestReplaceRepoIndexReplacesAllRepositoryData(t *testing.T) {
 	store := newTestStore(t)
 	if err := store.ReplaceRepoIndex("test", "replace", "local", "", map[string]string{

@@ -5,6 +5,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/Athernaa/code-scale-mcpv2/internal/ratelimit"
+	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 )
 
 type SearchTextArgs struct {
@@ -19,12 +20,6 @@ func SearchTextHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, S
 	return func(ctx context.Context, req *mcp.CallToolRequest, args SearchTextArgs) (*mcp.CallToolResult, any, error) {
 		t := newTimer()
 
-		repoID, err := deps.Store.GetRepoID(args.Repo)
-		if err != nil {
-			r, _ := errorResult(err.Error())
-			return r, nil, nil
-		}
-
 		maxResults := clampResults(args.MaxResults, 20, 200)
 
 		// Progressive throttling
@@ -35,35 +30,21 @@ func SearchTextHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, S
 			return r, nil, nil
 		}
 
-		contextLines := args.ContextLines
-		if contextLines < 0 {
-			contextLines = 0
-		}
-		if contextLines > 10 {
-			contextLines = 10
-		}
-
-		results, err := deps.Store.SearchText(repoID, args.Query, args.FilePattern, maxResults, contextLines)
+		args.MaxResults = maxResults
+		value, err := execSearchText(deps, args)
 		if err != nil {
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
 		}
 
-		result := map[string]any{
-			"repo":          args.Repo,
-			"query":         args.Query,
-			"result_count":  len(results),
-			"context_lines": contextLines,
-			"results":       results,
-		}
+		result := value.(map[string]any)
+		results, _ := result["results"].([]storage.TextSearchResult)
+		result["repo"] = args.Repo
+		result["query"] = args.Query
 		if warning != "" {
 			result["warning"] = warning
 		}
-		result["_meta"] = Meta{
-			TimingMs:  t.elapsedMs(),
-			Repo:      args.Repo,
-			Truncated: len(results) >= maxResults,
-		}
+		result["_meta"] = deps.meta(t, args.Repo, len(results) >= maxResults, 0, 0)
 		r, _ := toTextResult(result)
 		return r, nil, nil
 	}

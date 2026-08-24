@@ -5,11 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/Athernaa/code-scale-mcpv2/internal/github"
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
+	"github.com/Athernaa/code-scale-mcpv2/internal/pathfilter"
 	"github.com/Athernaa/code-scale-mcpv2/internal/security"
 	"github.com/Athernaa/code-scale-mcpv2/internal/summarizer"
 )
@@ -35,6 +37,12 @@ func IndexRepoHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, In
 		}
 
 		client := github.NewClient()
+		gitignoreText, _ := client.FetchGitignore(owner, repoName)
+		ignoreMatcher, err := pathfilter.NewFromLines(".", strings.Split(gitignoreText, "\n"), nil)
+		if err != nil {
+			r, _ := errorResult("load remote ignore rules: " + err.Error())
+			return r, nil, nil
+		}
 
 		// Fetch repo tree
 		tree, err := client.FetchRepoTree(owner, repoName)
@@ -48,6 +56,9 @@ func IndexRepoHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, In
 		var sourcePaths []string
 		for _, entry := range tree {
 			if entry.Type != "blob" {
+				continue
+			}
+			if ignoreMatcher.IgnoredRelative(entry.Path, false) {
 				continue
 			}
 			// Skip by name patterns

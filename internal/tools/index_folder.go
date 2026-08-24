@@ -14,6 +14,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
+	"github.com/Athernaa/code-scale-mcpv2/internal/pathfilter"
 	"github.com/Athernaa/code-scale-mcpv2/internal/repository"
 	"github.com/Athernaa/code-scale-mcpv2/internal/security"
 	"github.com/Athernaa/code-scale-mcpv2/internal/summarizer"
@@ -56,6 +57,15 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 			r, _ := errorResult("directory is not allowed for indexing (system or restricted path)")
 			return r, nil, nil
 		}
+		if args.FollowSymlinks {
+			r, _ := errorResult("follow_symlinks=true is not supported safely yet; index with follow_symlinks=false")
+			return r, nil, nil
+		}
+		ignoreMatcher, err := pathfilter.New(absPath, args.ExtraIgnore)
+		if err != nil {
+			r, _ := errorResult("load ignore rules: " + err.Error())
+			return r, nil, nil
+		}
 
 		owner := localID.Owner
 		repoName := localID.Name
@@ -73,6 +83,9 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 				if security.ShouldSkipDir(d.Name()) {
 					return filepath.SkipDir
 				}
+				if ignoreMatcher.Ignored(path, true) {
+					return filepath.SkipDir
+				}
 				return nil
 			}
 
@@ -88,6 +101,9 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 
 			// Security filter
 			if reason := security.ShouldExcludeFile(path, absPath, security.DefaultMaxFileSize); reason != "" {
+				return nil
+			}
+			if ignoreMatcher.Ignored(path, false) {
 				return nil
 			}
 
@@ -114,6 +130,8 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 			content  []byte
 			hash     string
 			language string
+			failure  string
+			parseFailure bool
 		}
 
 		results := make(chan parseResult, len(sourceFiles))
@@ -130,17 +148,20 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 				fullPath := filepath.Join(absPath, filepath.FromSlash(rp))
 				content, err := os.ReadFile(fullPath)
 				if err != nil {
+					results <- parseResult{path: rp, failure: err.Error()}
 					return
 				}
 
 				// Check for binary content
 				if security.IsBinaryContent(content) {
+					results <- parseResult{path: rp, failure: "binary content"}
 					return
 				}
 
 				lang := parser.DetectLanguage(rp)
 				symbols, err := parser.ParseFile(content, rp, lang)
 				if err != nil {
+					results <- parseResult{path: rp, failure: err.Error(), parseFailure: true}
 					return
 				}
 
@@ -164,8 +185,21 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 		fileHashes := make(map[string]string)
 		fileLangs := make(map[string]string)
 		var allSymbols []parser.Symbol
+		skippedFiles := 0
+		parseFailures := 0
+		var diagnostics []string
 
 		for pr := range results {
+			if pr.failure != "" {
+				skippedFiles++
+				if pr.parseFailure {
+					parseFailures++
+				}
+				if len(diagnostics) < 3 {
+					diagnostics = append(diagnostics, pr.path+": "+pr.failure)
+				}
+				continue
+			}
 			fileHashes[pr.path] = pr.hash
 			fileLangs[pr.path] = pr.language
 			allSymbols = append(allSymbols, pr.symbols...)
@@ -200,12 +234,17 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 			"file_count":   len(fileHashes),
 			"symbol_count": len(allSymbols),
 			"languages":    langCounts,
+			"skipped_files": skippedFiles,
+			"parse_failures": parseFailures,
 			"_meta": Meta{
 				TimingMs:    t.elapsedMs(),
 				Repo:        owner + "/" + repoName,
 				FileCount:   len(fileHashes),
 				SymbolCount: len(allSymbols),
 			},
+		}
+		if len(diagnostics) > 0 {
+			result["diagnostic_samples"] = diagnostics
 		}
 		r, _ := toTextResult(result)
 		return r, nil, nil

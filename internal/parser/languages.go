@@ -110,6 +110,7 @@ var JavaScriptSpec = &LanguageSpec{
 	GetLanguage: javascript.GetLanguage,
 	SymbolNodeTypes: map[string]string{
 		"function_declaration":           "function",
+		"function_expression":            "function",
 		"class_declaration":              "class",
 		"method_definition":              "method",
 		"arrow_function":                 "function",
@@ -138,6 +139,7 @@ var TypeScriptSpec = &LanguageSpec{
 	GetLanguage: typescript.GetLanguage,
 	SymbolNodeTypes: map[string]string{
 		"function_declaration":   "function",
+		"function_expression":    "function",
 		"class_declaration":      "class",
 		"method_definition":      "method",
 		"arrow_function":         "function",

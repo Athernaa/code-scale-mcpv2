@@ -1,7 +1,9 @@
 package ratelimit
 
 import (
+	"os"
 	"sync"
+	"strings"
 	"time"
 )
 
@@ -15,6 +17,8 @@ const (
 	ActionReduced
 	// ActionBlocked suggests using batch_execute.
 	ActionBlocked
+	// ActionWarning preserves the requested result limit while suggesting batching.
+	ActionWarning
 )
 
 // Throttler tracks per-tool call frequency and progressively limits results.
@@ -24,16 +28,19 @@ type Throttler struct {
 	windowSize  time.Duration
 	normalLimit int // calls 1-N are normal
 	reducedMax  int // calls N+1 to M are reduced
+	hard        bool
 }
 
 // NewThrottler creates a throttler with default thresholds.
 // Normal for first 3 calls per tool, reduced for calls 4-8, blocked at 9+ within a 60s window.
 func NewThrottler() *Throttler {
+	hard := strings.EqualFold(strings.TrimSpace(os.Getenv("CODE_SCALE_HARD_THROTTLE")), "true")
 	return &Throttler{
 		tools:       make(map[string][]time.Time),
 		windowSize:  60 * time.Second,
 		normalLimit: 3,
 		reducedMax:  8,
+		hard:        hard,
 	}
 }
 
@@ -59,7 +66,10 @@ func (t *Throttler) Check(tool string) Action {
 	t.tools[tool] = valid
 	count := len(valid)
 
-	if count <= t.normalLimit {
+	if count <= t.normalLimit || !t.hard {
+		if !t.hard && count > t.normalLimit {
+			return ActionWarning
+		}
 		return ActionNormal
 	}
 	if count <= t.reducedMax {
@@ -80,6 +90,8 @@ func ApplyLimit(action Action, maxResults int) (int, string) {
 		return reduced, "Rate limit: results reduced. Consider using batch_execute for multiple operations."
 	case ActionBlocked:
 		return 0, "Rate limit: too many rapid calls. Use batch_execute to combine multiple operations into one call."
+	case ActionWarning:
+		return maxResults, "Consider batch_execute to reduce round trips."
 	default:
 		return maxResults, ""
 	}

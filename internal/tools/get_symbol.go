@@ -2,11 +2,10 @@ package tools
 
 import (
 	"context"
+	"os"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
-	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 )
 
 type GetSymbolArgs struct {
@@ -20,101 +19,19 @@ type GetSymbolArgs struct {
 func GetSymbolHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, GetSymbolArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, req *mcp.CallToolRequest, args GetSymbolArgs) (*mcp.CallToolResult, any, error) {
 		t := newTimer()
-
-		repoID, err := deps.Store.GetRepoID(args.Repo)
-		if err != nil {
-			r, _ := errorResult(err.Error())
-			return r, nil, nil
-		}
-
-		sym, err := deps.Store.GetSymbolByID(repoID, args.SymbolID)
-		if err != nil {
-			r, _ := errorResult(err.Error())
-			return r, nil, nil
-		}
-
-		source, err := deps.Store.GetSymbolContent(repoID, args.SymbolID)
-		if err != nil {
-			r, _ := errorResult(err.Error())
-			return r, nil, nil
-		}
-
-		// Context lines
-		var contextBefore, contextAfter string
-		if args.ContextLines > 0 {
-			fileContent, err := deps.Store.GetFileContent(repoID, sym.File)
-			if err == nil {
-				lines := strings.Split(string(fileContent), "\n")
-				startLine := sym.Line - 1 // 0-indexed
-				endLine := sym.EndLine    // exclusive
-
-				// Before context
-				beforeStart := startLine - args.ContextLines
-				if beforeStart < 0 {
-					beforeStart = 0
-				}
-				if beforeStart < startLine {
-					contextBefore = strings.Join(lines[beforeStart:startLine], "\n")
-				}
-
-				// After context
-				afterEnd := endLine + args.ContextLines
-				if afterEnd > len(lines) {
-					afterEnd = len(lines)
-				}
-				if endLine < afterEnd {
-					contextAfter = strings.Join(lines[endLine:afterEnd], "\n")
+		value, err := execGetSymbol(deps, args)
+		if err != nil { r, _ := errorResult(err.Error()); return r, nil, nil }
+		result := value.(map[string]any)
+		baselineBytes, responseBytes := int64(0), int64(0)
+		if strings.EqualFold(strings.TrimSpace(os.Getenv("CODE_SCALE_TELEMETRY")), "full") {
+			if repoID, repoErr := deps.Store.GetRepoID(args.Repo); repoErr == nil {
+				if sym, symErr := deps.Store.GetSymbolByID(repoID, args.SymbolID); symErr == nil {
+					if fileContent, fileErr := deps.Store.GetFileContent(repoID, sym.File); fileErr == nil { baselineBytes = int64(len(fileContent)) }
 				}
 			}
 		}
-
-		// Smart truncation
-		var truncated bool
-		if args.MaxLength > 0 {
-			source, truncated = smartTruncateSource(source, args.MaxLength)
-		}
-
-		// Verify content hash
-		var verified *bool
-		if args.Verify {
-			currentHash := parser.ComputeContentHash([]byte(source))
-			v := currentHash == sym.ContentHash
-			verified = &v
-		}
-
-		saved, total := deps.addSavings(int64(len(source)*10), int64(len(source)))
-
-		result := map[string]any{
-			"id":         sym.ID,
-			"kind":       sym.Kind,
-			"name":       sym.Name,
-			"file":       sym.File,
-			"line":       sym.Line,
-			"end_line":   sym.EndLine,
-			"signature":  sym.Signature,
-			"decorators": sym.Decorators,
-			"docstring":  sym.Docstring,
-			"source":     source,
-		}
-		if contextBefore != "" {
-			result["context_before"] = contextBefore
-		}
-		if contextAfter != "" {
-			result["context_after"] = contextAfter
-		}
-		if verified != nil {
-			result["content_verified"] = *verified
-		}
-
-		result["_meta"] = Meta{
-			TimingMs:    t.elapsedMs(),
-			Repo:        args.Repo,
-			Truncated:   truncated,
-			TokensSaved: saved,
-			TotalSaved:  total,
-			CostAvoided: storage.CostAvoided(saved),
-			TotalCost:   storage.CostAvoided(total),
-		}
+		if source, ok := result["source"].(string); ok { responseBytes += int64(len(source)) }
+		result["_meta"] = deps.meta(t, args.Repo, result["truncated"] == true, baselineBytes, responseBytes)
 
 		r, _ := toTextResult(result)
 		return r, nil, nil
@@ -123,69 +40,21 @@ func GetSymbolHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, Ge
 
 // GetSymbolsArgs is for batch symbol retrieval.
 type GetSymbolsArgs struct {
-	Repo      string   `json:"repo" jsonschema:"Repository name"`
-	SymbolIDs []string `json:"symbol_ids" jsonschema:"List of symbol IDs to retrieve"`
+	Repo          string `json:"repo" jsonschema:"Repository name"`
+	SymbolIDs     []string `json:"symbol_ids" jsonschema:"List of symbol IDs to retrieve"`
+	MaxTotalBytes int      `json:"max_total_bytes,omitempty" jsonschema:"Maximum combined source bytes (default 1048576)"`
 }
 
 func GetSymbolsHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, GetSymbolsArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, req *mcp.CallToolRequest, args GetSymbolsArgs) (*mcp.CallToolResult, any, error) {
 		t := newTimer()
 
-		if len(args.SymbolIDs) > 100 {
-			r, _ := errorResult("too many symbol IDs (max 100)")
-			return r, nil, nil
-		}
-
-		repoID, err := deps.Store.GetRepoID(args.Repo)
-		if err != nil {
-			r, _ := errorResult(err.Error())
-			return r, nil, nil
-		}
-
-		var symbols []map[string]any
-		var errors []string
-		var totalBytes int64
-
-		for _, symID := range args.SymbolIDs {
-			sym, err := deps.Store.GetSymbolByID(repoID, symID)
-			if err != nil {
-				errors = append(errors, symID)
-				continue
-			}
-
-			source, err := deps.Store.GetSymbolContent(repoID, symID)
-			if err != nil {
-				errors = append(errors, symID)
-				continue
-			}
-			totalBytes += int64(len(source))
-
-			symbols = append(symbols, map[string]any{
-				"id":        sym.ID,
-				"kind":      sym.Kind,
-				"name":      sym.Name,
-				"file":      sym.File,
-				"line":      sym.Line,
-				"signature": sym.Signature,
-				"source":    source,
-			})
-		}
-
-		saved, total := deps.addSavings(totalBytes*10, totalBytes)
-
-		result := map[string]any{
-			"symbols": symbols,
-			"errors":  errors,
-			"_meta": Meta{
-				TimingMs:    t.elapsedMs(),
-				Repo:        args.Repo,
-				SymbolCount: len(symbols),
-				TokensSaved: saved,
-				TotalSaved:  total,
-				CostAvoided: storage.CostAvoided(saved),
-				TotalCost:   storage.CostAvoided(total),
-			},
-		}
+		value, err := execGetSymbols(deps, args)
+		if err != nil { r, _ := errorResult(err.Error()); return r, nil, nil }
+		result := value.(map[string]any)
+		meta := deps.meta(t, args.Repo, result["truncated"] == true, 0, 0)
+		meta.SymbolCount = len(result["symbols"].([]map[string]any))
+		result["_meta"] = meta
 		r, _ := toTextResult(result)
 		return r, nil, nil
 	}

@@ -46,6 +46,11 @@ func DetectLanguage(filename string) string {
 	return ""
 }
 
+type symbolContext struct {
+	symbol      *Symbol
+	isContainer bool
+}
+
 // walkTree recursively walks the AST and extracts symbols.
 func walkTree(
 	node *sitter.Node,
@@ -54,21 +59,22 @@ func walkTree(
 	filename string,
 	language string,
 	symbols *[]Symbol,
-	parentSymbol *Symbol,
+	parentContext *symbolContext,
 ) {
 	nodeType := node.Type()
+	activeContext := parentContext
 
 	// Check if this node is a symbol
 	if _, ok := spec.SymbolNodeTypes[nodeType]; ok {
-		sym := extractSymbol(node, spec, src, filename, language, parentSymbol)
+		sym := extractSymbol(node, spec, src, filename, language, parentContext)
 		if sym != nil {
 			*symbols = append(*symbols, *sym)
-			parentSymbol = sym
+			activeContext = &symbolContext{symbol: sym, isContainer: isContainerNode(spec, nodeType)}
 		}
 	}
 
 	// Check for constant patterns (top-level only)
-	if parentSymbol == nil {
+	if activeContext == nil {
 		for _, cp := range spec.ConstantPatterns {
 			if nodeType == cp {
 				if c := extractConstant(node, spec, src, filename, language); c != nil {
@@ -84,8 +90,17 @@ func walkTree(
 		if child == nil {
 			continue
 		}
-		walkTree(child, spec, src, filename, language, symbols, parentSymbol)
+		walkTree(child, spec, src, filename, language, symbols, activeContext)
 	}
+}
+
+func isContainerNode(spec *LanguageSpec, nodeType string) bool {
+	for _, containerType := range spec.ContainerNodeTypes {
+		if containerType == nodeType {
+			return true
+		}
+	}
+	return false
 }
 
 // extractSymbol extracts a Symbol from an AST node.
@@ -95,7 +110,7 @@ func extractSymbol(
 	src []byte,
 	filename string,
 	language string,
-	parentSymbol *Symbol,
+	parentContext *symbolContext,
 ) *Symbol {
 	kind := spec.SymbolNodeTypes[node.Type()]
 
@@ -112,9 +127,9 @@ func extractSymbol(
 
 	// Build qualified name
 	qualifiedName := name
-	if parentSymbol != nil {
-		qualifiedName = parentSymbol.Name + "." + name
-		if kind == KindFunction {
+	if parentContext != nil && parentContext.symbol != nil {
+		qualifiedName = parentContext.symbol.QualifiedName + "." + name
+		if kind == KindFunction && parentContext.isContainer {
 			kind = KindMethod
 		}
 	}
@@ -136,8 +151,8 @@ func extractSymbol(
 	contentHash := ComputeContentHash(symbolBytes)
 
 	parentID := ""
-	if parentSymbol != nil {
-		parentID = parentSymbol.ID
+	if parentContext != nil && parentContext.symbol != nil {
+		parentID = parentContext.symbol.ID
 	}
 
 	return &Symbol{
@@ -163,7 +178,14 @@ func extractSymbol(
 // extractName extracts the name from an AST node.
 func extractName(node *sitter.Node, spec *LanguageSpec, src []byte) string {
 	// Arrow functions get name from parent — skip here
-	if node.Type() == "arrow_function" {
+	if node.Type() == "arrow_function" || node.Type() == "function_expression" {
+		parent := node.Parent()
+		if parent != nil && parent.Type() == "variable_declarator" {
+			nameNode := parent.ChildByFieldName("name")
+			if nameNode != nil && nameNode.Type() == "identifier" {
+				return safeNodeText(src, nameNode)
+			}
+		}
 		return ""
 	}
 

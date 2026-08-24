@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
+	"github.com/Athernaa/code-scale-mcpv2/internal/pathmatch"
 	"github.com/Athernaa/code-scale-mcpv2/internal/repository"
 	"github.com/Athernaa/code-scale-mcpv2/internal/search"
 	"github.com/Athernaa/code-scale-mcpv2/internal/security"
@@ -138,6 +139,14 @@ func (s *IndexStore) migrate() error {
 			return fmt.Errorf("commit migrate v4: %w", err)
 		}
 	}
+	if currentVersion < 5 {
+		if _, err := s.db.Exec(MigrateV5SQL); err != nil {
+			return fmt.Errorf("migrate v5: %w", err)
+		}
+		if err := s.bootstrapFileFTS(); err != nil {
+			return fmt.Errorf("bootstrap file text index: %w", err)
+		}
+	}
 
 	// Upsert schema version
 	_, err = s.db.Exec("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", CurrentSchemaVersion)
@@ -236,6 +245,9 @@ func (s *IndexStore) ReplaceRepoIndex(
 		return err
 	} else {
 		// Delete existing data for re-index
+		if _, err := tx.Exec("DELETE FROM files_fts WHERE repo_id = ?", repoID); err != nil {
+			return err
+		}
 		if _, err := tx.Exec("DELETE FROM symbols WHERE repo_id = ?", repoID); err != nil {
 			return err
 		}
@@ -300,8 +312,26 @@ func (s *IndexStore) ReplaceRepoIndex(
 			return fmt.Errorf("insert symbol %s: %w", sym.ID, err)
 		}
 	}
+	if err := s.syncFileFTSTx(tx, repoID, owner, name, fileIDMap); err != nil {
+		return err
+	}
 
 	return tx.Commit()
+}
+
+func (s *IndexStore) bootstrapFileFTS() error {
+	rows, err := s.db.Query("SELECT f.id, f.repo_id, f.path, r.owner, r.name FROM files f JOIN repos r ON r.id = f.repo_id")
+	if err != nil { return err }
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var fileID, repoID int64
+		var path, owner, name string
+		if err := rows.Scan(&fileID, &repoID, &path, &owner, &name); err != nil { return err }
+		contentDir, err := s.contentDir(owner, name); if err != nil { return err }
+		data, err := os.ReadFile(filepath.Join(contentDir, filepath.FromSlash(path))); if err != nil { continue }
+		if _, err := s.db.Exec("INSERT OR REPLACE INTO files_fts(rowid, repo_id, path, content) VALUES (?, ?, ?, ?)", fileID, repoID, path, string(data)); err != nil { return err }
+	}
+	return rows.Err()
 }
 
 // SaveIndex is retained for compatibility. New code should use
@@ -394,8 +424,32 @@ func (s *IndexStore) UpsertFileIndex(
 	if err := insertSymbolsTx(tx, repoID, map[string]int64{filePath: fileID}, symbols); err != nil {
 		return err
 	}
+	if err := s.syncFileFTSTx(tx, repoID, owner, name, map[string]int64{filePath: fileID}); err != nil {
+		return err
+	}
 
 	return tx.Commit()
+}
+
+func (s *IndexStore) syncFileFTSTx(tx *sql.Tx, repoID int64, owner, name string, fileIDs map[string]int64) error {
+	contentDir, err := s.contentDir(owner, name)
+	if err != nil {
+		return err
+	}
+	for filePath, fileID := range fileIDs {
+		if _, err := tx.Exec("DELETE FROM files_fts WHERE rowid = ?", fileID); err != nil {
+			return err
+		}
+		contentPath := filepath.Join(contentDir, filepath.FromSlash(filePath))
+		data, readErr := os.ReadFile(contentPath)
+		if readErr != nil {
+			continue
+		}
+		if _, err := tx.Exec("INSERT INTO files_fts(rowid, repo_id, path, content) VALUES (?, ?, ?, ?)", fileID, repoID, filePath, string(data)); err != nil {
+			return fmt.Errorf("update file text index for %s: %w", filePath, err)
+		}
+	}
+	return nil
 }
 
 func insertSymbolsTx(tx *sql.Tx, repoID int64, fileIDMap map[string]int64, symbols []parser.Symbol) error {
@@ -896,15 +950,29 @@ func sanitizeFTS5Query(query string) string {
 
 // matchFilePattern checks if a file path matches a glob pattern.
 func matchFilePattern(filePath string, pattern string) bool {
-	matched, err := filepath.Match(pattern, filePath)
+	return pathmatch.Match(pattern, filePath)
+}
+
+// GetSymbolCountsByFile returns only the aggregate counts needed by file-tree
+// views, avoiding materializing every symbol in Go.
+func (s *IndexStore) GetSymbolCountsByFile(repoID int64) (map[string]int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.Query("SELECT file_path, COUNT(*) FROM symbols WHERE repo_id = ? GROUP BY file_path", repoID)
 	if err != nil {
-		return false
+		return nil, err
 	}
-	if matched {
-		return true
+	defer func() { _ = rows.Close() }()
+	counts := make(map[string]int)
+	for rows.Next() {
+		var path string
+		var count int
+		if err := rows.Scan(&path, &count); err != nil {
+			return nil, err
+		}
+		counts[path] = count
 	}
-	matched, _ = filepath.Match(pattern, filepath.Base(filePath))
-	return matched
+	return counts, rows.Err()
 }
 
 // scoreSymbol computes weighted relevance score for a symbol against a query.
@@ -986,7 +1054,7 @@ func (s *IndexStore) SearchText(repoID int64, query string, filePattern string, 
 	}
 
 	// Get files for this repo (use locked version since we already hold RLock)
-	files, err := s.getFilesLocked(repoID)
+	files, err := s.textSearchFilesLocked(repoID, query, filePattern)
 	if err != nil {
 		return nil, err
 	}
@@ -1055,6 +1123,53 @@ func (s *IndexStore) SearchText(repoID int64, query string, filePattern string, 
 	}
 
 	return results, nil
+}
+
+// textSearchFilesLocked uses FTS only as a cheap candidate selector. Queries
+// containing punctuation are scanned exactly because FTS tokenization cannot
+// safely preserve literals such as namespace:event:name.
+func (s *IndexStore) textSearchFilesLocked(repoID int64, query, filePattern string) ([]FileInfo, error) {
+	allFiles, err := s.getFilesLocked(repoID)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]FileInfo, 0, len(allFiles))
+	for _, file := range allFiles {
+		if filePattern == "" || matchFilePattern(file.Path, filePattern) {
+			filtered = append(filtered, file)
+		}
+	}
+	for _, r := range query {
+		if !(r == ' ' || r == '\t' || r == '\r' || r == '\n' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_') {
+			return filtered, nil
+		}
+	}
+	ftsQuery := sanitizeFTS5Query(query)
+	if ftsQuery == "" {
+		return filtered, nil
+	}
+	rows, err := s.db.Query("SELECT path FROM files_fts WHERE files_fts MATCH ? AND repo_id = ?", ftsQuery, repoID)
+	if err != nil {
+		return filtered, nil
+	}
+	defer func() { _ = rows.Close() }()
+	candidates := make(map[string]bool)
+	for rows.Next() {
+		var path string
+		if scanErr := rows.Scan(&path); scanErr == nil {
+			candidates[path] = true
+		}
+	}
+	if len(candidates) == 0 {
+		return filtered, nil
+	}
+	result := make([]FileInfo, 0, len(candidates))
+	for _, file := range filtered {
+		if candidates[file.Path] {
+			result = append(result, file)
+		}
+	}
+	return result, nil
 }
 
 // TextSearchResult represents a text search match.
@@ -1183,6 +1298,12 @@ func (s *IndexStore) DeleteFileFromIndex(owner, name, filePath string) error {
 	if _, err := tx.Exec("DELETE FROM symbols WHERE repo_id = ? AND file_path = ?", repoID, filePath); err != nil {
 		return fmt.Errorf("delete symbols for %s: %w", filePath, err)
 	}
+	var fileID int64
+	if err := tx.QueryRow("SELECT id FROM files WHERE repo_id = ? AND path = ?", repoID, filePath).Scan(&fileID); err == nil {
+		if _, err := tx.Exec("DELETE FROM files_fts WHERE rowid = ?", fileID); err != nil {
+			return fmt.Errorf("delete file text index for %s: %w", filePath, err)
+		}
+	}
 	// Delete the file record
 	if _, err := tx.Exec("DELETE FROM files WHERE repo_id = ? AND path = ?", repoID, filePath); err != nil {
 		return fmt.Errorf("delete file %s: %w", filePath, err)
@@ -1240,6 +1361,9 @@ func (s *IndexStore) DeleteIndex(repo string) error {
 	contentDir, err := s.contentDir(owner, name)
 	if err != nil {
 		return err
+	}
+	if _, err := tx.Exec("DELETE FROM files_fts WHERE repo_id = ?", id); err != nil {
+		return fmt.Errorf("delete file text index: %w", err)
 	}
 	_ = os.RemoveAll(contentDir)
 

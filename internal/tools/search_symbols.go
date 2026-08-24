@@ -5,7 +5,6 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/Athernaa/code-scale-mcpv2/internal/ratelimit"
-	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 )
 
 type SearchSymbolsArgs struct {
@@ -21,12 +20,6 @@ func SearchSymbolsHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest
 	return func(ctx context.Context, req *mcp.CallToolRequest, args SearchSymbolsArgs) (*mcp.CallToolResult, any, error) {
 		t := newTimer()
 
-		repoID, err := deps.Store.GetRepoID(args.Repo)
-		if err != nil {
-			r, _ := errorResult(err.Error())
-			return r, nil, nil
-		}
-
 		maxResults := clampResults(args.MaxResults, 10, 200)
 
 		// Progressive throttling
@@ -37,47 +30,21 @@ func SearchSymbolsHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest
 			return r, nil, nil
 		}
 
-		scored, err := deps.Store.SearchSymbolsWithTier(repoID, args.Query, args.Kind, args.Language, args.FilePattern, maxResults)
+		args.MaxResults = maxResults
+		value, err := execSearchSymbols(deps, args)
 		if err != nil {
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
 		}
 
-		var results []map[string]any
-		for _, s := range scored {
-			results = append(results, map[string]any{
-				"id":         s.Symbol.ID,
-				"kind":       s.Symbol.Kind,
-				"name":       s.Symbol.Name,
-				"file":       s.Symbol.File,
-				"line":       s.Symbol.Line,
-				"signature":  s.Symbol.Signature,
-				"summary":    s.Symbol.Summary,
-				"score":      s.Score,
-				"match_tier": string(s.Tier),
-			})
-		}
-
-		saved, total := deps.addSavings(int64(len(scored)*500), int64(len(results)*50))
-
-		result := map[string]any{
-			"repo":         args.Repo,
-			"query":        args.Query,
-			"result_count": len(results),
-			"results":      results,
-		}
+		result := value.(map[string]any)
+		results, _ := result["results"].([]map[string]any)
+		result["repo"] = args.Repo
+		result["query"] = args.Query
 		if warning != "" {
 			result["warning"] = warning
 		}
-		result["_meta"] = Meta{
-			TimingMs:    t.elapsedMs(),
-			Repo:        args.Repo,
-			Truncated:   len(results) >= maxResults,
-			TokensSaved: saved,
-			TotalSaved:  total,
-			CostAvoided: storage.CostAvoided(saved),
-			TotalCost:   storage.CostAvoided(total),
-		}
+		result["_meta"] = deps.meta(t, args.Repo, len(results) >= maxResults, 0, 0)
 		r, _ := toTextResult(result)
 		return r, nil, nil
 	}

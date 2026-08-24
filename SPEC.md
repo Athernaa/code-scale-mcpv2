@@ -10,7 +10,7 @@ Written in Go for single-binary distribution, true parallelism via goroutines, a
 
 | Scenario                        | Raw dump        | code-scale    | Savings   |
 | ------------------------------- | --------------- | ------------- | --------- |
-| Explore 500-file repo structure | ~200,000 tokens | ~2,000 tokens | **99%**   |
+| Explore 500-file repo structure | measured by response | compact outline/tree | measured per response |
 | Find a specific function        | ~40,000 tokens  | ~200 tokens   | **99.5%** |
 | Read one function body          | ~40,000 tokens  | ~500 tokens   | **98.7%** |
 | Understand module API           | ~15,000 tokens  | ~800 tokens   | **94.7%** |
