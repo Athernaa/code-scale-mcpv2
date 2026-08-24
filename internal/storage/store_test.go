@@ -625,6 +625,35 @@ func TestGetFileContentBoundedDoesNotReadWholeCacheFile(t *testing.T) {
 	}
 }
 
+func TestGetSymbolContentBoundedReadsPersistedRangeWithoutFullVerification(t *testing.T) {
+	store, err := NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	unit := "middle🙂\n"
+	symbolSource := "HEAD_SYMBOL_🙂\n" + strings.Repeat(unit, 10000) + "TAIL_SYMBOL_終\n"
+	source := "package huge\n" + symbolSource
+	symbol := parser.Symbol{ID: parser.MakeSymbolID("huge.go", "Huge", parser.KindFunction), File: "huge.go", Name: "Huge", QualifiedName: "Huge", Kind: parser.KindFunction, Language: "go", Line: 2, EndLine: strings.Count(source, "\n") + 1, ByteOffset: int64(len("package huge\n")), ByteLength: int64(len(symbolSource)), ContentHash: parser.ComputeContentHash([]byte(symbolSource))}
+	if err := store.ReplaceRepoIndex("owner", "symbol-bounded", "owner", "", map[string]string{"huge.go": source}, map[string]string{"huge.go": "go"}, []parser.Symbol{symbol}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveContentFile("owner", "symbol-bounded", "huge.go", []byte(source)); err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID("owner/symbol-bounded")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, partial, examined, err := store.GetSymbolContentBounded(repoID, symbol.ID, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !partial || examined > 4096 || len(content) > 4096 || !strings.Contains(string(content), "HEAD_SYMBOL") || !strings.Contains(string(content), "TAIL_SYMBOL") || !utf8.Valid(content) {
+		t.Fatalf("symbol range was not bounded safely: partial=%v examined=%d bytes=%d", partial, examined, len(content))
+	}
+}
+
 func TestGetSymbolsByFilesBoundedCapsLargeOutlineMetadata(t *testing.T) {
 	store, err := NewIndexStore(t.TempDir())
 	if err != nil {

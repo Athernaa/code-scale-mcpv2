@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
 	"github.com/Athernaa/code-scale-mcpv2/internal/planner"
@@ -174,6 +175,27 @@ func TestUnusedDirectSupportReserveRollsBackToPrimary(t *testing.T) {
 	}
 }
 
+func TestUnusedDirectSupportReserveExpandsPrimaryBeforePeripheral(t *testing.T) {
+	store, repo, primary, _, weak := assemblyFixture(t)
+	defer store.Close()
+	missing := planner.Candidate{ID: "missing-critical", SymbolID: "missing.go::Provider#function", File: "missing.go", Name: "Provider", Kind: "function", Tier: "supporting", Score: 9000, ReasonCodes: []string{"framework_provider"}, EstimatedScope: 500}
+	base := planner.Plan{Repo: repo, TaskClass: "localized_change", IndexState: "complete", Primary: []planner.Candidate{candidate(primary, "primary", 10000, "exact_symbol_match")}, Supporting: []planner.Candidate{missing}}
+	withoutPeripheral, err := New(staticPlanner{plan: base}, store).Assemble(context.Background(), Request{Repo: repo, Task: "fix Primary", MaxContextTokens: 1600})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withPeripheralPlan := base
+	withPeripheralPlan.Peripheral = []planner.Candidate{candidate(weak, "peripheral", 100, "lexical_fallback")}
+	withPeripheral, err := New(staticPlanner{plan: withPeripheralPlan}, store).Assemble(context.Background(), Request{Repo: repo, Task: "fix Primary", MaxContextTokens: 1600})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutIndex, withIndex := sectionIndex(withoutPeripheral.Sections, primary.ID), sectionIndex(withPeripheral.Sections, primary.ID)
+	if withoutIndex < 0 || withIndex < 0 || withoutPeripheral.Sections[withoutIndex].TokenCount != withPeripheral.Sections[withIndex].TokenCount {
+		t.Fatalf("peripheral context consumed reclaimable primary reserve: without=%#v with=%#v", withoutPeripheral.Sections, withPeripheral.Sections)
+	}
+}
+
 func TestCriticalDirectSupportPrecedesTinyReferenceAndImport(t *testing.T) {
 	for _, tc := range []struct {
 		name, criticalReason, weakReason string
@@ -306,8 +328,34 @@ func TestAssemblerBoundsSourceReadsIndependentlyOfTokenBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pkg.Debug.SourceReads != 0 || pkg.Omitted.SourceReadLimit != 1 || pkg.StopReason != "source_read_limit" {
-		t.Fatalf("source read limit was not structural: %#v", pkg)
+	if len(pkg.Sections) != 1 || !pkg.Sections[0].Partial || pkg.Debug.SourceReads != 1 || pkg.Debug.SourceBytesRead > DefaultMaxSymbolBytes || pkg.Omitted.SourceReadLimit != 0 {
+		t.Fatalf("oversized primary was not bounded and admitted: %#v", pkg)
+	}
+}
+
+func TestOversizedFocusedSymbolPreservesBoundedHeadTail(t *testing.T) {
+	store := assemblyStore(t)
+	defer store.Close()
+	repo := "local/oversized-focus"
+	unit := "middle🙂\n"
+	source := "HEAD_SENTINEL_🙂\n" + strings.Repeat(unit, DefaultMaxSourceBytes/len(unit)+1) + "TAIL_SENTINEL_終\n"
+	symbol := indexedSymbol("huge.go", "HugeFocus", source)
+	writeAssemblyRepo(t, store, repo, map[string]string{symbol.File: source}, []parser.Symbol{symbol})
+	plan := planner.Plan{Repo: repo, TaskClass: "exact_symbol", TaskConfidence: "high", IndexState: "complete", Primary: []planner.Candidate{candidate(symbol, "primary", 10000, "explicit_focus")}}
+	pkg, err := New(staticPlanner{plan: plan}, store).Assemble(context.Background(), Request{Repo: repo, Task: "focus HugeFocus", FocusSymbolID: symbol.ID, MaxContextTokens: 1000, Debug: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pkg.Sections) != 1 || !pkg.Sections[0].Partial || pkg.Sections[0].OriginalTokens != 0 || pkg.Debug.SourceBytesRead > DefaultMaxSymbolBytes || !strings.Contains(pkg.Sections[0].Source, "HEAD_SENTINEL") || !strings.Contains(pkg.Sections[0].Source, "TAIL_SENTINEL") || !strings.Contains(pkg.Sections[0].Source, omissionMarker) {
+		t.Fatalf("focused oversized symbol was not represented truthfully: %#v", pkg)
+	}
+	if !utf8.ValidString(pkg.Sections[0].Source) {
+		t.Fatal("bounded symbol source is not valid UTF-8")
+	}
+	data, _ := json.Marshal(pkg)
+	counter, _ := NewTokenCounter(TokenizerO200K)
+	if counter.Count(string(data)) > 1000 {
+		t.Fatalf("serialized focused package exceeded budget: %d", counter.Count(string(data)))
 	}
 }
 
@@ -389,10 +437,10 @@ func TestAssembleRealisticFiveMWorkspaceContext(t *testing.T) {
 	files := map[string]string{
 		"server.cfg": "ensure banana_core\nensure ox_inventory\nensure banana_jobs\nensure banana_ui\n",
 		"resources/[core]/banana_core/fxmanifest.lua":       "fx_version 'cerulean'\nserver_script 'server/player.lua'\nserver_script 'server/inventory.lua'\n",
-		"resources/[core]/banana_core/server/player.lua":    "exports('GetPlayer', function(source) return { source = source } end)\n",
+		"resources/[core]/banana_core/server/player.lua":    "local function GetPlayer(source) return { source = source } end\nexports('GetPlayer', GetPlayer)\n",
 		"resources/[core]/banana_core/server/inventory.lua": "exports('AddCharacterItem', function(source, item) return true end)\n",
 		"resources/[ox]/ox_inventory/fxmanifest.lua":        "fx_version 'cerulean'\nserver_script 'server/main.lua'\n",
-		"resources/[ox]/ox_inventory/server/main.lua":       "exports('AddItem', function(source, item, count) return true end)\nexports('RemoveItem', function(source, item, count) return true end)\nexports('Search', function(source, item) return {} end)\n",
+		"resources/[ox]/ox_inventory/server/main.lua":       "local function AddItem(source, item, count) return true end\nexports('AddItem', AddItem)\nexports('RemoveItem', function(source, item, count) return true end)\nexports('Search', function(source, item) return {} end)\n",
 		"resources/[jobs]/banana_jobs/fxmanifest.lua":       "fx_version 'cerulean'\nclient_script 'client/main.lua'\nserver_script 'server/main.lua'\n",
 		"resources/[jobs]/banana_jobs/server/main.lua":      "local function LoadCharacter(source)\n local Player = exports.banana_core:GetPlayer(source)\n exports.ox_inventory:AddItem(source, 'water', 1)\n TriggerClientEvent('banana:characterLoaded', source)\n return Player\nend\nRegisterNetEvent('banana:loadCharacter', function() LoadCharacter(source) end)\nexports('LoadCharacter', LoadCharacter)\nlib.callback.register('banana:loadCharacter', function(source) return LoadCharacter(source) end)\nRegisterCommand('loadcharacter', function(source) LoadCharacter(source) end)\n",
 		"resources/[jobs]/banana_jobs/client/main.lua":      "RegisterNetEvent('banana:characterLoaded', function() end)\nTriggerServerEvent('banana:loadCharacter')\nlib.callback.await('banana:loadCharacter', false)\n",
@@ -456,6 +504,15 @@ func TestAssembleRealisticFiveMWorkspaceContext(t *testing.T) {
 	data, _ := json.Marshal(pkg)
 	if counter.Count(string(data)) > 4000 || !containsFile(pkg.Sections, "resources/[jobs]/banana_jobs/server/main.lua") || !containsFile(pkg.Sections, "resources/[ox]/ox_inventory/server/main.lua") {
 		t.Fatalf("real workspace package lacks bounded cross-resource context: %#v", pkg)
+	}
+	loadSymbol := findSymbol(allSymbols, "LoadCharacter")
+	natural, err := New(planner.New(store), store).Assemble(context.Background(), Request{Repo: repo, Task: "fix character inventory loading", FocusSymbolID: loadSymbol.ID, MaxContextTokens: 4000, IncludeImpact: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	naturalData, _ := json.Marshal(natural)
+	if counter.Count(string(naturalData)) > 4000 || !containsFile(natural.Sections, "resources/[jobs]/banana_jobs/server/main.lua") || !sectionsContainText(natural.Sections, "exports.banana_core:GetPlayer") || !sectionsContainText(natural.Sections, "exports.ox_inventory:AddItem") {
+		t.Fatalf("natural workspace task lacked bounded character/inventory context: %#v", natural)
 	}
 }
 
@@ -568,6 +625,15 @@ func sectionIndex(sections []Section, symbolID string) int {
 func containsFile(sections []Section, file string) bool {
 	for _, section := range sections {
 		if section.File == file {
+			return true
+		}
+	}
+	return false
+}
+
+func sectionsContainText(sections []Section, text string) bool {
+	for _, section := range sections {
+		if strings.Contains(section.Source, text) {
 			return true
 		}
 	}

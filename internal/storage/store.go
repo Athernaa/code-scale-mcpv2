@@ -2262,6 +2262,78 @@ func (s *IndexStore) GetSymbolContent(repoID int64, symbolID string) (string, er
 	return string(buf), nil
 }
 
+// GetSymbolContentBounded reads a persisted symbol range without loading the
+// complete symbol when it exceeds maxBytes. The returned byte count is the
+// number of cache bytes examined, not the logical symbol length.
+func (s *IndexStore) GetSymbolContentBounded(repoID int64, symbolID string, maxBytes int64) ([]byte, bool, int64, error) {
+	if maxBytes <= 0 {
+		return nil, false, 0, fmt.Errorf("maxBytes must be positive")
+	}
+	sym, err := s.GetSymbolByID(repoID, symbolID)
+	if err != nil {
+		return nil, false, 0, err
+	}
+	if sym.ByteOffset < 0 || sym.ByteLength < 0 {
+		return nil, false, 0, fmt.Errorf("invalid persisted symbol range: %s", symbolID)
+	}
+	var owner, name string
+	if err := s.db.QueryRow("SELECT owner, name FROM repos WHERE id = ?", repoID).Scan(&owner, &name); err != nil {
+		return nil, false, 0, err
+	}
+	repoDir, err := s.contentDir(owner, name)
+	if err != nil {
+		return nil, false, 0, err
+	}
+	contentPath := filepath.Join(repoDir, sym.File)
+	rel, err := filepath.Rel(filepath.Clean(repoDir), filepath.Clean(contentPath))
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return nil, false, 0, fmt.Errorf("path traversal detected: %s", sym.File)
+	}
+	file, err := os.Open(contentPath)
+	if err != nil {
+		return nil, false, 0, fmt.Errorf("cannot open content file: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+	return readBoundedRange(file, sym.ByteOffset, sym.ByteLength, maxBytes)
+}
+
+func readBoundedRange(file *os.File, offset, length, maxBytes int64) ([]byte, bool, int64, error) {
+	if length <= maxBytes {
+		content := make([]byte, length)
+		if length == 0 {
+			return content, false, 0, nil
+		}
+		if _, err := file.ReadAt(content, offset); err != nil {
+			return nil, false, 0, err
+		}
+		return content, false, length, nil
+	}
+	marker := []byte("\n// ... context omitted by code-scale ...\n")
+	available := maxBytes - int64(len(marker))
+	if available < 2 {
+		available, marker = maxBytes, nil
+	}
+	headSize := available * 3 / 5
+	tailSize := available - headSize
+	head := make([]byte, headSize)
+	if _, err := file.ReadAt(head, offset); err != nil && err != io.EOF {
+		return nil, false, 0, err
+	}
+	tail := make([]byte, tailSize)
+	if _, err := file.ReadAt(tail, offset+length-tailSize); err != nil && err != io.EOF {
+		return nil, false, 0, err
+	}
+	examined := int64(len(head) + len(tail))
+	for len(head) > 0 && !utf8.Valid(head) {
+		head = head[:len(head)-1]
+	}
+	for len(tail) > 0 && !utf8.Valid(tail) {
+		tail = tail[1:]
+	}
+	content := append(append(head, marker...), tail...)
+	return content, true, examined, nil
+}
+
 // GetFileContent reads the full file content from the content cache.
 func (s *IndexStore) GetFileContent(repoID int64, filePath string) ([]byte, error) {
 	var owner, name string

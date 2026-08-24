@@ -14,6 +14,7 @@ const (
 	HardMaxContextTokenBudget    = 64000
 	DefaultMaxSourceReads        = 64
 	DefaultMaxSourceBytes        = 4 << 20
+	DefaultMaxSymbolBytes        = 32 << 10
 	DefaultOutlineSymbolsPerFile = 128
 	DefaultOutlineSymbolsTotal   = 512
 )
@@ -127,5 +128,6 @@ type SourceStore interface {
 	GetSymbolsByIDs(int64, []string) (map[string]parser.Symbol, error)
 	GetSymbolsByFilesBounded(int64, []string, int, int) (storage.SymbolsByFiles, error)
 	GetSymbolContent(int64, string) (string, error)
+	GetSymbolContentBounded(int64, string, int64) ([]byte, bool, int64, error)
 	GetFileContentBounded(int64, string, int64) ([]byte, bool, error)
 }

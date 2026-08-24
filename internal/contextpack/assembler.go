@@ -84,6 +84,7 @@ func (a *Assembler) Assemble(ctx context.Context, request Request) (Package, err
 	originals := map[string]string{}
 	remaining := usable
 	supportAllocations, supportReserve := directSupportAllocations(pool, usable)
+	supportReserveRemaining := supportReserve
 	seenSymbols, seenRanges := map[string]bool{}, map[string]bool{}
 	stop := "candidates_exhausted"
 	for stageRank, stage := range []string{"anchor", "direct_support", "domain_support", "peripheral"} {
@@ -116,8 +117,8 @@ func (a *Assembler) Assemble(ctx context.Context, request Request) (Package, err
 				allocation -= supportReserve
 			}
 			if stage == "direct_support" && item.supportClass == supportCritical {
-				if reserved := supportAllocations[candidate.ID]; reserved > 0 && reserved < allocation {
-					allocation = reserved
+				if reserved := supportAllocations[candidate.ID]; reserved > 0 {
+					allocation = minInt(allocation, reserved)
 				}
 			}
 			if allocation < 24 {
@@ -127,12 +128,6 @@ func (a *Assembler) Assemble(ctx context.Context, request Request) (Package, err
 				continue
 			}
 			remainingBytes := int64(DefaultMaxSourceBytes) - debug.SourceBytesRead
-			if symbol, ok := symbols[candidate.SymbolID]; ok && symbol.ByteLength > remainingBytes {
-				pkg.Omitted.SourceReadLimit++
-				addOmittedID(&pkg.Omitted, candidate.ID)
-				stop = "source_read_limit"
-				continue
-			}
 			section, original, bytesRead, sourceRead, ok, loadErr := a.loadSection(ctx, repoID, candidate, symbols, fileOutline.Symbols, fileOutline.TruncatedFiles[candidate.File], allocation, remainingBytes, counter)
 			if sourceRead {
 				debug.SourceReads++
@@ -156,6 +151,9 @@ func (a *Assembler) Assemble(ctx context.Context, request Request) (Package, err
 			pkg.Sections[len(pkg.Sections)-1].Stage = stage
 			originals[section.CandidateID] = original
 			remaining -= section.TokenCount
+			if stage == "direct_support" && item.supportClass == supportCritical {
+				supportReserveRemaining -= minInt(supportReserveRemaining, section.TokenCount)
+			}
 			round.Included++
 			round.TokensAdded += section.TokenCount
 			if section.Partial {
@@ -168,8 +166,14 @@ func (a *Assembler) Assemble(ctx context.Context, request Request) (Package, err
 			}
 		}
 		pkg.Rounds = append(pkg.Rounds, round)
+		if stage == "direct_support" && supportReserveRemaining > 0 {
+			reclaimCapacity := minInt(remaining, supportReserveRemaining)
+			reclaimRemaining := reclaimAnchorReserve(pkg.Sections, originals, reclaimCapacity, counter)
+			reclaimed := maxInt(0, reclaimCapacity-reclaimRemaining)
+			remaining -= reclaimed
+			supportReserveRemaining -= reclaimed
+		}
 	}
-	remaining = reclaimAnchorReserve(pkg.Sections, originals, remaining, counter)
 	debug.SectionsIncluded = len(pkg.Sections)
 	if len(pkg.Sections) == 0 && pkg.Omitted.SourceUnavailable > 0 {
 		stop = "source_unavailable"
@@ -409,8 +413,8 @@ func directSupportAllocations(pool []stagedCandidate, usable int) (map[string]in
 	total := 0
 	supportCap := usable / 3
 	perCandidate := supportCap / len(critical)
-	if perCandidate < 64 {
-		perCandidate = 64
+	if perCandidate < 1 {
+		perCandidate = 1
 	}
 	for _, item := range critical {
 		allocation := minInt(item.estimate, perCandidate)
@@ -433,13 +437,27 @@ func (a *Assembler) loadSection(ctx context.Context, repoID int64, candidate pla
 		if !ok || symbol.File != candidate.File {
 			return Section{}, "", 0, false, false, nil
 		}
-		content, err := a.Store.GetSymbolContent(repoID, candidate.SymbolID)
-		if err != nil {
-			return Section{}, "", 0, true, false, err
-		}
-		source, bytesRead, section.ContentKind = content, int64(len(content)), "symbol_source"
-		if symbol.ContentHash != "" && parser.ComputeContentHash([]byte(content)) != symbol.ContentHash {
-			return Section{}, "", bytesRead, true, false, nil
+		if symbol.ByteLength > remainingBytes {
+			boundedBytes := remainingBytes
+			if boundedBytes > DefaultMaxSymbolBytes {
+				boundedBytes = DefaultMaxSymbolBytes
+			}
+			content, partial, examined, err := a.Store.GetSymbolContentBounded(repoID, candidate.SymbolID, boundedBytes)
+			if err != nil {
+				return Section{}, "", examined, true, false, err
+			}
+			source, bytesRead, section.ContentKind = string(content), examined, "symbol_source"
+			section.Partial = partial
+			section.originalExact = !partial
+		} else {
+			content, err := a.Store.GetSymbolContent(repoID, candidate.SymbolID)
+			if err != nil {
+				return Section{}, "", 0, true, false, err
+			}
+			source, bytesRead, section.ContentKind = content, int64(len(content)), "symbol_source"
+			if symbol.ContentHash != "" && parser.ComputeContentHash([]byte(content)) != symbol.ContentHash {
+				return Section{}, "", bytesRead, true, false, nil
+			}
 		}
 	} else if candidate.File != "" {
 		symbolsInFile := fileSymbols[candidate.File]
