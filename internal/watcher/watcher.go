@@ -18,6 +18,7 @@ import (
 	"github.com/Athernaa/code-scale-mcpv2/internal/security"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/fivem"
+	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/framework"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/generic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 	"github.com/Athernaa/code-scale-mcpv2/internal/summarizer"
@@ -414,8 +415,11 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 		}
 	}
 	if ignoreChanged && matcher != nil && indexedRepoErr == nil {
-		if !previousWorkspace && mode == workspace.KindFiveMWorkspace {
+		if workspaceActive {
+			// Ignore changes can add/remove whole resources, so reconcile the
+			// workspace topology from the authoritative filtered discovery.
 			workspaceDirty = true
+			workspaceSourceDirty = true
 			workspaceTopologyDirty = true
 		}
 		indexed := map[string]bool{}
@@ -477,11 +481,17 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 				if graphErr := m.store.ReplaceSemanticFileForAnalyzer(indexedRepoID, semantic.AnalyzerGenericGraph, relPath, nil); graphErr != nil {
 					log.Printf("watcher: failed to remove generic graph facts for %s: %v", relPath, graphErr)
 				}
+				if graphErr := m.store.ReplaceSemanticFileForAnalyzer(indexedRepoID, semantic.AnalyzerFramework, relPath, nil); graphErr != nil {
+					log.Printf("watcher: failed to remove framework facts for %s: %v", relPath, graphErr)
+				}
 				if graphErr := m.refreshSemanticRelationships(owner + "/" + repoName); graphErr != nil {
 					log.Printf("watcher: failed to refresh FiveM relationships: %v", graphErr)
 				}
 				if graphErr := m.refreshGenericRelationships(owner + "/" + repoName); graphErr != nil {
 					log.Printf("watcher: failed to refresh generic relationships: %v", graphErr)
+				}
+				if graphErr := m.rebuildFrameworkRepository(indexedRepoID, owner+"/"+repoName, resourceName); graphErr != nil {
+					log.Printf("watcher: failed to refresh framework facts: %v", graphErr)
 				}
 			}
 			continue
@@ -602,6 +612,9 @@ func (m *Manager) clearWorkspaceMode(repoID int64) error {
 	if err := m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveMWorkspace, semantic.Result{}); err != nil {
 		return err
 	}
+	if err := m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, semantic.Result{}); err != nil {
+		return err
+	}
 	return m.store.ClearWorkspaceState(repoID)
 }
 
@@ -678,11 +691,69 @@ func (m *Manager) refreshWorkspaceResource(root, repo, resourcePath string) erro
 	if discoveryErr != nil {
 		return discoveryErr
 	}
-	_, err = workspaceindex.RefreshResource(context.Background(), m.store, repoID, repo, root, resourcePath, contents, languages, symbols, discovery)
+	fiveMErr := error(nil)
+	_, fiveMErr = workspaceindex.RefreshResource(context.Background(), m.store, repoID, repo, root, resourcePath, contents, languages, symbols, discovery)
+	frameworkErr := m.refreshFrameworkResource(repoID, repo, root, resourcePath, contents, languages, symbols, discovery)
+	if fiveMErr != nil {
+		return fiveMErr
+	}
+	if frameworkErr != nil {
+		return frameworkErr
+	}
+	return m.updateWorkspaceCoverage(root, repoID)
+}
+
+// refreshFrameworkResource reparses only the changed resource for framework
+// facts. Cross-resource edges and candidate summaries are then rebuilt from
+// persisted compact facts, without rereading unrelated source files.
+func (m *Manager) refreshFrameworkResource(repoID int64, repo, root, resourcePath string, files map[string][]byte, languages map[string]string, symbols map[string][]parser.Symbol, discovery workspace.Discovery) error {
+	var resource workspace.Resource
+	found := false
+	for _, candidate := range discovery.Resources {
+		if workspace.NormalizePath(candidate.RelativePath) == workspace.NormalizePath(resourcePath) {
+			resource, found = candidate, true
+			break
+		}
+	}
+	if !found {
+		return nil
+	}
+	localFacts, err := m.store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM)
 	if err != nil {
 		return err
 	}
-	return m.updateWorkspaceCoverage(root, repoID)
+	resourceFacts := make([]semantic.Entity, 0)
+	for _, fact := range localFacts {
+		if source, _ := fact.Metadata["source_resource_path"].(string); workspace.NormalizePath(source) == workspace.NormalizePath(resourcePath) {
+			resourceFacts = append(resourceFacts, fact)
+		}
+	}
+	input := semantic.RepositoryInput{Repo: repo, Resource: resource.Name, SourceType: "local", Files: files, Languages: languages, Symbols: symbols, SemanticEntities: resourceFacts}
+	result, analysisErr := framework.NewAnalyzer().AnalyzeRepository(context.Background(), input)
+	if analysisErr != nil {
+		if clearErr := m.store.ReplaceSemanticResourceForAnalyzer(repoID, semantic.AnalyzerFramework, resourcePath, semantic.Result{}); clearErr != nil {
+			return fmt.Errorf("framework resource analysis failed: %v; clearing stale facts failed: %w", analysisErr, clearErr)
+		}
+		all, getErr := m.store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFramework)
+		if getErr != nil {
+			return getErr
+		}
+		all = append(all, framework.FailureStatus(repo, resource.Name, resourcePath))
+		rebuilt := framework.RebuildFacts(repo, all)
+		if replaceErr := m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, rebuilt); replaceErr != nil {
+			return replaceErr
+		}
+		return analysisErr
+	}
+	if err := m.store.ReplaceSemanticResourceForAnalyzer(repoID, semantic.AnalyzerFramework, resourcePath, result); err != nil {
+		return err
+	}
+	all, err := m.store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFramework)
+	if err != nil {
+		return err
+	}
+	rebuilt := framework.RebuildFacts(repo, all)
+	return m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, rebuilt)
 }
 
 func (m *Manager) refreshWorkspaceConfiguration(root, repo string) error {
@@ -809,7 +880,10 @@ func (m *Manager) updateSemanticFile(repo, resource, filePath, language string, 
 		}
 	}
 	if !manifestFound {
-		return m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, semantic.Result{})
+		if err := m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, semantic.Result{}); err != nil {
+			return err
+		}
+		return m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, semantic.Result{})
 	}
 	result, err := fivem.NewAnalyzer().AnalyzeFile(context.Background(), semantic.FileInput{
 		Repo: repo, Resource: resource, File: filePath, Language: language,
@@ -818,18 +892,29 @@ func (m *Manager) updateSemanticFile(repo, resource, filePath, language string, 
 	if err != nil {
 		clearErr := m.store.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerFiveM, filePath, nil)
 		refreshErr := m.refreshSemanticRelationships(repo)
+		frameworkClearErr := m.store.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerFramework, filePath, nil)
+		frameworkRefreshErr := m.refreshFrameworkRelationships(repoID, repo)
 		if clearErr != nil {
 			return fmt.Errorf("fivem analysis failed: %v; clearing stale facts failed: %w", err, clearErr)
 		}
 		if refreshErr != nil {
 			return fmt.Errorf("fivem analysis failed: %v; refreshing relationships failed: %w", err, refreshErr)
 		}
+		if frameworkClearErr != nil {
+			return fmt.Errorf("fivem analysis failed: %v; clearing stale framework facts failed: %w", err, frameworkClearErr)
+		}
+		if frameworkRefreshErr != nil {
+			return fmt.Errorf("fivem analysis failed: %v; refreshing framework facts failed: %w", err, frameworkRefreshErr)
+		}
 		return err
 	}
 	if err := m.store.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerFiveM, filePath, result.Entities); err != nil {
 		return err
 	}
-	return m.refreshSemanticRelationships(repo)
+	if err := m.refreshSemanticRelationships(repo); err != nil {
+		return err
+	}
+	return m.rebuildFrameworkRepository(repoID, repo, resource)
 }
 
 func (m *Manager) refreshSemanticRelationships(repo string) error {
@@ -904,7 +989,55 @@ func (m *Manager) rebuildSemanticRepository(repoID int64, repo, resource string)
 		if clearErr := m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, semantic.Result{}); clearErr != nil {
 			return fmt.Errorf("fivem repository analysis failed: %v; clearing stale facts failed: %w", err, clearErr)
 		}
+		if clearErr := m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, semantic.Result{}); clearErr != nil {
+			return fmt.Errorf("fivem repository analysis failed: %v; clearing stale framework facts failed: %w", err, clearErr)
+		}
 		return err
 	}
-	return m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, result)
+	if err := m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, result); err != nil {
+		return err
+	}
+	return m.rebuildFrameworkRepository(repoID, repo, resource)
+}
+
+// rebuildFrameworkRepository refreshes only the framework analyzer from the
+// already indexed source/cache and FiveM facts. It never touches generic,
+// per-resource FiveM, or workspace analyzers.
+func (m *Manager) rebuildFrameworkRepository(repoID int64, repo, resource string) error {
+	files, err := m.store.GetFiles(repoID)
+	if err != nil {
+		return err
+	}
+	input := semantic.RepositoryInput{Repo: repo, Resource: resource, SourceType: "local", Files: map[string][]byte{}, Languages: map[string]string{}, Symbols: map[string][]parser.Symbol{}}
+	for _, file := range files {
+		content, contentErr := m.store.GetFileContent(repoID, file.Path)
+		if contentErr != nil {
+			continue
+		}
+		input.Files[file.Path] = content
+		input.Languages[file.Path] = file.Language
+		input.Symbols[file.Path], _ = m.store.GetSymbolsByFile(repoID, file.Path)
+	}
+	input.SemanticEntities, err = m.store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM)
+	if err != nil {
+		return err
+	}
+	result, err := framework.NewAnalyzer().AnalyzeRepository(context.Background(), input)
+	if err != nil {
+		clearErr := m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, semantic.Result{})
+		if clearErr != nil {
+			return fmt.Errorf("framework analysis failed: %v; clearing stale facts failed: %w", err, clearErr)
+		}
+		return err
+	}
+	return m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, result)
+}
+
+func (m *Manager) refreshFrameworkRelationships(repoID int64, repo string) error {
+	entities, err := m.store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFramework)
+	if err != nil {
+		return err
+	}
+	result := framework.RebuildFacts(repo, entities)
+	return m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, result)
 }

@@ -59,6 +59,11 @@ func TraceRelationshipsHandler(deps *Deps) func(context.Context, *mcp.CallToolRe
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
 		}
+		if analyzer == "" && args.EntityID != "" {
+			if entity, lookupErr := deps.Store.GetSemanticEntityByID(repoID, args.EntityID); lookupErr == nil {
+				analyzer = entity.Analyzer
+			}
+		}
 		if analyzer == "" {
 			analyzer = semantic.AnalyzerFiveM
 			if args.SymbolID != "" {

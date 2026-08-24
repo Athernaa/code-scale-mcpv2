@@ -10,9 +10,11 @@ import (
 )
 
 const (
-	AnalyzerFiveM          = "fivem"
-	AnalyzerGenericGraph   = "generic_graph"
-	AnalyzerFiveMWorkspace = "fivem_workspace"
+	AnalyzerFiveM                 = "fivem"
+	AnalyzerGenericGraph          = "generic_graph"
+	AnalyzerFiveMWorkspace        = "fivem_workspace"
+	AnalyzerFramework             = "framework_intelligence"
+	AnalyzerFrameworkIntelligence = AnalyzerFramework
 )
 
 // Entity is a generic semantic fact extracted from a source file or resource
@@ -73,13 +75,14 @@ type FileInput struct {
 // RepositoryInput supplies the complete indexed source set to a repository
 // analyzer. Repository analysis happens during indexing, never at query time.
 type RepositoryInput struct {
-	Repo       string
-	Resource   string
-	SourceType string
-	ModulePath string
-	Files      map[string][]byte
-	Languages  map[string]string
-	Symbols    map[string][]parser.Symbol
+	Repo             string
+	Resource         string
+	SourceType       string
+	ModulePath       string
+	Files            map[string][]byte
+	Languages        map[string]string
+	Symbols          map[string][]parser.Symbol
+	SemanticEntities []Entity
 }
 
 // Result contains semantic facts produced by an analyzer.

@@ -87,6 +87,7 @@ CREATE INDEX IF NOT EXISTS idx_semantic_entities_kind ON semantic_entities(repo_
 CREATE INDEX IF NOT EXISTS idx_semantic_entities_name ON semantic_entities(repo_id, name);
 CREATE INDEX IF NOT EXISTS idx_semantic_entities_file ON semantic_entities(repo_id, file_path);
 CREATE INDEX IF NOT EXISTS idx_semantic_entities_symbol ON semantic_entities(repo_id, symbol_id);
+CREATE INDEX IF NOT EXISTS idx_semantic_entities_framework ON semantic_entities(repo_id, framework);
 CREATE INDEX IF NOT EXISTS idx_semantic_relationships_repo ON semantic_relationships(repo_id);
 CREATE INDEX IF NOT EXISTS idx_semantic_relationships_from ON semantic_relationships(repo_id, from_entity_id);
 CREATE INDEX IF NOT EXISTS idx_semantic_relationships_to ON semantic_relationships(repo_id, to_entity_id);
@@ -247,5 +248,12 @@ CREATE INDEX IF NOT EXISTS idx_workspace_resources_name ON workspace_resources(w
 CREATE INDEX IF NOT EXISTS idx_workspace_configs_workspace ON workspace_configs(workspace_id);
 `
 
+// MigrateV10SQL adds the framework query index. Framework facts remain in the
+// analyzer-scoped semantic tables; this index only makes framework filtering
+// cheap without scanning metadata JSON.
+const MigrateV10SQL = `
+CREATE INDEX IF NOT EXISTS idx_semantic_entities_framework ON semantic_entities(repo_id, framework);
+`
+
 // CurrentSchemaVersion is the current schema version.
-const CurrentSchemaVersion = 9
+const CurrentSchemaVersion = 10

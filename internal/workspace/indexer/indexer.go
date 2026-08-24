@@ -10,6 +10,7 @@ import (
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/fivem"
+	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/framework"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 	"github.com/Athernaa/code-scale-mcpv2/internal/workspace"
 )
@@ -21,10 +22,17 @@ type Result struct {
 	ResourcesWithSemantics                        int
 	ResourcesWithoutSemantics                     int
 	FailedResources                               []string
+	FrameworkCount                                int
+	FrameworkFailed                               bool
+	FailedFrameworkResources                      []string
 }
 
 // analyzeResourceFn is a small seam for deterministic analyzer failure tests.
 var analyzeResourceFn = analyzeResource
+
+// analyzeFrameworkFn is a deterministic failure seam for analyzer-isolation
+// tests. It is package-local so production uses the immutable analyzer path.
+var analyzeFrameworkFn = analyzeFramework
 
 // Index builds per-resource FiveM facts and workspace-level cross-resource
 // facts without reparsing source. The caller supplies already indexed files
@@ -44,8 +52,10 @@ func Index(ctx context.Context, store *storage.IndexStore, repoID int64, repo, r
 		return Result{Discovery: d}, nil
 	}
 	combined := semantic.Result{}
+	frameworkEntities := make([]semantic.Entity, 0)
 	manifestByResource := map[string]semantic.Entity{}
 	failedResources := make([]string, 0, 3)
+	failedFrameworkResources := make([]string, 0, 3)
 	for _, r := range d.Resources {
 		localFiles := map[string][]byte{}
 		localLang := map[string]string{}
@@ -64,6 +74,18 @@ func Index(ctx context.Context, store *storage.IndexStore, repoID int64, repo, r
 				failedResources = append(failedResources, r.Name)
 			}
 			continue
+		}
+		frameworkResult, frameworkErr := analyzeFrameworkFn(ctx, semantic.RepositoryInput{
+			Repo: repo, Resource: r.Name, SourceType: "local", Files: localFiles, Languages: localLang, Symbols: localSymbols,
+			SemanticEntities: result.Entities,
+		})
+		if frameworkErr != nil {
+			if len(failedFrameworkResources) < 3 {
+				failedFrameworkResources = append(failedFrameworkResources, r.Name)
+			}
+			frameworkEntities = append(frameworkEntities, framework.FailureStatus(repo, r.Name, r.RelativePath))
+		} else {
+			frameworkEntities = append(frameworkEntities, normalizeFrameworkResult(repo, r, frameworkResult).Entities...)
 		}
 		idMap := map[string]string{}
 		for _, entity := range result.Entities {
@@ -105,7 +127,12 @@ func Index(ctx context.Context, store *storage.IndexStore, repoID int64, repo, r
 	resourcesWithSemantics, resourcesWithoutSemantics := semanticCoverage(d, combined.Entities)
 	workspaceEntities, workspaceRelationships := resolveWorkspace(repo, d, combined.Entities, manifestByResource)
 	workspaceResult := semantic.Result{Entities: workspaceEntities, Relationships: workspaceRelationships}
+	frameworkResult := framework.RebuildFacts(repo, frameworkEntities)
 	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, combined); err != nil {
+		return Result{}, err
+	}
+	frameworkFailed := len(failedFrameworkResources) > 0
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, frameworkResult); err != nil {
 		return Result{}, err
 	}
 	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveMWorkspace, workspaceResult); err != nil {
@@ -121,14 +148,52 @@ func Index(ctx context.Context, store *storage.IndexStore, repoID int64, repo, r
 	for _, c := range d.ConfigFiles {
 		configs = append(configs, storage.WorkspaceConfigInfo{Path: c.Path, ContentHash: workspace.ContentHash(c.Content)})
 	}
-	if err := store.ReplaceWorkspaceState(repoID, root, d.Mode, resources, configs, storage.WorkspaceCompleteness{FilesDiscoveredTotal: len(files), FilesIndexed: len(files), Incomplete: resourcesWithoutSemantics > 0, ResourcesWithSemantics: resourcesWithSemantics, ResourcesWithoutSemantics: resourcesWithoutSemantics}); err != nil {
+	if err := store.ReplaceWorkspaceState(repoID, root, d.Mode, resources, configs, storage.WorkspaceCompleteness{FilesDiscoveredTotal: len(files), FilesIndexed: len(files), Incomplete: resourcesWithoutSemantics > 0 || frameworkFailed, ResourcesWithSemantics: resourcesWithSemantics, ResourcesWithoutSemantics: resourcesWithoutSemantics}); err != nil {
 		return Result{}, err
 	}
-	return Result{Discovery: d, FiveMCount: len(combined.Entities), WorkspaceCount: len(workspaceResult.Entities), RelationshipCount: len(workspaceResult.Relationships), FilesIndexed: len(files), ResourcesWithSemantics: resourcesWithSemantics, ResourcesWithoutSemantics: resourcesWithoutSemantics, FailedResources: failedResources}, nil
+	return Result{Discovery: d, FiveMCount: len(combined.Entities), WorkspaceCount: len(workspaceResult.Entities), RelationshipCount: len(workspaceResult.Relationships), FilesIndexed: len(files), ResourcesWithSemantics: resourcesWithSemantics, ResourcesWithoutSemantics: resourcesWithoutSemantics, FailedResources: failedResources, FrameworkCount: len(frameworkResult.Entities), FrameworkFailed: frameworkFailed, FailedFrameworkResources: failedFrameworkResources}, nil
 }
 
 func analyzeResource(ctx context.Context, repo string, r workspace.Resource, files map[string][]byte, languages map[string]string, symbols map[string][]parser.Symbol) (semantic.Result, error) {
 	return fivem.NewAnalyzer().AnalyzeRepository(ctx, semantic.RepositoryInput{Repo: repo, Resource: r.Name, SourceType: "local", Files: files, Languages: languages, Symbols: symbols})
+}
+
+func analyzeFramework(ctx context.Context, input semantic.RepositoryInput) (semantic.Result, error) {
+	return framework.NewAnalyzer().AnalyzeRepository(ctx, input)
+}
+
+func normalizeFrameworkResult(repo string, r workspace.Resource, result semantic.Result) semantic.Result {
+	normalized := semantic.Result{}
+	idMap := map[string]string{}
+	resourceID := semantic.StableID("workspace_resource", repo, r.RelativePath)
+	for _, entity := range result.Entities {
+		oldID := entity.ID
+		entity.Analyzer = semantic.AnalyzerFramework
+		entity.File = joinPath(r.RelativePath, entity.File)
+		if entity.Metadata == nil {
+			entity.Metadata = map[string]any{}
+		}
+		entity.Metadata["source_resource"] = r.Name
+		entity.Metadata["source_resource_path"] = r.RelativePath
+		entity.Metadata["source_resource_id"] = resourceID
+		if entity.Kind == framework.KindAPIProvider || entity.Kind == framework.KindCandidate {
+			entity.Metadata["provider_resource"] = r.Name
+			entity.Metadata["provider_resource_path"] = r.RelativePath
+			entity.Metadata["provider_resource_id"] = resourceID
+		}
+		entity.ID = semantic.StableID("framework", repo, r.RelativePath, entity.Kind, entity.Name, fmt.Sprint(entity.Line), fmt.Sprint(entity.EndLine), oldID)
+		idMap[oldID] = entity.ID
+		normalized.Entities = append(normalized.Entities, entity)
+	}
+	for _, relationship := range result.Relationships {
+		relationship.Analyzer = semantic.AnalyzerFramework
+		relationship.FromEntityID = idMap[relationship.FromEntityID]
+		relationship.ToEntityID = idMap[relationship.ToEntityID]
+		relationship.ID = semantic.StableID("framework_relationship", repo, relationship.FromEntityID, relationship.ToEntityID, relationship.Kind)
+		relationship.File = joinPath(r.RelativePath, relationship.File)
+		normalized.Relationships = append(normalized.Relationships, relationship)
+	}
+	return normalized
 }
 
 func normalizeResourceResult(repo string, r workspace.Resource, result semantic.Result) semantic.Result {

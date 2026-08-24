@@ -193,6 +193,11 @@ func (s *IndexStore) migrate() error {
 			}
 		}
 	}
+	if currentVersion < 10 {
+		if _, err := s.db.Exec(MigrateV10SQL); err != nil {
+			return fmt.Errorf("migrate v10: %w", err)
+		}
+	}
 
 	// Upsert schema version
 	_, err = s.db.Exec("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", CurrentSchemaVersion)
@@ -849,6 +854,17 @@ func (s *IndexStore) GetSemanticEntitiesForAnalyzer(repoID int64, analyzer strin
 	return s.getSemanticEntitiesLocked(repoID, analyzer)
 }
 
+// GetSemanticEntityByID returns one semantic endpoint and its owning analyzer.
+// It is used by graph tools to avoid guessing an analyzer for an explicit ID.
+func (s *IndexStore) GetSemanticEntityByID(repoID int64, entityID string) (semantic.Entity, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	repoName := repoNameLocked(s.db, repoID)
+	row := s.db.QueryRow(`SELECT id, analyzer, file_path, symbol_id, kind, name, framework, side, line, end_line, dynamic, metadata
+		FROM semantic_entities WHERE repo_id = ? AND id = ?`, repoID, entityID)
+	return scanSemanticEntity(row, repoName)
+}
+
 func (s *IndexStore) GetSemanticEntityBySymbolID(repoID int64, analyzer, symbolID string) (semantic.Entity, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -952,6 +968,13 @@ func (s *IndexStore) SearchSemanticWithResourceOptions(repoID int64, query, kind
 }
 
 func (s *IndexStore) SearchSemanticWithResourceTargetOptions(repoID int64, query, kind, side, analyzer, resource, targetResource string, includeInternal bool, maxResults int) ([]semantic.Entity, bool, error) {
+	return s.SearchSemanticWithResourceTargetFrameworkOptions(repoID, query, kind, side, analyzer, resource, targetResource, "", includeInternal, maxResults)
+}
+
+// SearchSemanticWithResourceTargetFrameworkOptions adds a first-class
+// framework filter while preserving the existing owner/target resource
+// distinction in metadata filters.
+func (s *IndexStore) SearchSemanticWithResourceTargetFrameworkOptions(repoID int64, query, kind, side, analyzer, resource, targetResource, framework string, includeInternal bool, maxResults int) ([]semantic.Entity, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if maxResults <= 0 {
@@ -983,8 +1006,12 @@ func (s *IndexStore) SearchSemanticWithResourceTargetOptions(repoID int64, query
 		queryText += " AND side = ?"
 		args = append(args, side)
 	}
+	if framework != "" {
+		queryText += " AND framework = ?"
+		args = append(args, framework)
+	}
 	if resource != "" {
-		queryText += " AND json_extract(metadata, '$.resource') = ?"
+		queryText += " AND COALESCE(json_extract(metadata, '$.source_resource'), json_extract(metadata, '$.resource')) = ?"
 		args = append(args, resource)
 	}
 	if targetResource != "" {

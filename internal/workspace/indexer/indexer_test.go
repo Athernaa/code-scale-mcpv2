@@ -9,6 +9,7 @@ import (
 
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
+	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/framework"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/generic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 	"github.com/Athernaa/code-scale-mcpv2/internal/workspace"
@@ -153,6 +154,20 @@ func TestWorkspaceCrossResourceFactsAndIsolation(t *testing.T) {
 	if len(five) == 0 {
 		t.Fatal("no per-resource FiveM facts")
 	}
+	frameworkFacts, err := store.GetSemanticEntitiesForAnalyzer(id, semantic.AnalyzerFramework)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frameworkFacts) == 0 {
+		t.Fatal("workspace framework analyzer did not persist API facts")
+	}
+	for _, fact := range frameworkFacts {
+		if fact.Kind == "framework_api_call" && fact.File == "resources/[app]/app_a/client.lua" {
+			if fact.Metadata["source_resource"] != "app_a" || fact.Metadata["target_resource"] != "core_a" {
+				t.Fatalf("workspace framework owner/target metadata incorrect: %#v", fact)
+			}
+		}
+	}
 	ws, err := store.GetSemanticEntitiesForAnalyzer(id, semantic.AnalyzerFiveMWorkspace)
 	if err != nil {
 		t.Fatal(err)
@@ -210,6 +225,42 @@ func TestWorkspaceCrossResourceFactsAndIsolation(t *testing.T) {
 	}
 	if got, err := store.GetSemanticEntitiesForAnalyzer(id, semantic.AnalyzerGenericGraph); err != nil || len(got) == 0 {
 		t.Fatalf("workspace clear damaged generic graph: count=%d err=%v", len(got), err)
+	}
+}
+
+func TestFrameworkAnalysisFailureIsResourceScoped(t *testing.T) {
+	store, root, repoID, discovery, contents, languages, symbols := setupWorkspaceRefreshFixture(t)
+	defer store.Close()
+	original := analyzeFrameworkFn
+	defer func() { analyzeFrameworkFn = original }()
+	failed := false
+	analyzeFrameworkFn = func(ctx context.Context, input semantic.RepositoryInput) (semantic.Result, error) {
+		if input.Resource == "target_b" {
+			failed = true
+			return semantic.Result{}, errors.New("synthetic framework failure")
+		}
+		return original(ctx, input)
+	}
+	if _, err := Index(context.Background(), store, repoID, "local/refresh-workspace", root, contents, languages, symbols, discovery); err != nil {
+		t.Fatal(err)
+	}
+	if !failed {
+		t.Fatal("framework failure seam was not exercised")
+	}
+	facts, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFramework)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fact := range facts {
+		if fact.Metadata["source_resource"] == "target_b" && fact.Kind != framework.KindStatus {
+			t.Fatalf("failed resource retained framework fact: %#v", fact)
+		}
+	}
+	if five, _ := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM); len(five) == 0 {
+		t.Fatal("FiveM facts were damaged by framework failure")
+	}
+	if incomplete, err := store.GetWorkspace(repoID); err != nil || !incomplete.Incomplete {
+		t.Fatalf("workspace failure state was not marked incomplete: %#v err=%v", incomplete, err)
 	}
 }
 

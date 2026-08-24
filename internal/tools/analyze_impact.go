@@ -41,7 +41,11 @@ func AnalyzeImpactHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest
 		analyzer := args.Analyzer
 		if analyzer == "" {
 			if args.EntityID != "" {
-				analyzer = semantic.AnalyzerFiveMWorkspace
+				if entity, lookupErr := deps.Store.GetSemanticEntityByID(repoID, args.EntityID); lookupErr == nil {
+					analyzer = entity.Analyzer
+				} else {
+					analyzer = semantic.AnalyzerFiveMWorkspace
+				}
 			} else {
 				analyzer = semantic.AnalyzerGenericGraph
 			}
@@ -57,7 +61,11 @@ func AnalyzeImpactHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest
 		}
 		kinds := args.RelationshipKinds
 		if len(kinds) == 0 {
-			kinds = []string{"calls", "references"}
+			if analyzer == semantic.AnalyzerFramework {
+				kinds = []string{"framework_calls", "framework_object_call"}
+			} else {
+				kinds = []string{"calls", "references"}
+			}
 		}
 		edges, truncated, err := deps.Store.TraceSemanticWithOptions(repoID, rootID, analyzer, "incoming", kinds, args.Depth, args.MaxResults)
 		if err != nil {

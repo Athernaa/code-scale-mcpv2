@@ -205,6 +205,57 @@ func TestGenericTraceBySymbolIDAndImpact(t *testing.T) {
 	}
 }
 
+func TestFrameworkSearchTraceAndImpactExposeOwnerAndProvider(t *testing.T) {
+	store, err := storage.NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	if err := store.ReplaceRepoIndex("local", "framework-tools", "local", "", map[string]string{"core.lua": "core", "app.lua": "app"}, map[string]string{"core.lua": "lua", "app.lua": "lua"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID("local/framework-tools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := semantic.Entity{ID: "framework-provider", Analyzer: semantic.AnalyzerFramework, Repo: "local/framework-tools", File: "core.lua", Kind: "framework_api_provider", Name: "GetPlayer", Framework: "custom", Line: 3, Metadata: map[string]any{"source_resource": "core", "source_resource_path": "resources/core", "provider_resource": "core", "provider_resource_path": "resources/core"}}
+	call := semantic.Entity{ID: "framework-call", Analyzer: semantic.AnalyzerFramework, Repo: provider.Repo, File: "app.lua", SymbolID: "app.lua::run#function", Kind: "framework_api_call", Name: "GetPlayer", Framework: "custom", Line: 8, Metadata: map[string]any{"source_resource": "app", "source_resource_path": "resources/app", "target_resource": "core", "operation": "player_lookup", "api": "GetPlayer"}}
+	op := semantic.Entity{ID: "framework-op", Analyzer: semantic.AnalyzerFramework, Repo: provider.Repo, File: "app.lua", SymbolID: call.SymbolID, Kind: "framework_operation", Name: "player_lookup", Framework: "custom", Line: 8, Metadata: map[string]any{"source_resource": "app", "source_resource_path": "resources/app", "target_resource": "core", "provider_resource": "core"}}
+	edges := []semantic.Relationship{{ID: "framework-edge", Analyzer: semantic.AnalyzerFramework, Repo: provider.Repo, FromEntityID: call.ID, ToEntityID: provider.ID, Kind: "framework_calls", Name: "GetPlayer", Confidence: 1, File: call.File, Line: call.Line}}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, semantic.Result{Entities: []semantic.Entity{provider, call, op}, Relationships: edges}); err != nil {
+		t.Fatal(err)
+	}
+	deps := &Deps{Store: store}
+	searchResult, _, err := SearchSemanticsHandler(deps)(context.Background(), nil, SearchSemanticsArgs{Repo: provider.Repo, Analyzer: semantic.AnalyzerFramework, Framework: "custom", Resource: "app", Query: "player_lookup", Kind: "framework_operation"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	search := decodeToolJSON(t, searchResult)
+	items := search["results"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["resource"] != "app" {
+		t.Fatalf("framework owner filter/bridge incorrect: %#v", search)
+	}
+	traceResult, _, err := TraceRelationshipsHandler(deps)(context.Background(), nil, TraceRelationshipsArgs{Repo: provider.Repo, EntityID: call.ID, Direction: "outgoing", Depth: 1, MaxResults: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace := decodeToolJSON(t, traceResult)
+	traceEdge := trace["results"].([]any)[0].(map[string]any)
+	from := traceEdge["from"].(map[string]any)
+	to := traceEdge["to"].(map[string]any)
+	if from["resource"] != "app" || to["resource"] != "core" {
+		t.Fatalf("trace owner/target resources incorrect: %#v", trace)
+	}
+	impactResult, _, err := AnalyzeImpactHandler(deps)(context.Background(), nil, AnalyzeImpactArgs{Repo: provider.Repo, EntityID: provider.ID, Depth: 1, MaxResults: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	impact := decodeToolJSON(t, impactResult)
+	if impact["counts"].(map[string]any)["direct"] != float64(1) {
+		t.Fatalf("framework impact did not follow incoming provider edge: %#v", impact)
+	}
+}
+
 func TestAnalyzerFailureClearsOnlyFailedAnalyzer(t *testing.T) {
 	store, err := storage.NewIndexStore(t.TempDir())
 	if err != nil {

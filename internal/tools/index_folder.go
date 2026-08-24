@@ -276,6 +276,7 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 				log.Printf("index_folder: workspace analysis failed: %v", semanticErr)
 				_ = deps.Store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, semantic.Result{})
 				_ = deps.Store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveMWorkspace, semantic.Result{})
+				_ = deps.Store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, semantic.Result{})
 				_ = deps.Store.ClearWorkspaceState(repoID)
 				diagnostics = append(diagnostics, "workspace: "+semanticErr.Error())
 			} else {
@@ -286,7 +287,15 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 					semanticIncomplete = true
 					diagnostics = append(diagnostics, "workspace resource analysis failed: "+strings.Join(wr.FailedResources, ", "))
 				}
-				if err := deps.Store.UpdateWorkspaceCompleteness(repoID, storage.WorkspaceCompleteness{FilesDiscoveredTotal: discoveredTotal, FilesIndexed: len(fileHashes), IndexTruncated: indexTruncated, Incomplete: semanticIncomplete || indexTruncated || skippedFiles > 0 || parseFailures > 0 || wr.ResourcesWithoutSemantics > 0, ResourcesWithSemantics: wr.ResourcesWithSemantics, ResourcesWithoutSemantics: wr.ResourcesWithoutSemantics}); err != nil {
+				if wr.FrameworkFailed {
+					semanticIncomplete = true
+					if len(wr.FailedFrameworkResources) > 0 {
+						diagnostics = append(diagnostics, "framework analysis failed: "+strings.Join(wr.FailedFrameworkResources, ", "))
+					} else {
+						diagnostics = append(diagnostics, "framework analysis incomplete")
+					}
+				}
+				if err := deps.Store.UpdateWorkspaceCompleteness(repoID, storage.WorkspaceCompleteness{FilesDiscoveredTotal: discoveredTotal, FilesIndexed: len(fileHashes), IndexTruncated: indexTruncated, Incomplete: semanticIncomplete || indexTruncated || skippedFiles > 0 || parseFailures > 0 || wr.ResourcesWithoutSemantics > 0 || wr.FrameworkFailed, ResourcesWithSemantics: wr.ResourcesWithSemantics, ResourcesWithoutSemantics: wr.ResourcesWithoutSemantics}); err != nil {
 					diagnostics = append(diagnostics, "workspace completeness: "+err.Error())
 				}
 			}

@@ -8,9 +8,12 @@ import (
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/fivem"
+	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/framework"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/generic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 )
+
+var analyzeFrameworkFn = analyzeFrameworkRepository
 
 func indexSemanticRepository(
 	ctx context.Context,
@@ -36,12 +39,34 @@ func indexSemanticRepository(
 		if clearErr := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, semantic.Result{}); clearErr != nil {
 			return 0, fmt.Errorf("FiveM analysis failed: %v; clearing stale facts failed: %w", err, clearErr)
 		}
+		if clearErr := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, semantic.Result{}); clearErr != nil {
+			return 0, fmt.Errorf("FiveM analysis failed: %v; clearing stale framework facts failed: %w", err, clearErr)
+		}
 		return 0, err
 	}
 	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, result); err != nil {
 		return 0, err
 	}
+	frameworkResult, frameworkErr := analyzeFrameworkFn(ctx, semantic.RepositoryInput{
+		Repo: repo, Resource: resource, SourceType: sourceType,
+		Files: files, Languages: languages, Symbols: symbols,
+		SemanticEntities: result.Entities,
+	})
+	if frameworkErr != nil {
+		status := framework.FailureStatus(repo, resource, resource)
+		if clearErr := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, semantic.Result{Entities: []semantic.Entity{status}}); clearErr != nil {
+			return 0, fmt.Errorf("framework analysis failed: %v; clearing stale facts failed: %w", frameworkErr, clearErr)
+		}
+		return 0, frameworkErr
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, frameworkResult); err != nil {
+		return 0, err
+	}
 	return len(result.Entities), nil
+}
+
+func analyzeFrameworkRepository(ctx context.Context, input semantic.RepositoryInput) (semantic.Result, error) {
+	return framework.NewAnalyzer().AnalyzeRepository(ctx, input)
 }
 
 func indexGenericRepository(
