@@ -9,12 +9,14 @@ import (
 	"testing"
 
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
+	"github.com/Athernaa/code-scale-mcpv2/internal/pathfilter"
 	"github.com/Athernaa/code-scale-mcpv2/internal/repository"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/fivem"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/generic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 	"github.com/Athernaa/code-scale-mcpv2/internal/workspace"
+	workspaceindex "github.com/Athernaa/code-scale-mcpv2/internal/workspace/indexer"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -412,6 +414,121 @@ func TestWatcherGenericGraphRefreshesRenamedImportTarget(t *testing.T) {
 	}
 	if !foundBar {
 		t.Fatal("updated import/call relationship was not indexed")
+	}
+}
+
+func TestWatcherUsesGitignoreAndMaintainsWorkspaceCoverageOnSourceChanges(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "server-data")
+	resourceRoot := filepath.Join(root, "resources", "app", "resource_x")
+	if err := os.MkdirAll(resourceRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"server.cfg": "ensure resource_x\n",
+		".gitignore": "ignored.lua\n",
+		"resources/app/resource_x/fxmanifest.lua": "fx_version 'cerulean'\nserver_script 'server.lua'\n",
+		"resources/app/resource_x/server.lua":     "RegisterNetEvent('coverage:test')\n",
+	}
+	for rel, text := range files {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := storage.NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	id, err := repository.Local(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := map[string][]byte{}
+	languages := map[string]string{}
+	symbols := map[string][]parser.Symbol{}
+	hashes := map[string]string{}
+	var allSymbols []parser.Symbol
+	for rel, text := range files {
+		if parser.DetectLanguage(rel) == "" {
+			continue
+		}
+		data := []byte(text)
+		lang := parser.DetectLanguage(rel)
+		parsed, parseErr := parser.ParseFile(data, rel, lang)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		contents[rel] = data
+		languages[rel] = lang
+		symbols[rel] = parsed
+		hashes[rel] = workspace.ContentHash(data)
+		allSymbols = append(allSymbols, parsed...)
+		if err := store.SaveContentFile(id.Owner, id.Name, rel, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.ReplaceRepoIndex(id.Owner, id.Name, "local", "", hashes, languages, allSymbols, id.CanonicalPath); err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID(id.Repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matcher, err := pathfilter.New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	discovery, err := workspace.DiscoverWithIgnore(root, matcher.Ignored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspaceindex.Index(context.Background(), store, repoID, id.Repo, root, contents, languages, symbols, discovery); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewManager(store)
+	watch := &FolderWatch{Path: id.CanonicalPath, Repo: id.Repo, stop: make(chan struct{})}
+	ignoredPath := filepath.Join(resourceRoot, "ignored.lua")
+	if err := os.WriteFile(ignoredPath, []byte("RegisterNetEvent('ignored')\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mgr.reindexFiles(watch, []string{ignoredPath})
+	indexed, err := store.GetFiles(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range indexed {
+		if file.Path == "resources/app/resource_x/ignored.lua" {
+			t.Fatal("watcher indexed a .gitignored source file")
+		}
+	}
+
+	addedPath := filepath.Join(resourceRoot, "new.lua")
+	if err := os.WriteFile(addedPath, []byte("RegisterNetEvent('added')\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mgr.reindexFiles(watch, []string{addedPath})
+	info, err := store.GetWorkspace(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.FilesDiscoveredTotal != 3 || info.FilesIndexed != 3 || info.Incomplete {
+		t.Fatalf("source addition did not update truthful coverage: %#v", info)
+	}
+
+	if err := os.Remove(addedPath); err != nil {
+		t.Fatal(err)
+	}
+	mgr.reindexFiles(watch, []string{addedPath})
+	info, err = store.GetWorkspace(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.FilesDiscoveredTotal != 2 || info.FilesIndexed != 2 || info.Incomplete {
+		t.Fatalf("source removal did not update truthful coverage: %#v", info)
 	}
 }
 

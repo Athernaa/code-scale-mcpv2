@@ -76,6 +76,37 @@ func TestIndexFolderAppliesGitignoreAndExtraPatterns(t *testing.T) {
 	}
 }
 
+func TestIndexFolderIgnoredFiveMEvidenceDoesNotForceWorkspaceMode(t *testing.T) {
+	root := t.TempDir()
+	resourceManifest := filepath.Join(root, "resources", "ignored", "fxmanifest.lua")
+	if err := os.MkdirAll(filepath.Dir(resourceManifest), 0755); err != nil {
+		t.Fatal(err)
+	}
+	for rel, content := range map[string]string{
+		".gitignore":                       "resources/\nserver.cfg\n",
+		"server.cfg":                       "ensure ignored\n",
+		"resources/ignored/fxmanifest.lua": "fx_version 'cerulean'\n",
+	} {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := storage.NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	result, _, err := IndexFolderHandler(&Deps{Store: store})(context.Background(), nil, IndexFolderArgs{Path: root})
+	if err != nil || result.IsError {
+		t.Fatalf("index_folder failed: result=%#v err=%v", result, err)
+	}
+	decoded := decodeToolJSON(t, result)
+	if decoded["mode"] != "generic" {
+		t.Fatalf("ignored FiveM evidence forced workspace mode: %#v", decoded)
+	}
+}
+
 func TestIndexFolderWorkspaceCoverageDoesNotSilentlyApplyGenericFileCap(t *testing.T) {
 	root := t.TempDir()
 	resourceDir := filepath.Join(root, "resources", "[bulk]", "bulk_resource")

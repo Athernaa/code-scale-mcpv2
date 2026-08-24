@@ -22,6 +22,9 @@ type Result struct {
 	ResourcesWithoutSemantics                     int
 }
 
+// analyzeResourceFn is a small seam for deterministic analyzer failure tests.
+var analyzeResourceFn = analyzeResource
+
 // Index builds per-resource FiveM facts and workspace-level cross-resource
 // facts without reparsing source. The caller supplies already indexed files
 // and parser symbols.
@@ -41,7 +44,6 @@ func Index(ctx context.Context, store *storage.IndexStore, repoID int64, repo, r
 	}
 	combined := semantic.Result{}
 	manifestByResource := map[string]semantic.Entity{}
-	resourcesWithSemantics := 0
 	for _, r := range d.Resources {
 		localFiles := map[string][]byte{}
 		localLang := map[string]string{}
@@ -54,13 +56,12 @@ func Index(ctx context.Context, store *storage.IndexStore, repoID int64, repo, r
 				localSymbols[local] = symbols[path]
 			}
 		}
-		result, e := analyzeResource(ctx, repo, r, localFiles, localLang, localSymbols)
+		result, e := analyzeResourceFn(ctx, repo, r, localFiles, localLang, localSymbols)
 		if e != nil {
 			_ = store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, semantic.Result{})
 			_ = store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveMWorkspace, semantic.Result{})
 			return Result{}, fmt.Errorf("resource %s: %w", r.Name, e)
 		}
-		resourcesWithSemantics++
 		idMap := map[string]string{}
 		for _, entity := range result.Entities {
 			old := entity.ID
@@ -98,6 +99,7 @@ func Index(ctx context.Context, store *storage.IndexStore, repoID int64, repo, r
 			combined.Relationships = append(combined.Relationships, rel)
 		}
 	}
+	resourcesWithSemantics, resourcesWithoutSemantics := semanticCoverage(d, combined.Entities)
 	workspaceEntities, workspaceRelationships := resolveWorkspace(repo, d, combined.Entities, manifestByResource)
 	workspaceResult := semantic.Result{Entities: workspaceEntities, Relationships: workspaceRelationships}
 	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, combined); err != nil {
@@ -116,10 +118,10 @@ func Index(ctx context.Context, store *storage.IndexStore, repoID int64, repo, r
 	for _, c := range d.ConfigFiles {
 		configs = append(configs, storage.WorkspaceConfigInfo{Path: c.Path, ContentHash: workspace.ContentHash(c.Content)})
 	}
-	if err := store.ReplaceWorkspaceState(repoID, root, d.Mode, resources, configs, storage.WorkspaceCompleteness{FilesDiscoveredTotal: len(files), FilesIndexed: len(files), ResourcesWithSemantics: resourcesWithSemantics, ResourcesWithoutSemantics: len(d.Resources) - resourcesWithSemantics}); err != nil {
+	if err := store.ReplaceWorkspaceState(repoID, root, d.Mode, resources, configs, storage.WorkspaceCompleteness{FilesDiscoveredTotal: len(files), FilesIndexed: len(files), Incomplete: resourcesWithoutSemantics > 0, ResourcesWithSemantics: resourcesWithSemantics, ResourcesWithoutSemantics: resourcesWithoutSemantics}); err != nil {
 		return Result{}, err
 	}
-	return Result{Discovery: d, FiveMCount: len(combined.Entities), WorkspaceCount: len(workspaceResult.Entities), RelationshipCount: len(workspaceResult.Relationships), FilesIndexed: len(files), ResourcesWithSemantics: resourcesWithSemantics, ResourcesWithoutSemantics: len(d.Resources) - resourcesWithSemantics}, nil
+	return Result{Discovery: d, FiveMCount: len(combined.Entities), WorkspaceCount: len(workspaceResult.Entities), RelationshipCount: len(workspaceResult.Relationships), FilesIndexed: len(files), ResourcesWithSemantics: resourcesWithSemantics, ResourcesWithoutSemantics: resourcesWithoutSemantics}, nil
 }
 
 func analyzeResource(ctx context.Context, repo string, r workspace.Resource, files map[string][]byte, languages map[string]string, symbols map[string][]parser.Symbol) (semantic.Result, error) {
@@ -187,7 +189,7 @@ func RefreshResource(ctx context.Context, store *storage.IndexStore, repoID int6
 		if err := store.ReplaceSemanticResourceForAnalyzer(repoID, semantic.AnalyzerFiveM, resourcePath, semantic.Result{}); err != nil {
 			return Result{}, err
 		}
-		return rebuildWorkspaceFacts(store, repoID, repo, d)
+		return rebuildWorkspaceFacts(store, repoID, repo, d, false)
 	}
 	localFiles := map[string][]byte{}
 	localLanguages := map[string]string{}
@@ -200,19 +202,30 @@ func RefreshResource(ctx context.Context, store *storage.IndexStore, repoID int6
 			localSymbols[local] = symbols[path]
 		}
 	}
-	result, err := analyzeResource(ctx, repo, resource, localFiles, localLanguages, localSymbols)
+	result, err := analyzeResourceFn(ctx, repo, resource, localFiles, localLanguages, localSymbols)
 	if err != nil {
-		_ = store.ReplaceSemanticResourceForAnalyzer(repoID, semantic.AnalyzerFiveM, resource.RelativePath, semantic.Result{})
+		if clearErr := store.ReplaceSemanticResourceForAnalyzer(repoID, semantic.AnalyzerFiveM, resource.RelativePath, semantic.Result{}); clearErr != nil {
+			return Result{}, fmt.Errorf("resource %s analysis failed: %v; clearing facts failed: %w", resource.Name, err, clearErr)
+		}
+		if _, rebuildErr := rebuildWorkspaceFacts(store, repoID, repo, d, true); rebuildErr != nil {
+			return Result{}, fmt.Errorf("resource %s analysis failed: %v; rebuilding workspace facts failed: %w", resource.Name, err, rebuildErr)
+		}
 		return Result{}, err
 	}
 	normalized := normalizeResourceResult(repo, resource, result)
 	if err := store.ReplaceSemanticResourceForAnalyzer(repoID, semantic.AnalyzerFiveM, resource.RelativePath, normalized); err != nil {
 		return Result{}, err
 	}
-	return rebuildWorkspaceFacts(store, repoID, repo, d)
+	return rebuildWorkspaceFacts(store, repoID, repo, d, false)
 }
 
-func rebuildWorkspaceFacts(store *storage.IndexStore, repoID int64, repo string, d workspace.Discovery) (Result, error) {
+// RebuildWorkspaceFacts rebuilds workspace-level facts from persisted FiveM
+// entities without invoking any source analyzer.
+func RebuildWorkspaceFacts(store *storage.IndexStore, repoID int64, repo string, d workspace.Discovery) (Result, error) {
+	return rebuildWorkspaceFacts(store, repoID, repo, d, false)
+}
+
+func rebuildWorkspaceFacts(store *storage.IndexStore, repoID int64, repo string, d workspace.Discovery, degraded bool) (Result, error) {
 	entities, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM)
 	if err != nil {
 		return Result{}, err
@@ -227,7 +240,85 @@ func rebuildWorkspaceFacts(store *storage.IndexStore, repoID int64, repo string,
 	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveMWorkspace, semantic.Result{Entities: workspaceEntities, Relationships: workspaceRelationships}); err != nil {
 		return Result{}, err
 	}
-	return Result{Discovery: d, FiveMCount: len(entities), WorkspaceCount: len(workspaceEntities), RelationshipCount: len(workspaceRelationships)}, nil
+	withSemantics, withoutSemantics := semanticCoverage(d, entities)
+	if err := updateWorkspaceSemanticCoverage(store, repoID, withSemantics, withoutSemantics, degraded); err != nil {
+		return Result{}, err
+	}
+	return Result{Discovery: d, FiveMCount: len(entities), WorkspaceCount: len(workspaceEntities), RelationshipCount: len(workspaceRelationships), ResourcesWithSemantics: withSemantics, ResourcesWithoutSemantics: withoutSemantics}, nil
+}
+
+// RefreshWorkspaceConfiguration updates config/resource metadata and
+// workspace relationships from persisted facts. It deliberately does not
+// analyze resource source files.
+func RefreshWorkspaceConfiguration(store *storage.IndexStore, repoID int64, repo, root string, d workspace.Discovery) (Result, error) {
+	result, err := RebuildWorkspaceFacts(store, repoID, repo, d)
+	if err != nil {
+		return Result{}, err
+	}
+	previous, err := store.GetWorkspace(repoID)
+	if err != nil {
+		return Result{}, err
+	}
+	resources, configs := workspaceState(d)
+	if err := store.ReplaceWorkspaceState(repoID, root, d.Mode, resources, configs, storage.WorkspaceCompleteness{
+		FilesDiscoveredTotal:      previous.FilesDiscoveredTotal,
+		FilesIndexed:              previous.FilesIndexed,
+		IndexTruncated:            previous.IndexTruncated,
+		Incomplete:                previous.Incomplete || result.ResourcesWithoutSemantics > 0,
+		ResourcesWithSemantics:    result.ResourcesWithSemantics,
+		ResourcesWithoutSemantics: result.ResourcesWithoutSemantics,
+	}); err != nil {
+		return Result{}, err
+	}
+	return result, nil
+}
+
+func workspaceState(d workspace.Discovery) ([]storage.WorkspaceResourceInfo, []storage.WorkspaceConfigInfo) {
+	resources := make([]storage.WorkspaceResourceInfo, 0, len(d.Resources))
+	for _, r := range d.Resources {
+		resources = append(resources, storage.WorkspaceResourceInfo{Name: r.Name, RelativePath: r.RelativePath, ManifestPath: r.ManifestPath, ManifestType: r.ManifestType, EnabledState: r.EnabledState, StartOrder: r.StartOrder, GroupPath: r.GroupPath})
+	}
+	configs := make([]storage.WorkspaceConfigInfo, 0, len(d.ConfigFiles))
+	for _, c := range d.ConfigFiles {
+		configs = append(configs, storage.WorkspaceConfigInfo{Path: c.Path, ContentHash: workspace.ContentHash(c.Content)})
+	}
+	return resources, configs
+}
+
+func semanticCoverage(d workspace.Discovery, entities []semantic.Entity) (int, int) {
+	covered := map[string]bool{}
+	for _, entity := range entities {
+		if entity.Kind == fivem.KindManifestResource {
+			if path := sourceResourcePath(entity); path != "" {
+				covered[path] = true
+			}
+		}
+	}
+	withSemantics := 0
+	for _, resource := range d.Resources {
+		if covered[workspace.NormalizePath(resource.RelativePath)] {
+			withSemantics++
+		}
+	}
+	return withSemantics, len(d.Resources) - withSemantics
+}
+
+func updateWorkspaceSemanticCoverage(store *storage.IndexStore, repoID int64, withSemantics, withoutSemantics int, degraded bool) error {
+	previous, err := store.GetWorkspace(repoID)
+	if err != nil {
+		if storage.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	return store.UpdateWorkspaceCompleteness(repoID, storage.WorkspaceCompleteness{
+		FilesDiscoveredTotal:      previous.FilesDiscoveredTotal,
+		FilesIndexed:              previous.FilesIndexed,
+		IndexTruncated:            previous.IndexTruncated,
+		Incomplete:                previous.Incomplete || degraded || withoutSemantics > 0,
+		ResourcesWithSemantics:    withSemantics,
+		ResourcesWithoutSemantics: withoutSemantics,
+	})
 }
 
 func joinPath(a, b string) string {

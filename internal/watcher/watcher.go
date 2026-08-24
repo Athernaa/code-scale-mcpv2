@@ -28,7 +28,10 @@ import (
 
 const debounceInterval = 500 * time.Millisecond
 
-// FolderWatch tracks a single watched folder.
+// FolderWatch tracks a single watched folder. Persisted watches intentionally
+// retain only the path and repository. The watcher reloads repository
+// .gitignore rules, but per-call extra ignore patterns are not persisted
+// across process restarts.
 type FolderWatch struct {
 	Path      string    `json:"path"`
 	Repo      string    `json:"repo"`
@@ -261,8 +264,10 @@ func (m *Manager) watchLoop(fw *FolderWatch) {
 						// event. Watching it is not enough; enqueue its existing
 						// supported files for indexing as well.
 						if mode, _ := workspace.DetectMode(fw.Path); mode == workspace.KindFiveMWorkspace {
-							if paths := discoverSupportedFiles(fw.Path, event.Name); len(paths) > 0 {
-								m.reindexFiles(fw, paths)
+							if matcher, matcherErr := pathfilter.New(fw.Path, nil); matcherErr == nil {
+								if paths := discoverSupportedFiles(fw.Path, event.Name, matcher); len(paths) > 0 {
+									m.reindexFiles(fw, paths)
+								}
 							}
 						}
 					}
@@ -272,7 +277,7 @@ func (m *Manager) watchLoop(fw *FolderWatch) {
 
 			// Workspace configuration is indexed as metadata, not as source.
 			lang := parser.DetectLanguage(event.Name)
-			if lang == "" {
+			if lang == "" && !strings.EqualFold(filepath.Ext(event.Name), ".cfg") {
 				if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
 					if mode, _ := workspace.DetectMode(fw.Path); mode == workspace.KindFiveMWorkspace {
 						if local, identityErr := repository.Local(fw.Path); identityErr == nil {
@@ -287,13 +292,7 @@ func (m *Manager) watchLoop(fw *FolderWatch) {
 						}
 					}
 				}
-				if strings.EqualFold(filepath.Ext(event.Name), ".cfg") {
-					pendingMu.Lock()
-					pending[event.Name] = struct{}{}
-					pendingMu.Unlock()
-				} else {
-					continue
-				}
+				continue
 			}
 
 			// Security filter
@@ -353,14 +352,17 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 		log.Printf("watcher: cannot derive resource name for %s: %v", fw.Path, err)
 		return
 	}
-	mode, _ := workspace.DetectMode(fw.Path)
 	workspaceDirty := false
 	workspaceTopologyDirty := false
+	workspaceConfigDirty := false
+	workspaceSourceDirty := false
 	workspaceResources := map[string]bool{}
+	matcher, _ := pathfilter.New(fw.Path, nil)
 	workspaceDiscovery, _ := workspace.Discover(fw.Path)
-	if matcher, matcherErr := pathfilter.New(fw.Path, nil); matcherErr == nil {
+	if matcher != nil {
 		workspaceDiscovery, _ = workspace.DiscoverWithIgnore(fw.Path, matcher.Ignored)
 	}
+	mode := workspaceDiscovery.Mode
 
 	for _, fullPath := range paths {
 		relPath, err := filepath.Rel(fw.Path, fullPath)
@@ -380,8 +382,11 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 					log.Printf("watcher: cannot refresh semantic graph after removing %s: %v", relPath, repoErr)
 				} else if mode == workspace.KindFiveMWorkspace {
 					workspaceDirty = true
+					workspaceSourceDirty = true
 					if isManifestPath(relPath) {
 						workspaceTopologyDirty = true
+					} else if resource, ok := workspace.ResourceForPath(workspaceDiscovery.Resources, relPath); ok {
+						workspaceResources[resource.RelativePath] = true
 					}
 					_ = m.store.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerGenericGraph, relPath, nil)
 					if graphErr := m.refreshGenericRelationships(owner + "/" + repoName); graphErr != nil {
@@ -411,7 +416,10 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 		}
 		if strings.EqualFold(filepath.Ext(relPath), ".cfg") {
 			workspaceDirty = true
-			workspaceTopologyDirty = true
+			workspaceConfigDirty = true
+			continue
+		}
+		if matcher != nil && matcher.Ignored(fullPath, false) {
 			continue
 		}
 
@@ -455,6 +463,7 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 
 		if mode == workspace.KindFiveMWorkspace {
 			workspaceDirty = true
+			workspaceSourceDirty = true
 			if isManifestPath(relPath) {
 				workspaceTopologyDirty = true
 			} else if resource, ok := workspace.ResourceForPath(workspaceDiscovery.Resources, relPath); ok {
@@ -480,11 +489,27 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 					log.Printf("watcher: resource refresh failed for %s: %v", resourcePath, err)
 				}
 			}
+			if workspaceConfigDirty {
+				if err := m.refreshWorkspaceConfiguration(localID.CanonicalPath, owner+"/"+repoName); err != nil {
+					log.Printf("watcher: workspace configuration refresh failed: %v", err)
+				}
+			}
+			if workspaceSourceDirty && len(workspaceResources) == 0 && !workspaceTopologyDirty {
+				if repoID, repoErr := m.store.GetRepoID(owner + "/" + repoName); repoErr == nil {
+					if coverageErr := m.updateWorkspaceCoverage(localID.CanonicalPath, repoID); coverageErr != nil {
+						log.Printf("watcher: workspace coverage refresh failed: %v", coverageErr)
+					}
+				}
+			}
 		}
 	}
 }
 
-func discoverSupportedFiles(root, directory string) []string {
+func discoverSupportedFiles(root, directory string, matchers ...*pathfilter.Matcher) []string {
+	var matcher *pathfilter.Matcher
+	if len(matchers) > 0 {
+		matcher = matchers[0]
+	}
 	var paths []string
 	_ = filepath.WalkDir(directory, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
@@ -494,6 +519,12 @@ func discoverSupportedFiles(root, directory string) []string {
 			if path != directory && security.ShouldSkipDir(entry.Name()) {
 				return filepath.SkipDir
 			}
+			if matcher != nil && matcher.Ignored(path, true) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if matcher != nil && matcher.Ignored(path, false) {
 			return nil
 		}
 		if entry.Type()&os.ModeSymlink != 0 || security.ShouldSkipFile(entry.Name()) || security.ShouldExcludeFile(path, root, security.DefaultMaxFileSize) != "" {
@@ -548,6 +579,25 @@ func (m *Manager) refreshWorkspaceResource(root, repo, resourcePath string) erro
 		return discoveryErr
 	}
 	_, err = workspaceindex.RefreshResource(context.Background(), m.store, repoID, repo, root, resourcePath, contents, languages, symbols, discovery)
+	if err != nil {
+		return err
+	}
+	return m.updateWorkspaceCoverage(root, repoID)
+}
+
+func (m *Manager) refreshWorkspaceConfiguration(root, repo string) error {
+	repoID, err := m.store.GetRepoID(repo)
+	if err != nil {
+		return err
+	}
+	discovery, err := workspace.Discover(root)
+	if matcher, matcherErr := pathfilter.New(root, nil); matcherErr == nil {
+		discovery, err = workspace.DiscoverWithIgnore(root, matcher.Ignored)
+	}
+	if err != nil {
+		return err
+	}
+	_, err = workspaceindex.RefreshWorkspaceConfiguration(m.store, repoID, repo, root, discovery)
 	return err
 }
 
@@ -572,15 +622,66 @@ func (m *Manager) rebuildWorkspace(root, repo string) error {
 		langs[f.Path] = f.Language
 		symbols[f.Path], _ = m.store.GetSymbolsByFile(repoID, f.Path)
 	}
+	matcher, _ := pathfilter.New(root, nil)
 	discovery, discoveryErr := workspace.Discover(root)
-	if matcher, matcherErr := pathfilter.New(root, nil); matcherErr == nil {
+	if matcher != nil {
 		discovery, discoveryErr = workspace.DiscoverWithIgnore(root, matcher.Ignored)
 	}
 	if discoveryErr != nil {
 		return discoveryErr
 	}
 	_, err = workspaceindex.Index(context.Background(), m.store, repoID, repo, root, contents, langs, symbols, discovery)
-	return err
+	if err != nil {
+		return err
+	}
+	if err := m.updateWorkspaceCoverage(root, repoID); err != nil {
+		return err
+	}
+	return nil
+}
+
+// updateWorkspaceCoverage compares the authoritative filesystem discovery
+// with indexed files without reparsing source. Existing incompleteness is
+// preserved until a full index proves it can be cleared.
+func (m *Manager) updateWorkspaceCoverage(root string, repoID int64) error {
+	matcher, _ := pathfilter.New(root, nil)
+	discoveredPaths := discoverSupportedFiles(root, root, matcher)
+	discovered := make(map[string]bool, len(discoveredPaths))
+	for _, path := range discoveredPaths {
+		rel, err := filepath.Rel(root, path)
+		if err == nil {
+			discovered[filepath.ToSlash(rel)] = true
+		}
+	}
+	files, err := m.store.GetFiles(repoID)
+	if err != nil {
+		return err
+	}
+	indexed := make(map[string]bool, len(files))
+	for _, file := range files {
+		indexed[workspace.NormalizePath(file.Path)] = true
+	}
+	completeCoverage := len(discovered) == len(indexed)
+	if completeCoverage {
+		for path := range discovered {
+			if !indexed[path] {
+				completeCoverage = false
+				break
+			}
+		}
+	}
+	previous, err := m.store.GetWorkspace(repoID)
+	if err != nil {
+		return err
+	}
+	return m.store.UpdateWorkspaceCompleteness(repoID, storage.WorkspaceCompleteness{
+		FilesDiscoveredTotal:      len(discovered),
+		FilesIndexed:              len(indexed),
+		IndexTruncated:            previous.IndexTruncated,
+		Incomplete:                previous.Incomplete || !completeCoverage,
+		ResourcesWithSemantics:    previous.ResourcesWithSemantics,
+		ResourcesWithoutSemantics: previous.ResourcesWithoutSemantics,
+	})
 }
 
 func (m *Manager) updateSemanticFile(repo, resource, filePath, language string, content []byte, symbols []parser.Symbol) error {

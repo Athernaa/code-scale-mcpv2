@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,6 +13,69 @@ import (
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 	"github.com/Athernaa/code-scale-mcpv2/internal/workspace"
 )
+
+func setupWorkspaceRefreshFixture(t *testing.T) (*storage.IndexStore, string, int64, workspace.Discovery, map[string][]byte, map[string]string, map[string][]parser.Symbol) {
+	t.Helper()
+	root := t.TempDir()
+	files := map[string]string{
+		"server.cfg":                            "ensure source_a\nensure target_b\n",
+		"resources/[a]/source_a/fxmanifest.lua": "fx_version 'cerulean'\nclient_script 'client.lua'\n",
+		"resources/[a]/source_a/client.lua":     "TriggerServerEvent('refresh:test')\n",
+		"resources/[b]/target_b/fxmanifest.lua": "fx_version 'cerulean'\nserver_script 'server.lua'\n",
+		"resources/[b]/target_b/server.lua":     "RegisterNetEvent('refresh:test')\nAddEventHandler('refresh:test', function() end)\n",
+	}
+	contents := map[string][]byte{}
+	languages := map[string]string{}
+	symbols := map[string][]parser.Symbol{}
+	hashes := map[string]string{}
+	var allSymbols []parser.Symbol
+	for path, text := range files {
+		full := filepath.Join(root, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
+			t.Fatal(err)
+		}
+		data := []byte(text)
+		if err := os.WriteFile(full, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if filepath.Ext(path) == ".cfg" {
+			continue
+		}
+		lang := parser.DetectLanguage(path)
+		parsed, err := parser.ParseFile(data, path, lang)
+		if err != nil {
+			t.Fatal(err)
+		}
+		contents[path] = data
+		languages[path] = lang
+		symbols[path] = parsed
+		hashes[path] = workspace.ContentHash(data)
+		allSymbols = append(allSymbols, parsed...)
+	}
+	store, err := storage.NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceRepoIndex("local", "refresh-workspace", "local", "", hashes, languages, allSymbols, root); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID("local/refresh-workspace")
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	d, err := workspace.Discover(root)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if _, err := Index(context.Background(), store, repoID, "local/refresh-workspace", root, contents, languages, symbols, d); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	return store, root, repoID, d, contents, languages, symbols
+}
 
 func TestWorkspaceCrossResourceFactsAndIsolation(t *testing.T) {
 	root := t.TempDir()
@@ -230,5 +294,144 @@ func TestDuplicateResourcePathsDoNotCrossResolveEventsOrExports(t *testing.T) {
 		if rel.Kind == "cross_resource_export" {
 			t.Fatalf("duplicate export target should remain unresolved: %#v", rel)
 		}
+	}
+}
+
+func TestRefreshResourceFailureClearsStaleWorkspaceEdgesAndPreservesUnrelatedFacts(t *testing.T) {
+	store, root, repoID, discovery, contents, languages, symbols := setupWorkspaceRefreshFixture(t)
+	defer func() { _ = store.Close() }()
+	initial, err := store.GetSemanticRelationshipsForAnalyzer(repoID, semantic.AnalyzerFiveMWorkspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(initial) == 0 {
+		t.Fatal("fixture did not create an initial workspace relationship")
+	}
+	original := analyzeResourceFn
+	analyzeResourceFn = func(ctx context.Context, repo string, resource workspace.Resource, files map[string][]byte, languages map[string]string, symbols map[string][]parser.Symbol) (semantic.Result, error) {
+		if resource.Name == "target_b" {
+			return semantic.Result{}, errors.New("synthetic analyzer failure")
+		}
+		return original(ctx, repo, resource, files, languages, symbols)
+	}
+	defer func() { analyzeResourceFn = original }()
+	_, err = RefreshResource(context.Background(), store, repoID, "local/refresh-workspace", root, "resources/[b]/target_b", contents, languages, symbols, discovery)
+	if err == nil {
+		t.Fatal("expected resource analysis failure")
+	}
+	remaining, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sourceTrigger bool
+	for _, entity := range remaining {
+		if entity.Name == "refresh:test" && entity.Kind == "event_trigger" && entity.Metadata["source_resource"] == "source_a" {
+			sourceTrigger = true
+		}
+		if entity.Metadata["source_resource"] == "target_b" {
+			t.Fatalf("failed resource retained FiveM facts: %#v", entity)
+		}
+	}
+	if !sourceTrigger {
+		t.Fatal("unrelated source resource facts were removed")
+	}
+	workspaceRels, err := store.GetSemanticRelationshipsForAnalyzer(repoID, semantic.AnalyzerFiveMWorkspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, relationship := range workspaceRels {
+		if relationship.Kind == "cross_resource_event" {
+			t.Fatalf("stale workspace relationship survived endpoint removal: %#v", workspaceRels)
+		}
+	}
+	info, err := store.GetWorkspace(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Incomplete || info.ResourcesWithoutSemantics == 0 {
+		t.Fatalf("failed resource was not reflected in workspace completeness: %#v", info)
+	}
+}
+
+func TestRefreshWorkspaceConfigurationDoesNotAnalyzeResourcesOrResetCompleteness(t *testing.T) {
+	store, root, repoID, _, _, _, _ := setupWorkspaceRefreshFixture(t)
+	defer func() { _ = store.Close() }()
+	if err := store.UpdateWorkspaceCompleteness(repoID, storage.WorkspaceCompleteness{FilesDiscoveredTotal: 100, FilesIndexed: 99, IndexTruncated: true, Incomplete: true, ResourcesWithSemantics: 1}); err != nil {
+		t.Fatal(err)
+	}
+	original := analyzeResourceFn
+	analyzeResourceFn = func(context.Context, string, workspace.Resource, map[string][]byte, map[string]string, map[string][]parser.Symbol) (semantic.Result, error) {
+		return semantic.Result{}, errors.New("configuration refresh must not analyze source")
+	}
+	defer func() { analyzeResourceFn = original }()
+	if err := os.WriteFile(filepath.Join(root, "server.cfg"), []byte("# ensure source_a\nensure target_b\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	d, err := workspace.Discover(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RefreshWorkspaceConfiguration(store, repoID, "local/refresh-workspace", root, d); err != nil {
+		t.Fatal(err)
+	}
+	info, err := store.GetWorkspace(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.FilesDiscoveredTotal != 100 || info.FilesIndexed != 99 || !info.IndexTruncated || !info.Incomplete {
+		t.Fatalf("configuration refresh changed source completeness metadata: %#v", info)
+	}
+	resources, err := store.GetWorkspaceResources(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, resource := range resources {
+		if resource.Name == "source_a" && resource.EnabledState != "unknown" {
+			t.Fatalf("unexpected config state after commented ensure: %#v", resource)
+		}
+	}
+}
+
+func TestIndexMarksResourceWithoutIndexedManifestAsIncomplete(t *testing.T) {
+	root := t.TempDir()
+	resourceDir := filepath.Join(root, "resources", "app", "missing_manifest")
+	if err := os.MkdirAll(resourceDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "server.cfg"), []byte("ensure missing_manifest\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(resourceDir, "fxmanifest.lua"), []byte("fx_version 'cerulean'"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	if err := store.ReplaceRepoIndex("local", "missing-manifest", "local", "", nil, nil, nil, root); err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID("local/missing-manifest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := workspace.Discover(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := Index(context.Background(), store, repoID, "local/missing-manifest", root, map[string][]byte{}, map[string]string{}, map[string][]parser.Symbol{}, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ResourcesWithSemantics != 0 || result.ResourcesWithoutSemantics != 1 {
+		t.Fatalf("resource coverage was counted without a manifest entity: %#v", result)
+	}
+	info, err := store.GetWorkspace(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Incomplete || info.ResourcesWithoutSemantics != 1 {
+		t.Fatalf("missing manifest coverage was not marked incomplete: %#v", info)
 	}
 }

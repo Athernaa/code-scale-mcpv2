@@ -83,8 +83,11 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 			detectedMode = workspace.KindGeneric
 		}
 		workspaceDiscovery, workspaceDiscoveryErr := workspace.DiscoverWithIgnore(absPath, ignoreMatcher.Ignored)
-		if workspaceDiscoveryErr == nil && workspaceDiscovery.Mode == workspace.KindFiveMWorkspace {
-			detectedMode = workspace.KindFiveMWorkspace
+		if workspaceDiscoveryErr == nil {
+			// Ignore-aware discovery is authoritative. An ignored manifest or
+			// config must not leave the earlier ignore-unaware mode decision in
+			// place.
+			detectedMode = workspaceDiscovery.Mode
 		}
 
 		// Discover files
@@ -279,7 +282,7 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 				semanticCount = wr.FiveMCount
 				workspaceCount = wr.WorkspaceCount
 				workspaceRelationships = wr.RelationshipCount
-				if err := deps.Store.UpdateWorkspaceCompleteness(repoID, storage.WorkspaceCompleteness{FilesDiscoveredTotal: discoveredTotal, FilesIndexed: len(fileHashes), IndexTruncated: indexTruncated, Incomplete: indexTruncated || skippedFiles > 0 || parseFailures > 0, ResourcesWithSemantics: wr.ResourcesWithSemantics, ResourcesWithoutSemantics: wr.ResourcesWithoutSemantics}); err != nil {
+				if err := deps.Store.UpdateWorkspaceCompleteness(repoID, storage.WorkspaceCompleteness{FilesDiscoveredTotal: discoveredTotal, FilesIndexed: len(fileHashes), IndexTruncated: indexTruncated, Incomplete: indexTruncated || skippedFiles > 0 || parseFailures > 0 || wr.ResourcesWithoutSemantics > 0, ResourcesWithSemantics: wr.ResourcesWithSemantics, ResourcesWithoutSemantics: wr.ResourcesWithoutSemantics}); err != nil {
 					diagnostics = append(diagnostics, "workspace completeness: "+err.Error())
 				}
 			}

@@ -73,6 +73,63 @@ func TestDuplicateResourceNamesRemainAmbiguous(t *testing.T) {
 	}
 }
 
+func TestDuplicateResourceEnsureDoesNotMarkEitherResourceEnabled(t *testing.T) {
+	root := t.TempDir()
+	for _, group := range []string{"[a]", "[b]"} {
+		dir := filepath.Join(root, "resources", group, "inventory")
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "fxmanifest.lua"), []byte("fx_version 'cerulean'"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "server.cfg"), []byte("ensure inventory\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	d, err := Discover(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, resource := range d.Resources {
+		if resource.EnabledState != "unknown" || resource.StartOrder != 0 {
+			t.Fatalf("ambiguous ensure assigned definite state: %#v", d.Resources)
+		}
+	}
+	for _, command := range d.Commands {
+		if command.Command == "ensure" && command.Order != 1 {
+			t.Fatalf("ensure order was not retained: %#v", d.Commands)
+		}
+	}
+}
+
+func TestDiscoverWithIgnoreDoesNotUseIgnoredManifestAsWorkspaceEvidence(t *testing.T) {
+	root := t.TempDir()
+	resourceDir := filepath.Join(root, "resources", "ignored")
+	if err := os.MkdirAll(resourceDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(resourceDir, "fxmanifest.lua"), []byte("fx_version 'cerulean'"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ignored := filepath.Join(root, ".gitignore")
+	if err := os.WriteFile(ignored, []byte("resources/ignored/\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	d, err := DiscoverWithIgnore(root, func(path string, isDir bool) bool {
+		if path == ignored {
+			return false
+		}
+		return filepath.Clean(path) == filepath.Clean(resourceDir) || filepath.Clean(filepath.Dir(path)) == filepath.Clean(resourceDir)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Mode != KindGeneric || len(d.Resources) != 0 {
+		t.Fatalf("ignored FiveM evidence still classified workspace: %#v", d)
+	}
+}
+
 func TestConfigExecRejectsTraversalOutsideWorkspace(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "outside.cfg")

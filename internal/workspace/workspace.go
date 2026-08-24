@@ -125,7 +125,8 @@ func discover(root string, ignored func(path string, isDir bool) bool) (Discover
 		d.Resources = append(d.Resources, Resource{Name: namePart, RelativePath: rel, ManifestPath: NormalizePath(filepath.Join(rel, entry.Name())), ManifestType: name, GroupPath: group})
 		return nil
 	})
-	if _, e := os.Stat(filepath.Join(root, "server.cfg")); e == nil {
+	serverConfig := filepath.Join(root, "server.cfg")
+	if _, e := os.Stat(serverConfig); e == nil && (ignored == nil || !ignored(serverConfig, false)) {
 		manifestEvidence = true
 	}
 	if !manifestEvidence {
@@ -158,7 +159,14 @@ func discover(root string, ignored func(path string, isDir bool) bool) (Discover
 			order++
 			c.Order = order
 		}
-		for _, i := range byName[c.Resource] {
+		targets := byName[c.Resource]
+		// A runtime resource name is not enough to identify one resource when
+		// duplicate basenames exist. Keep both states unknown and leave the
+		// command entity unresolved until a unique target is available.
+		if len(targets) != 1 {
+			continue
+		}
+		for _, i := range targets {
 			switch c.Command {
 			case "ensure", "start", "restart":
 				d.Resources[i].EnabledState = "enabled"
