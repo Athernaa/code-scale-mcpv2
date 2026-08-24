@@ -16,6 +16,11 @@ const (
 
 	FrameworkCustom  = "custom"
 	FrameworkUnknown = "unknown"
+
+	ProviderStatusLocalVerified  = "local_verified"
+	ProviderStatusLocalMissing   = "local_api_missing"
+	ProviderStatusLocalAmbiguous = "local_ambiguous"
+	ProviderStatusExternal       = "external_unverified"
 )
 
 // FailureStatus is a compact persisted distinction between a resource with

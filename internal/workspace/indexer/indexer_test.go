@@ -262,6 +262,27 @@ func TestFrameworkAnalysisFailureIsResourceScoped(t *testing.T) {
 	if incomplete, err := store.GetWorkspace(repoID); err != nil || !incomplete.Incomplete {
 		t.Fatalf("workspace failure state was not marked incomplete: %#v err=%v", incomplete, err)
 	}
+	analyzeFrameworkFn = original
+	if _, err := Index(context.Background(), store, repoID, "local/refresh-workspace", root, contents, languages, symbols, discovery); err != nil {
+		t.Fatal(err)
+	}
+	if recovered, err := store.GetWorkspace(repoID); err != nil || recovered.Incomplete {
+		t.Fatalf("framework failure did not self-heal: %#v err=%v", recovered, err)
+	}
+	for _, fact := range mustFrameworkFacts(t, store, repoID) {
+		if fact.Kind == framework.KindStatus {
+			t.Fatalf("framework failure status survived recovery: %#v", fact)
+		}
+	}
+}
+
+func mustFrameworkFacts(t *testing.T, store *storage.IndexStore, repoID int64) []semantic.Entity {
+	t.Helper()
+	facts, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFramework)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return facts
 }
 
 func TestDuplicateResourcePathsDoNotCrossResolveEventsOrExports(t *testing.T) {

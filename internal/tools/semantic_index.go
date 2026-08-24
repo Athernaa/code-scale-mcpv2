@@ -51,6 +51,7 @@ func indexSemanticRepository(
 		Repo: repo, Resource: resource, SourceType: sourceType,
 		Files: files, Languages: languages, Symbols: symbols,
 		SemanticEntities: result.Entities,
+		ResourceRegistry: []semantic.ResourceIdentity{{Name: resource, Path: resource, ID: semantic.StableID("workspace_resource", repo, resource)}},
 	})
 	if frameworkErr != nil {
 		status := framework.FailureStatus(repo, resource, resource)
@@ -59,6 +60,7 @@ func indexSemanticRepository(
 		}
 		return 0, frameworkErr
 	}
+	frameworkResult = framework.RebuildFacts(repo, frameworkResult.Entities, []semantic.ResourceIdentity{{Name: resource, Path: resource, ID: semantic.StableID("workspace_resource", repo, resource)}})
 	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, frameworkResult); err != nil {
 		return 0, err
 	}

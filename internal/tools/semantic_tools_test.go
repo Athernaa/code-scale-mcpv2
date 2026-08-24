@@ -246,6 +246,9 @@ func TestFrameworkSearchTraceAndImpactExposeOwnerAndProvider(t *testing.T) {
 	if from["resource"] != "app" || to["resource"] != "core" {
 		t.Fatalf("trace owner/target resources incorrect: %#v", trace)
 	}
+	if from["framework"] != "custom" || to["framework"] != "custom" {
+		t.Fatalf("trace framework bridge incorrect: %#v", trace)
+	}
 	impactResult, _, err := AnalyzeImpactHandler(deps)(context.Background(), nil, AnalyzeImpactArgs{Repo: provider.Repo, EntityID: provider.ID, Depth: 1, MaxResults: 10})
 	if err != nil {
 		t.Fatal(err)

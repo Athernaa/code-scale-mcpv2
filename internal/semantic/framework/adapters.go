@@ -52,7 +52,9 @@ func (qbxAdapter) CallOperation(framework, api string, args []literalValue) (str
 		return "", nil, false
 	}
 	switch api {
-	case "GetPlayer", "GetCoreObject":
+	case "GetCoreObject":
+		return mapOperation("framework_object_acquire", nil)
+	case "GetPlayer":
 		return mapOperation("player_lookup", nil)
 	case "SetJob":
 		return mapOperation("player_job_set", jobMetadata(args))
@@ -80,7 +82,9 @@ func (qbcoreAdapter) CallOperation(framework, api string, args []literalValue) (
 		return "", nil, false
 	}
 	switch api {
-	case "GetCoreObject", "GetPlayer":
+	case "GetCoreObject":
+		return mapOperation("framework_object_acquire", nil)
+	case "GetPlayer":
 		return mapOperation("player_lookup", nil)
 	case "AddMoney":
 		return mapOperation("player_money_add", moneyMetadata(args))
@@ -108,7 +112,9 @@ func (esxAdapter) CallOperation(framework, api string, args []literalValue) (str
 		return "", nil, false
 	}
 	switch api {
-	case "getSharedObject", "GetPlayerFromId":
+	case "getSharedObject":
+		return mapOperation("framework_object_acquire", nil)
+	case "GetPlayerFromId":
 		return mapOperation("player_lookup", nil)
 	case "addMoney", "addAccountMoney":
 		return mapOperation("player_money_add", moneyMetadata(args))
@@ -133,7 +139,10 @@ func (oxInventoryAdapter) ProviderFramework(resource string, apis map[string]boo
 			known++
 		}
 	}
-	return "ox_inventory", known >= 2
+	// A literal locally implemented stock API is enough to verify that
+	// particular API. The local surface, not the basename alone, remains the
+	// gate; custom-only resources named ox_inventory still classify custom.
+	return "ox_inventory", known >= 1
 }
 func (oxInventoryAdapter) CallOperation(framework, api string, args []literalValue) (string, map[string]any, bool) {
 	if framework != "ox_inventory" {
@@ -163,7 +172,7 @@ func (oxLibAdapter) ProviderFramework(resource string, apis map[string]bool, evi
 	if !knownResource(resource, "ox_lib") {
 		return "", false
 	}
-	for _, api := range []string{"notify", "progressBar", "progressCircle", "showContext", "inputDialog", "callback"} {
+	for _, api := range []string{"notify", "progressBar", "progressCircle", "registerContext", "showContext", "inputDialog", "callback"} {
 		if apis[api] {
 			return "ox_lib", true
 		}
@@ -183,8 +192,10 @@ func (oxLibAdapter) CallOperation(framework, api string, args []literalValue) (s
 		return mapOperation("notification", nil)
 	case "progressBar", "progressCircle":
 		return mapOperation("progress_ui", nil)
-	case "showContext":
+	case "registerContext":
 		return mapOperation("context_menu_register", nil)
+	case "showContext":
+		return mapOperation("context_menu_show", nil)
 	case "inputDialog":
 		return mapOperation("input_dialog", nil)
 	}

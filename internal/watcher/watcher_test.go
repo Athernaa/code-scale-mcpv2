@@ -991,6 +991,13 @@ func TestWatcherWorkspaceManifestLifecycleAndCfgRefresh(t *testing.T) {
 	if err != nil || len(fiveM) == 0 {
 		t.Fatalf("manifest addition did not activate resource semantics: %#v err=%v", fiveM, err)
 	}
+	originalFrameworkAnalyzer := analyzeFrameworkFn
+	frameworkCalls := 0
+	analyzeFrameworkFn = func(ctx context.Context, input semantic.RepositoryInput) (semantic.Result, error) {
+		frameworkCalls++
+		return originalFrameworkAnalyzer(ctx, input)
+	}
+	defer func() { analyzeFrameworkFn = originalFrameworkAnalyzer }()
 	if err := os.WriteFile(filepath.Join(root, "server.cfg"), []byte("# ensure resource_x\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -998,6 +1005,9 @@ func TestWatcherWorkspaceManifestLifecycleAndCfgRefresh(t *testing.T) {
 	resources, err := store.GetWorkspaceResources(repoID)
 	if err != nil || len(resources) != 1 || resources[0].EnabledState != "unknown" {
 		t.Fatalf("cfg refresh did not update enabled state: %#v err=%v", resources, err)
+	}
+	if frameworkCalls != 0 {
+		t.Fatalf("cfg-only refresh invoked framework source analysis %d times", frameworkCalls)
 	}
 	if err := os.Remove(manifestPath); err != nil {
 		t.Fatal(err)

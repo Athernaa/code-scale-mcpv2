@@ -161,6 +161,18 @@ end
 	if !money || fake {
 		t.Fatalf("QBCore lineage or shadowing incorrect: money=%v fake=%v facts=%#v", money, fake, result.Entities)
 	}
+	byName := map[string]semantic.Entity{}
+	for _, entity := range result.Entities {
+		if entity.Kind == KindAPICall {
+			byName[entity.Name+":"+entity.Metadata["mechanism"].(string)] = entity
+		}
+	}
+	if byName["GetPlayer:object_method"].Metadata["origin_factory_id"] != byName["GetCoreObject:export"].ID {
+		t.Fatalf("GetPlayer did not retain exact core factory identity: %#v", byName)
+	}
+	if byName["AddMoney:object_method"].Metadata["origin_factory_id"] != byName["GetPlayer:object_method"].ID {
+		t.Fatalf("AddMoney did not retain exact player factory identity: %#v", byName)
+	}
 }
 
 func TestOxLibRequiresManifestEvidence(t *testing.T) {
@@ -229,8 +241,14 @@ func TestKnownAdapterOperationMappings(t *testing.T) {
 	cases := []struct {
 		name, target, api, operation string
 	}{
+		{"qbx_core_object", "qbx_core", "GetCoreObject", "framework_object_acquire"},
 		{"qbx", "qbx_core", "GetPlayer", "player_lookup"},
+		{"qbcore_object", "qb-core", "GetCoreObject", "framework_object_acquire"},
+		{"qbcore", "qb-core", "GetPlayer", "player_lookup"},
+		{"esx_object", "es_extended", "getSharedObject", "framework_object_acquire"},
 		{"esx", "es_extended", "GetPlayerFromId", "player_lookup"},
+		{"ox_lib_register", "ox_lib", "registerContext", "context_menu_register"},
+		{"ox_lib_show", "ox_lib", "showContext", "context_menu_show"},
 		{"ox_target", "ox_target", "addGlobalEntity", "interaction_register"},
 	}
 	for _, tc := range cases {
@@ -245,6 +263,128 @@ func TestKnownAdapterOperationMappings(t *testing.T) {
 			t.Fatalf("adapter %s did not normalize %s: %#v", tc.name, tc.api, result.Entities)
 		})
 	}
+}
+
+func TestRebuildFactsGatesKnownOperationsByLocalResourceRegistry(t *testing.T) {
+	provider := semantic.Entity{Analyzer: semantic.AnalyzerFramework, Repo: "r", File: "inventory/api.lua", Kind: KindAPIProvider, Name: "CustomInventoryAPI", Framework: FrameworkCustom, Metadata: map[string]any{"provider_resource": "ox_inventory", "provider_resource_path": "inventory"}}
+	call := semantic.Entity{Analyzer: semantic.AnalyzerFramework, Repo: "r", File: "app.lua", Kind: KindAPICall, Name: "AddItem", Framework: "ox_inventory", Metadata: map[string]any{"source_resource": "app", "source_resource_path": "app", "target_resource": "ox_inventory", "api": "AddItem", "mechanism": "export", "operation": "inventory_add_item"}}
+	result := RebuildFacts("r", []semantic.Entity{provider, call}, []semantic.ResourceIdentity{{Name: "app", Path: "app"}, {Name: "ox_inventory", Path: "inventory"}})
+	for _, entity := range result.Entities {
+		if entity.Kind == KindAPICall && entity.Name == "AddItem" {
+			if entity.Metadata["provider_status"] != ProviderStatusLocalMissing || entity.Metadata["operation"] != nil || entity.Metadata["provider_verified"] == true {
+				t.Fatalf("missing local API remained authoritative: %#v", entity)
+			}
+		}
+		if entity.Kind == KindOperation {
+			t.Fatalf("missing local API produced operation: %#v", entity)
+		}
+	}
+	if len(result.Relationships) != 0 {
+		t.Fatalf("missing local API produced relationship: %#v", result.Relationships)
+	}
+}
+
+func TestRebuildFactsDistinguishesExternalAndDuplicateProviders(t *testing.T) {
+	externalCall := semantic.Entity{Analyzer: semantic.AnalyzerFramework, Repo: "r", File: "app.lua", Kind: KindAPICall, Name: "AddItem", Framework: "ox_inventory", Metadata: map[string]any{"source_resource": "app", "target_resource": "ox_inventory", "api": "AddItem", "mechanism": "export", "operation": "inventory_add_item"}}
+	external := RebuildFacts("r", []semantic.Entity{externalCall}, []semantic.ResourceIdentity{{Name: "app", Path: "app"}})
+	if hasFrameworkCallRelationship(external.Relationships) || !hasFactWithStatus(external.Entities, ProviderStatusExternal) {
+		t.Fatalf("external provider was not retained as unverified: %#v", external)
+	}
+
+	providerA := semantic.Entity{Analyzer: semantic.AnalyzerFramework, Repo: "r", File: "a.lua", Kind: KindAPIProvider, Name: "GetItem", Metadata: map[string]any{"provider_resource": "inventory", "provider_resource_path": "resources/[a]/inventory"}}
+	providerB := semantic.Entity{Analyzer: semantic.AnalyzerFramework, Repo: "r", File: "b.lua", Kind: KindAPIProvider, Name: "OtherAPI", Metadata: map[string]any{"provider_resource": "inventory", "provider_resource_path": "resources/[b]/inventory"}}
+	duplicateCall := semantic.Entity{Analyzer: semantic.AnalyzerFramework, Repo: "r", File: "caller.lua", Kind: KindAPICall, Name: "GetItem", Metadata: map[string]any{"source_resource": "caller", "target_resource": "inventory", "api": "GetItem", "mechanism": "export"}}
+	duplicate := RebuildFacts("r", []semantic.Entity{providerA, providerB, duplicateCall}, []semantic.ResourceIdentity{{Name: "inventory", Path: "resources/[a]/inventory"}, {Name: "inventory", Path: "resources/[b]/inventory"}, {Name: "caller", Path: "resources/[app]/caller"}})
+	for _, entity := range duplicate.Entities {
+		if entity.Kind == KindAPICall && (entity.Metadata["provider_verified"] == true || entity.Metadata["provider_ambiguous"] != true) {
+			t.Fatalf("duplicate runtime name was treated as unique: %#v", entity)
+		}
+	}
+	if len(duplicate.Relationships) != 0 {
+		t.Fatalf("duplicate runtime name produced relationship: %#v", duplicate.Relationships)
+	}
+}
+
+func TestAnonymousLuaScopesPreserveShadowingAndCapture(t *testing.T) {
+	files := map[string][]byte{
+		"fxmanifest.lua": []byte("fx_version 'cerulean'\nserver_script 'main.lua'\n"),
+		"main.lua":       []byte("local Core = exports.banana:GetContext(source)\nRegisterNetEvent('shadow', function(Core)\n    Core:SetFlag('shadow', true)\nend)\nRegisterNetEvent('capture', function()\n    Core:SetFlag('captured', true)\nend)\n"),
+	}
+	result := analyzeFixture(t, "banana", files, []semantic.Entity{manifest("banana"), exportDefinition("banana", "main.lua", "GetContext", 1)})
+	shadowed, captured := 0, 0
+	for _, entity := range result.Entities {
+		if entity.Kind != KindAPICall || entity.Name != "SetFlag" {
+			continue
+		}
+		if entity.Metadata["target_resource"] == "banana" {
+			for _, relationship := range result.Relationships {
+				if relationship.FromEntityID != entity.ID || relationship.Kind != RelationshipObjectCall {
+					continue
+				}
+				if entity.Line == 3 {
+					shadowed++
+				}
+				if entity.Line == 6 {
+					captured++
+				}
+			}
+		}
+	}
+	if shadowed != 0 || captured != 1 {
+		t.Fatalf("anonymous scope shadow/capture incorrect: shadowed=%d captured=%d facts=%#v relationships=%#v", shadowed, captured, result.Entities, result.Relationships)
+	}
+}
+
+func TestFrameworkSideComesFromManifestFileEvidence(t *testing.T) {
+	files := map[string][]byte{"fxmanifest.lua": []byte("fx_version 'cerulean'\nclient_script 'client.lua'\nserver_script 'server.lua'\nshared_script 'shared.lua'\n"), "client.lua": []byte("exports.unknown:ClientAPI()\n"), "server.lua": []byte("exports.unknown:ServerAPI()\n"), "shared.lua": []byte("exports.unknown:SharedAPI()\n")}
+	fact := manifest("app")
+	fact.Metadata["file_sides"] = map[string]string{"client.lua": "client", "server.lua": "server", "shared.lua": "shared"}
+	result := analyzeFixture(t, "app", files, []semantic.Entity{fact})
+	sides := map[string]string{}
+	for _, entity := range result.Entities {
+		if entity.Kind == KindAPICall {
+			sides[entity.File] = entity.Side
+		}
+	}
+	if sides["client.lua"] != "client" || sides["server.lua"] != "server" || sides["shared.lua"] != "shared" {
+		t.Fatalf("manifest sides were not preserved: %#v", sides)
+	}
+}
+
+func TestSameLineFrameworkOperationsUseBackingCallIdentity(t *testing.T) {
+	files := map[string][]byte{"fxmanifest.lua": []byte("fx_version 'cerulean'\nclient_script 'client.lua'\n"), "client.lua": []byte("exports.ox_inventory:AddItem(source, 'water', 1); exports.ox_inventory:AddItem(source, 'water', 2)\n")}
+	result := analyzeFixture(t, "app", files, []semantic.Entity{manifest("app")})
+	calls := map[string]bool{}
+	operations := map[string]bool{}
+	for _, entity := range result.Entities {
+		if entity.Kind == KindAPICall && entity.Name == "AddItem" {
+			calls[entity.ID] = true
+		}
+		if entity.Kind == KindOperation && entity.Name == "inventory_add_item" {
+			operations[entity.ID] = true
+		}
+	}
+	if len(calls) != 2 || len(operations) != 2 {
+		t.Fatalf("same-line calls or operations collided: calls=%d operations=%d facts=%#v", len(calls), len(operations), result.Entities)
+	}
+}
+
+func hasFactWithStatus(entities []semantic.Entity, status string) bool {
+	for _, entity := range entities {
+		if entity.Metadata["provider_status"] == status {
+			return true
+		}
+	}
+	return false
+}
+
+func hasFrameworkCallRelationship(relationships []semantic.Relationship) bool {
+	for _, relationship := range relationships {
+		if relationship.Kind == RelationshipFrameworkCalls {
+			return true
+		}
+	}
+	return false
 }
 
 func analyzeFixture(t *testing.T, resource string, files map[string][]byte, facts []semantic.Entity) semantic.Result {

@@ -83,6 +83,18 @@ type RepositoryInput struct {
 	Languages        map[string]string
 	Symbols          map[string][]parser.Symbol
 	SemanticEntities []Entity
+	// ResourceRegistry contains every discovered runtime resource identity in
+	// the current workspace. It is optional for standalone repositories, but
+	// when present it is authoritative for duplicate-name ambiguity.
+	ResourceRegistry []ResourceIdentity
+}
+
+// ResourceIdentity separates a FiveM runtime resource name from its unique
+// workspace/path identity. Runtime names are not unique in a workspace.
+type ResourceIdentity struct {
+	Name string
+	Path string
+	ID   string
 }
 
 // Result contains semantic facts produced by an analyzer.

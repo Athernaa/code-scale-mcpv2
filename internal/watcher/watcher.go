@@ -29,6 +29,12 @@ import (
 
 const debounceInterval = 500 * time.Millisecond
 
+// analyzeFrameworkFn is a test seam for proving that metadata-only watcher
+// updates do not reparse framework source.
+var analyzeFrameworkFn = func(ctx context.Context, input semantic.RepositoryInput) (semantic.Result, error) {
+	return framework.NewAnalyzer().AnalyzeRepository(ctx, input)
+}
+
 // FolderWatch tracks a single watched folder. Persisted watches intentionally
 // retain only the path and repository. The watcher reloads repository
 // .gitignore rules, but per-call extra ignore patterns are not persisted
@@ -694,13 +700,14 @@ func (m *Manager) refreshWorkspaceResource(root, repo, resourcePath string) erro
 	fiveMErr := error(nil)
 	_, fiveMErr = workspaceindex.RefreshResource(context.Background(), m.store, repoID, repo, root, resourcePath, contents, languages, symbols, discovery)
 	frameworkErr := m.refreshFrameworkResource(repoID, repo, root, resourcePath, contents, languages, symbols, discovery)
+	coverageErr := m.updateWorkspaceCoverage(root, repoID)
 	if fiveMErr != nil {
 		return fiveMErr
 	}
 	if frameworkErr != nil {
 		return frameworkErr
 	}
-	return m.updateWorkspaceCoverage(root, repoID)
+	return coverageErr
 }
 
 // refreshFrameworkResource reparses only the changed resource for framework
@@ -728,8 +735,8 @@ func (m *Manager) refreshFrameworkResource(repoID int64, repo, root, resourcePat
 			resourceFacts = append(resourceFacts, fact)
 		}
 	}
-	input := semantic.RepositoryInput{Repo: repo, Resource: resource.Name, SourceType: "local", Files: files, Languages: languages, Symbols: symbols, SemanticEntities: resourceFacts}
-	result, analysisErr := framework.NewAnalyzer().AnalyzeRepository(context.Background(), input)
+	input := semantic.RepositoryInput{Repo: repo, Resource: resource.Name, SourceType: "local", Files: files, Languages: languages, Symbols: symbols, SemanticEntities: resourceFacts, ResourceRegistry: resourceRegistryFromDiscovery(repo, discovery)}
+	result, analysisErr := analyzeFrameworkFn(context.Background(), input)
 	if analysisErr != nil {
 		if clearErr := m.store.ReplaceSemanticResourceForAnalyzer(repoID, semantic.AnalyzerFramework, resourcePath, semantic.Result{}); clearErr != nil {
 			return fmt.Errorf("framework resource analysis failed: %v; clearing stale facts failed: %w", analysisErr, clearErr)
@@ -739,7 +746,7 @@ func (m *Manager) refreshFrameworkResource(repoID int64, repo, root, resourcePat
 			return getErr
 		}
 		all = append(all, framework.FailureStatus(repo, resource.Name, resourcePath))
-		rebuilt := framework.RebuildFacts(repo, all)
+		rebuilt := framework.RebuildFacts(repo, all, resourceRegistryFromDiscovery(repo, discovery))
 		if replaceErr := m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, rebuilt); replaceErr != nil {
 			return replaceErr
 		}
@@ -752,8 +759,16 @@ func (m *Manager) refreshFrameworkResource(repoID int64, repo, root, resourcePat
 	if err != nil {
 		return err
 	}
-	rebuilt := framework.RebuildFacts(repo, all)
+	rebuilt := framework.RebuildFacts(repo, all, resourceRegistryFromDiscovery(repo, discovery))
 	return m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, rebuilt)
+}
+
+func resourceRegistryFromDiscovery(repo string, discovery workspace.Discovery) []semantic.ResourceIdentity {
+	result := make([]semantic.ResourceIdentity, 0, len(discovery.Resources))
+	for _, resource := range discovery.Resources {
+		result = append(result, semantic.ResourceIdentity{Name: resource.Name, Path: resource.RelativePath, ID: semantic.StableID("workspace_resource", repo, resource.RelativePath)})
+	}
+	return result
 }
 
 func (m *Manager) refreshWorkspaceConfiguration(root, repo string) error {
@@ -769,7 +784,10 @@ func (m *Manager) refreshWorkspaceConfiguration(root, repo string) error {
 		return err
 	}
 	_, err = workspaceindex.RefreshWorkspaceConfiguration(m.store, repoID, repo, root, discovery)
-	return err
+	if err != nil {
+		return err
+	}
+	return m.updateWorkspaceCoverage(root, repoID)
 }
 
 func (m *Manager) rebuildWorkspace(root, repo string) error {
@@ -848,11 +866,22 @@ func (m *Manager) updateWorkspaceCoverage(root string, repoID int64) error {
 		}
 		return err
 	}
+	frameworkFacts, err := m.store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFramework)
+	if err != nil {
+		return err
+	}
+	frameworkDegraded := false
+	for _, fact := range frameworkFacts {
+		if fact.Kind == framework.KindStatus {
+			frameworkDegraded = true
+			break
+		}
+	}
 	return m.store.UpdateWorkspaceCompleteness(repoID, storage.WorkspaceCompleteness{
 		FilesDiscoveredTotal:      len(discovered),
 		FilesIndexed:              len(indexed),
 		IndexTruncated:            previous.IndexTruncated,
-		Incomplete:                previous.IndexTruncated || !completeCoverage || previous.ResourcesWithoutSemantics > 0,
+		Incomplete:                previous.IndexTruncated || !completeCoverage || previous.ResourcesWithoutSemantics > 0 || frameworkDegraded,
 		ResourcesWithSemantics:    previous.ResourcesWithSemantics,
 		ResourcesWithoutSemantics: previous.ResourcesWithoutSemantics,
 	})
@@ -1022,7 +1051,7 @@ func (m *Manager) rebuildFrameworkRepository(repoID int64, repo, resource string
 	if err != nil {
 		return err
 	}
-	result, err := framework.NewAnalyzer().AnalyzeRepository(context.Background(), input)
+	result, err := analyzeFrameworkFn(context.Background(), input)
 	if err != nil {
 		clearErr := m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, semantic.Result{})
 		if clearErr != nil {
@@ -1030,6 +1059,7 @@ func (m *Manager) rebuildFrameworkRepository(repoID int64, repo, resource string
 		}
 		return err
 	}
+	result = framework.RebuildFacts(repo, result.Entities, []semantic.ResourceIdentity{{Name: resource, Path: resource, ID: semantic.StableID("workspace_resource", repo, resource)}})
 	return m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, result)
 }
 

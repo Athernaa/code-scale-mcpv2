@@ -13,12 +13,13 @@ import (
 )
 
 type luaAssignment struct {
-	name, rhs string
-	start     uint32
+	name, rhs       string
+	start, rhsStart uint32
 }
 type luaScope struct {
 	start, end  uint32
 	parent      *luaScope
+	repo, file  string
 	params      map[string]bool
 	assignments []luaAssignment
 }
@@ -40,7 +41,7 @@ func (a *Analyzer) analyzeLuaFile(ctx context.Context, input semantic.FileInput,
 	if owner.name == "" {
 		owner.name = input.Repo
 	}
-	scopes := buildLuaScopes(root, input.Content)
+	scopes := buildLuaScopes(root, input.Content, input.Repo, input.File)
 	var result semantic.Result
 	walkLua(root, func(node *sitter.Node) {
 		if node.Type() != "function_call" {
@@ -104,6 +105,9 @@ func (s *analysisState) newCall(input semantic.FileInput, owner resourceOwner, n
 	}
 	if owner.path == "" {
 		owner.path = owner.name
+	}
+	if owner.id == "" {
+		owner.id = semantic.StableID("workspace_resource", input.Repo, owner.path)
 	}
 	metadata := map[string]any{
 		"source_resource": owner.name, "source_resource_path": owner.path, "source_resource_id": owner.id,
@@ -205,15 +209,21 @@ func (s *analysisState) shadowed(scope *luaScope, name string, position uint32) 
 	return false
 }
 
-func buildLuaScopes(root *sitter.Node, source []byte) []*luaScope {
-	rootScope := &luaScope{start: 0, end: uint32(len(source)), params: map[string]bool{}}
+func buildLuaScopes(root *sitter.Node, source []byte, repo, file string) []*luaScope {
+	rootScope := &luaScope{start: 0, end: uint32(len(source)), repo: repo, file: file, params: map[string]bool{}}
 	scopes := []*luaScope{rootScope}
+	seenFunctions := map[string]bool{}
 	walkLua(root, func(node *sitter.Node) {
-		if node.Type() != "function_statement" {
+		if node.Type() != "function_statement" && node.Type() != "function_definition" && node.Type() != "function" {
 			return
 		}
+		key := strconv.FormatUint(uint64(node.StartByte()), 10) + ":" + strconv.FormatUint(uint64(node.EndByte()), 10)
+		if seenFunctions[key] {
+			return
+		}
+		seenFunctions[key] = true
 		parent := scopeFor(scopes, node.StartByte())
-		scope := &luaScope{start: node.StartByte(), end: node.EndByte(), parent: parent, params: map[string]bool{}}
+		scope := &luaScope{start: node.StartByte(), end: node.EndByte(), parent: parent, repo: repo, file: file, params: map[string]bool{}}
 		if params := node.ChildByFieldName("parameters"); params != nil {
 			walkLua(params, func(child *sitter.Node) {
 				if child.Type() == "identifier" {
@@ -251,7 +261,12 @@ func buildLuaScopes(root *sitter.Node, source []byte) []*luaScope {
 			return
 		}
 		parent := scopeFor(scopes, node.StartByte())
-		parent.assignments = append(parent.assignments, luaAssignment{name: name, rhs: strings.TrimSpace(text[eq+1:]), start: node.StartByte()})
+		rhs := strings.TrimSpace(text[eq+1:])
+		rhsStart := node.StartByte() + uint32(eq+1)
+		for rhsStart < node.EndByte() && (source[rhsStart] == ' ' || source[rhsStart] == '\t' || source[rhsStart] == '\r' || source[rhsStart] == '\n') {
+			rhsStart++
+		}
+		parent.assignments = append(parent.assignments, luaAssignment{name: name, rhs: rhs, start: node.StartByte(), rhsStart: rhsStart})
 	})
 	return scopes
 }
@@ -273,7 +288,7 @@ func resolveBinding(scope *luaScope, name string, position uint32, visiting map[
 			if assignment.name != name || assignment.start > position {
 				continue
 			}
-			next := parseOrigin(assignment.rhs, current, assignment.start, visiting)
+			next := parseOrigin(assignment.rhs, current, assignment.start, assignment.rhsStart, visiting)
 			if !seen {
 				found, seen = next, true
 				continue
@@ -290,13 +305,17 @@ func resolveBinding(scope *luaScope, name string, position uint32, visiting map[
 }
 
 func sameOrigin(left, right origin) bool {
-	return left.Valid && right.Valid && !left.Ambiguous && !right.Ambiguous && left.Resource == right.Resource && left.Framework == right.Framework && left.FactoryAPI == right.FactoryAPI
+	return left.Valid && right.Valid && !left.Ambiguous && !right.Ambiguous && left.Resource == right.Resource && left.Framework == right.Framework && left.FactoryAPI == right.FactoryAPI && left.FactoryID == right.FactoryID
 }
 
-func parseOrigin(value string, scope *luaScope, position uint32, visiting map[string]bool) origin {
+func parseOrigin(value string, scope *luaScope, position, rhsStart uint32, visiting map[string]bool) origin {
 	value = strings.TrimSpace(value)
 	if resource, api, ok := parseExportCallee(value); ok {
-		return origin{Resource: resource, FactoryAPI: api, Valid: true}
+		factoryID := ""
+		if scope != nil && scope.repo != "" && scope.file != "" {
+			factoryID = semantic.StableID("framework_call", scope.repo, scope.file, "export", api, strconv.Itoa(int(rhsStart)))
+		}
+		return origin{Resource: resource, FactoryAPI: api, FactoryID: factoryID, Valid: true}
 	}
 	if isIdentifier(value) {
 		return resolveBinding(scope, value, position, visiting)
@@ -310,6 +329,9 @@ func parseOrigin(value string, scope *luaScope, position uint32, visiting map[st
 		parent := resolveBinding(scope, baseName, position, visiting)
 		if parent.Valid && !parent.Ambiguous {
 			parent.FactoryAPI = member
+			if scope != nil && scope.repo != "" && scope.file != "" {
+				parent.FactoryID = semantic.StableID("framework_call", scope.repo, scope.file, "object_method", member, strconv.Itoa(int(rhsStart)))
+			}
 			return parent
 		}
 	}
