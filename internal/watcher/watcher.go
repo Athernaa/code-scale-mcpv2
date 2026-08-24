@@ -16,6 +16,7 @@ import (
 	"github.com/Athernaa/code-scale-mcpv2/internal/security"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/fivem"
+	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/generic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 	"github.com/Athernaa/code-scale-mcpv2/internal/summarizer"
 	"github.com/fsnotify/fsnotify"
@@ -333,15 +334,29 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 			log.Printf("watcher: file removed %s, cleaning index", relPath)
 			if err := m.store.DeleteFileFromIndex(owner, repoName, relPath); err != nil {
 				log.Printf("watcher: failed to remove %s from index: %v", relPath, err)
-			} else if relPath == "fxmanifest.lua" || relPath == "__resource.lua" {
+			} else {
 				repoID, repoErr := m.store.GetRepoID(owner + "/" + repoName)
-				if repoErr == nil {
+				if repoErr != nil {
+					log.Printf("watcher: cannot refresh semantic graph after removing %s: %v", relPath, repoErr)
+				} else if relPath == "fxmanifest.lua" || relPath == "__resource.lua" {
+					_ = m.store.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerGenericGraph, relPath, nil)
 					if rebuildErr := m.rebuildSemanticRepository(repoID, owner+"/"+repoName, resourceName); rebuildErr != nil {
-						log.Printf("watcher: failed to clear semantic resource after removing %s: %v", relPath, rebuildErr)
+						log.Printf("watcher: failed to clear FiveM semantics after removing %s: %v", relPath, rebuildErr)
+					}
+				} else {
+					if graphErr := m.store.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerFiveM, relPath, nil); graphErr != nil {
+						log.Printf("watcher: failed to remove FiveM semantics for %s: %v", relPath, graphErr)
+					}
+					if graphErr := m.store.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerGenericGraph, relPath, nil); graphErr != nil {
+						log.Printf("watcher: failed to remove generic graph facts for %s: %v", relPath, graphErr)
+					}
+					if graphErr := m.refreshSemanticRelationships(owner + "/" + repoName); graphErr != nil {
+						log.Printf("watcher: failed to refresh FiveM relationships: %v", graphErr)
+					}
+					if graphErr := m.refreshGenericRelationships(owner + "/" + repoName); graphErr != nil {
+						log.Printf("watcher: failed to refresh generic relationships: %v", graphErr)
 					}
 				}
-			} else if err := m.refreshSemanticRelationships(owner + "/" + repoName); err != nil {
-				log.Printf("watcher: failed to refresh semantic relationships after removing %s: %v", relPath, err)
 			}
 			continue
 		}
@@ -387,6 +402,9 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 		if err := m.updateSemanticFile(owner+"/"+repoName, resourceName, relPath, lang, content, symbols); err != nil {
 			log.Printf("watcher: semantic update failed for %s: %v", relPath, err)
 		}
+		if err := m.updateGenericFile(owner+"/"+repoName, relPath, lang, content, symbols); err != nil {
+			log.Printf("watcher: generic graph update failed for %s: %v", relPath, err)
+		}
 
 		log.Printf("watcher: reindexed %s (%d symbols)", relPath, len(symbols))
 	}
@@ -400,7 +418,7 @@ func (m *Manager) updateSemanticFile(repo, resource, filePath, language string, 
 	if filePath == "fxmanifest.lua" || filePath == "__resource.lua" {
 		return m.rebuildSemanticRepository(repoID, repo, resource)
 	}
-	entities, err := m.store.GetSemanticEntities(repoID)
+	entities, err := m.store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM)
 	if err != nil {
 		return err
 	}
@@ -414,7 +432,7 @@ func (m *Manager) updateSemanticFile(repo, resource, filePath, language string, 
 		}
 	}
 	if !manifestFound {
-		return m.store.ReplaceSemanticIndex(repoID, semantic.Result{})
+		return m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, semantic.Result{})
 	}
 	result, err := fivem.NewAnalyzer().AnalyzeFile(context.Background(), semantic.FileInput{
 		Repo: repo, Resource: resource, File: filePath, Language: language,
@@ -423,7 +441,7 @@ func (m *Manager) updateSemanticFile(repo, resource, filePath, language string, 
 	if err != nil {
 		return err
 	}
-	if err := m.store.ReplaceSemanticFile(repoID, filePath, result.Entities); err != nil {
+	if err := m.store.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerFiveM, filePath, result.Entities); err != nil {
 		return err
 	}
 	return m.refreshSemanticRelationships(repo)
@@ -434,11 +452,40 @@ func (m *Manager) refreshSemanticRelationships(repo string) error {
 	if err != nil {
 		return err
 	}
-	entities, err := m.store.GetSemanticEntities(repoID)
+	entities, err := m.store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM)
 	if err != nil {
 		return err
 	}
-	return m.store.ReplaceSemanticRelationships(repoID, fivem.ResolveRelationships(entities))
+	return m.store.ReplaceSemanticRelationshipsForAnalyzer(repoID, semantic.AnalyzerFiveM, fivem.ResolveRelationships(entities))
+}
+
+func (m *Manager) updateGenericFile(repo, filePath, language string, content []byte, symbols []parser.Symbol) error {
+	repoID, err := m.store.GetRepoID(repo)
+	if err != nil {
+		return err
+	}
+	result, err := generic.NewAnalyzer().AnalyzeFile(context.Background(), semantic.FileInput{
+		Repo: repo, File: filePath, Language: language, Content: content, Symbols: symbols,
+	})
+	if err != nil {
+		return err
+	}
+	if err := m.store.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerGenericGraph, filePath, result.Entities); err != nil {
+		return err
+	}
+	return m.refreshGenericRelationships(repo)
+}
+
+func (m *Manager) refreshGenericRelationships(repo string) error {
+	repoID, err := m.store.GetRepoID(repo)
+	if err != nil {
+		return err
+	}
+	entities, err := m.store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerGenericGraph)
+	if err != nil {
+		return err
+	}
+	return m.store.ReplaceSemanticRelationshipsForAnalyzer(repoID, semantic.AnalyzerGenericGraph, generic.ResolveRelationships(entities))
 }
 
 func (m *Manager) rebuildSemanticRepository(repoID int64, repo, resource string) error {
@@ -463,5 +510,5 @@ func (m *Manager) rebuildSemanticRepository(repoID int64, repo, resource string)
 	if err != nil {
 		return err
 	}
-	return m.store.ReplaceSemanticIndex(repoID, result)
+	return m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, result)
 }

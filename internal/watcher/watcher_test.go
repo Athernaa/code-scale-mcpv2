@@ -12,6 +12,7 @@ import (
 	"github.com/Athernaa/code-scale-mcpv2/internal/repository"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/fivem"
+	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/generic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 	"github.com/fsnotify/fsnotify"
 )
@@ -164,6 +165,13 @@ func TestWatcherIncrementalUpdatePreservesAndRefreshesFiveMSemantics(t *testing.
 	if err := store.ReplaceSemanticIndex(repoID, result); err != nil {
 		t.Fatal(err)
 	}
+	genericResult, err := generic.NewAnalyzer().AnalyzeRepository(context.Background(), semantic.RepositoryInput{Repo: id.Repo, Files: contents, Languages: langs, Symbols: symbols})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, genericResult); err != nil {
+		t.Fatal(err)
+	}
 
 	updatedPath := filepath.Join(root, "client", "main.lua")
 	updatedContent := "TriggerServerEvent('avenlo:updated')\n"
@@ -269,6 +277,13 @@ func TestWatcherManifestDeletionClearsFiveMSemanticsButKeepsGenericFiles(t *test
 	if err := store.ReplaceSemanticIndex(repoID, result); err != nil {
 		t.Fatal(err)
 	}
+	genericResult, err := generic.NewAnalyzer().AnalyzeRepository(context.Background(), semantic.RepositoryInput{Repo: id.Repo, Files: contents, Languages: langs, Symbols: symbols})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, genericResult); err != nil {
+		t.Fatal(err)
+	}
 	entities, err := store.GetSemanticEntities(repoID)
 	if err != nil || len(entities) == 0 {
 		t.Fatalf("expected initial FiveM semantics: %#v err=%v", entities, err)
@@ -288,8 +303,22 @@ func TestWatcherManifestDeletionClearsFiveMSemanticsButKeepsGenericFiles(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entities) != 0 || len(relationships) != 0 {
-		t.Fatalf("manifest deletion left stale semantics: entities=%#v relationships=%#v", entities, relationships)
+	var fivemCount, genericCount int
+	for _, entity := range entities {
+		if entity.Analyzer == semantic.AnalyzerFiveM {
+			fivemCount++
+		}
+		if entity.Analyzer == semantic.AnalyzerGenericGraph {
+			genericCount++
+		}
+	}
+	if fivemCount != 0 || genericCount == 0 {
+		t.Fatalf("manifest deletion did not isolate analyzer data: entities=%#v relationships=%#v", entities, relationships)
+	}
+	for _, relationship := range relationships {
+		if relationship.Analyzer == semantic.AnalyzerFiveM {
+			t.Fatalf("manifest deletion left stale FiveM relationships: %#v", relationships)
+		}
 	}
 	files, err := store.GetFiles(repoID)
 	if err != nil || len(files) != 1 || files[0].Path != "server.lua" {
@@ -312,7 +341,75 @@ func TestWatcherKeepsGenericLuaRepositorySemanticFree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entities) != 0 {
-		t.Fatalf("generic Lua repository accumulated FiveM semantics: %#v", entities)
+	for _, entity := range entities {
+		if entity.Analyzer == semantic.AnalyzerFiveM {
+			t.Fatalf("generic Lua repository accumulated FiveM semantics: %#v", entities)
+		}
+	}
+	if len(entities) == 0 {
+		t.Fatal("generic Lua repository did not receive generic graph facts")
+	}
+}
+
+func TestWatcherGenericGraphRefreshesRenamedImportTarget(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "typescript")
+	paths := map[string]string{
+		"a.ts": "export function foo() {}\n",
+		"b.ts": "import { foo } from './a'\nexport function run() { foo() }\n",
+	}
+	store, id, repoID := indexWatcherFiles(t, root, paths)
+	defer func() { _ = store.Close() }()
+	contents := make(map[string][]byte, len(paths))
+	langs := make(map[string]string, len(paths))
+	symbols := make(map[string][]parser.Symbol, len(paths))
+	for rel, content := range paths {
+		contents[rel] = []byte(content)
+		langs[rel] = parser.DetectLanguage(rel)
+		parsed, err := parser.ParseFile(contents[rel], rel, langs[rel])
+		if err != nil {
+			t.Fatal(err)
+		}
+		symbols[rel] = parsed
+	}
+	result, err := generic.NewAnalyzer().AnalyzeRepository(context.Background(), semantic.RepositoryInput{Repo: id.Repo, Files: contents, Languages: langs, Symbols: symbols})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, result); err != nil {
+		t.Fatal(err)
+	}
+	graphEdges := func() []semantic.Relationship {
+		edges, edgeErr := store.GetSemanticRelationshipsForAnalyzer(repoID, semantic.AnalyzerGenericGraph)
+		if edgeErr != nil {
+			t.Fatal(edgeErr)
+		}
+		return edges
+	}
+	initial := graphEdges()
+	if len(initial) == 0 {
+		t.Fatal("initial import/call relationship was not indexed")
+	}
+	if err := os.WriteFile(filepath.Join(root, "a.ts"), []byte("export function bar() {}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewManager(store)
+	mgr.reindexFiles(&FolderWatch{Path: id.CanonicalPath, Repo: id.Repo, stop: make(chan struct{})}, []string{filepath.Join(root, "a.ts")})
+	for _, edge := range graphEdges() {
+		if edge.Name == "foo" {
+			t.Fatalf("stale relationship survived renamed target: %#v", edge)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "b.ts"), []byte("import { bar } from './a'\nexport function run() { bar() }\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mgr.reindexFiles(&FolderWatch{Path: id.CanonicalPath, Repo: id.Repo, stop: make(chan struct{})}, []string{filepath.Join(root, "b.ts")})
+	var foundBar bool
+	for _, edge := range graphEdges() {
+		if edge.Name == "bar" && edge.Kind == generic.RelationshipCalls {
+			foundBar = true
+		}
+	}
+	if !foundBar {
+		t.Fatal("updated import/call relationship was not indexed")
 	}
 }

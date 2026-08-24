@@ -62,8 +62,23 @@ get_symbol({ "repo": "owner/repo", "symbol_id": "src/auth.py::authenticate#funct
 4. `get_symbol` to drill into specific implementations
 
 ### "What calls this function?" / "Where is this used?"
-1. `search_text` with the function name to find all usages across the codebase
-2. `get_symbol` on the callers to understand context
+1. `search_symbols` to obtain the exact `symbol_id`
+2. `trace_relationships` with that `symbol_id`, `direction: "incoming"`, and `relationship_kinds: ["calls", "references"]`
+3. `get_symbol` only for the returned callers or references that need source context
+
+### "What does this function call?"
+1. `search_symbols` to obtain the exact `symbol_id`
+2. `trace_relationships` with `direction: "outgoing"` and `relationship_kinds: ["calls"]`
+3. Retrieve only the relevant callees with `get_symbol`
+
+### "What could this change affect?"
+1. `search_symbols` to obtain the exact `symbol_id`
+2. `analyze_impact` for bounded incoming `calls` and `references`
+3. Inspect only the affected symbols/files needed for the change
+
+The relationship graph is conservative: ambiguous, dynamic, or unknown
+receiver calls are intentionally left unresolved. Use `search_text` only when
+the graph has no deterministic edge or when searching non-symbol text.
 
 ## Symbol IDs
 
@@ -95,6 +110,9 @@ Symbol IDs from `search_symbols`, `get_file_outline`, and `get_repo_outline` can
 ### Search
 - **search_symbols**: 3-layer search: FTS5 BM25 → substring → fuzzy Levenshtein. Args: `repo`, `query` (required), `kind` (optional: function/class/method/constant/type), `language`, `file_pattern`, `max_results` (optional, default 10, max 200). Results include `match_tier` (fts5/substring/fuzzy).
 - **search_text**: Full-text search with optional snippet context. Args: `repo`, `query` (required), `file_pattern`, `max_results` (optional, default 20, max 200), `context_lines` (optional, 0=single lines, 1-10=merged snippet windows)
+- **search_semantics**: Search compact FiveM semantic entities. Use `analyzer: "fivem"` for events, callbacks, exports, commands, and resource metadata. Results include `symbol_id` when one is associated.
+- **trace_relationships**: Traverse FiveM or generic graph edges using either `entity_id` or a parser `symbol_id`. Use `direction: "incoming"` for callers/dependents, `"outgoing"` for callees, and filter with `relationship_kinds` such as `calls`, `references`, or `imports`.
+- **analyze_impact**: Return bounded incoming generic dependents for a parser `symbol_id`; use before changing shared code.
 
 ### Batch
 - **batch_execute**: Execute up to 10 operations in one call. Args: `operations` (array of `{tool, args}`). Supports: get_symbol, get_symbols, search_symbols, search_text, get_file_outline, get_file_tree, get_repo_outline. Operations run concurrently.

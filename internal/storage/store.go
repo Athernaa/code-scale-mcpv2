@@ -153,10 +153,45 @@ func (s *IndexStore) migrate() error {
 			return fmt.Errorf("migrate v6: %w", err)
 		}
 	}
+	if currentVersion < 7 {
+		for _, table := range []string{"semantic_entities", "semantic_relationships"} {
+			if ok, err := tableHasColumn(s.db, table, "analyzer"); err != nil {
+				return fmt.Errorf("inspect v7 %s: %w", table, err)
+			} else if !ok {
+				if _, err := s.db.Exec("ALTER TABLE " + table + " ADD COLUMN analyzer TEXT NOT NULL DEFAULT 'fivem'"); err != nil {
+					return fmt.Errorf("migrate v7 %s: %w", table, err)
+				}
+			}
+		}
+		if _, err := s.db.Exec(MigrateV7SQL); err != nil {
+			return fmt.Errorf("migrate v7 indexes: %w", err)
+		}
+	}
 
 	// Upsert schema version
 	_, err = s.db.Exec("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", CurrentSchemaVersion)
 	return err
+}
+
+func tableHasColumn(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var cid int
+		var name, dataType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // SavedWatch represents a persisted folder watch.
@@ -250,13 +285,9 @@ func (s *IndexStore) ReplaceRepoIndex(
 	} else if err != nil {
 		return err
 	} else {
-		// Delete existing data for re-index
-		if _, err := tx.Exec("DELETE FROM semantic_relationships WHERE repo_id = ?", repoID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec("DELETE FROM semantic_entities WHERE repo_id = ?", repoID); err != nil {
-			return err
-		}
+		// Semantic analyzers own their own rows and replace them after the
+		// generic symbol transaction completes. Do not erase another analyzer's
+		// facts as part of a repository source replacement.
 		if _, err := tx.Exec("DELETE FROM files_fts WHERE repo_id = ?", repoID); err != nil {
 			return err
 		}
@@ -669,10 +700,14 @@ func (s *IndexStore) GetFiles(repoID int64) ([]FileInfo, error) {
 	return s.getFilesLocked(repoID)
 }
 
-// ReplaceSemanticIndex transactionally replaces all semantic records for a
-// repository. Generic file/symbol replacement clears the old semantic index;
-// this method installs the freshly analyzed records afterward.
+// ReplaceSemanticIndex is the compatibility wrapper for the original FiveM
+// semantic API. New analyzers must use the analyzer-scoped operation.
 func (s *IndexStore) ReplaceSemanticIndex(repoID int64, result semantic.Result) error {
+	return s.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, result)
+}
+
+// ReplaceSemanticIndexForAnalyzer replaces only one analyzer's records.
+func (s *IndexStore) ReplaceSemanticIndexForAnalyzer(repoID int64, analyzer string, result semantic.Result) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
@@ -680,13 +715,13 @@ func (s *IndexStore) ReplaceSemanticIndex(repoID int64, result semantic.Result) 
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := deleteSemanticIndexTx(tx, repoID); err != nil {
+	if err := deleteSemanticIndexTx(tx, repoID, analyzer); err != nil {
 		return err
 	}
-	if err := insertSemanticEntitiesTx(tx, repoID, result.Entities); err != nil {
+	if err := insertSemanticEntitiesTx(tx, repoID, analyzer, result.Entities); err != nil {
 		return err
 	}
-	if err := insertSemanticRelationshipsTx(tx, repoID, result.Relationships); err != nil {
+	if err := insertSemanticRelationshipsTx(tx, repoID, analyzer, result.Relationships); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -696,6 +731,11 @@ func (s *IndexStore) ReplaceSemanticIndex(repoID int64, result semantic.Result) 
 // inserts its replacement. Relationships are rebuilt separately from the
 // complete entity set so cross-file links remain correct.
 func (s *IndexStore) ReplaceSemanticFile(repoID int64, filePath string, entities []semantic.Entity) error {
+	return s.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerFiveM, filePath, entities)
+}
+
+// ReplaceSemanticFileForAnalyzer replaces one analyzer's facts for one file.
+func (s *IndexStore) ReplaceSemanticFileForAnalyzer(repoID int64, analyzer, filePath string, entities []semantic.Entity) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
@@ -704,15 +744,15 @@ func (s *IndexStore) ReplaceSemanticFile(repoID int64, filePath string, entities
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.Exec(`DELETE FROM semantic_relationships
-		WHERE repo_id = ? AND (file_path = ? OR from_entity_id IN
-		(SELECT id FROM semantic_entities WHERE repo_id = ? AND file_path = ?)
-		OR to_entity_id IN (SELECT id FROM semantic_entities WHERE repo_id = ? AND file_path = ?))`, repoID, filePath, repoID, filePath, repoID, filePath); err != nil {
+		WHERE repo_id = ? AND analyzer = ? AND (file_path = ? OR from_entity_id IN
+		(SELECT id FROM semantic_entities WHERE repo_id = ? AND analyzer = ? AND file_path = ?)
+		OR to_entity_id IN (SELECT id FROM semantic_entities WHERE repo_id = ? AND analyzer = ? AND file_path = ?))`, repoID, analyzer, filePath, repoID, analyzer, filePath, repoID, analyzer, filePath); err != nil {
 		return err
 	}
-	if _, err := tx.Exec("DELETE FROM semantic_entities WHERE repo_id = ? AND file_path = ?", repoID, filePath); err != nil {
+	if _, err := tx.Exec("DELETE FROM semantic_entities WHERE repo_id = ? AND analyzer = ? AND file_path = ?", repoID, analyzer, filePath); err != nil {
 		return err
 	}
-	if err := insertSemanticEntitiesTx(tx, repoID, entities); err != nil {
+	if err := insertSemanticEntitiesTx(tx, repoID, analyzer, entities); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -721,6 +761,11 @@ func (s *IndexStore) ReplaceSemanticFile(repoID int64, filePath string, entities
 // ReplaceSemanticRelationships replaces only relationship edges, preserving
 // all entity records. It is used after an incremental file semantic update.
 func (s *IndexStore) ReplaceSemanticRelationships(repoID int64, relationships []semantic.Relationship) error {
+	return s.ReplaceSemanticRelationshipsForAnalyzer(repoID, semantic.AnalyzerFiveM, relationships)
+}
+
+// ReplaceSemanticRelationshipsForAnalyzer replaces one analyzer's edges.
+func (s *IndexStore) ReplaceSemanticRelationshipsForAnalyzer(repoID int64, analyzer string, relationships []semantic.Relationship) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
@@ -728,10 +773,10 @@ func (s *IndexStore) ReplaceSemanticRelationships(repoID int64, relationships []
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.Exec("DELETE FROM semantic_relationships WHERE repo_id = ?", repoID); err != nil {
+	if _, err := tx.Exec("DELETE FROM semantic_relationships WHERE repo_id = ? AND analyzer = ?", repoID, analyzer); err != nil {
 		return err
 	}
-	if err := insertSemanticRelationshipsTx(tx, repoID, relationships); err != nil {
+	if err := insertSemanticRelationshipsTx(tx, repoID, analyzer, relationships); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -742,17 +787,57 @@ func (s *IndexStore) ReplaceSemanticRelationships(repoID int64, relationships []
 func (s *IndexStore) GetSemanticEntities(repoID int64) ([]semantic.Entity, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.getSemanticEntitiesLocked(repoID)
+	return s.getSemanticEntitiesLocked(repoID, "")
+}
+
+func (s *IndexStore) GetSemanticEntitiesForAnalyzer(repoID int64, analyzer string) ([]semantic.Entity, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.getSemanticEntitiesLocked(repoID, analyzer)
+}
+
+func (s *IndexStore) GetSemanticEntityBySymbolID(repoID int64, analyzer, symbolID string) (semantic.Entity, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	repoName := repoNameLocked(s.db, repoID)
+	rows, err := s.db.Query(`SELECT id, analyzer, file_path, symbol_id, kind, name, framework, side, line, end_line, dynamic, metadata
+		FROM semantic_entities WHERE repo_id = ? AND analyzer = ? AND symbol_id = ? ORDER BY id`, repoID, analyzer, symbolID)
+	if err != nil {
+		return semantic.Entity{}, err
+	}
+	defer func() { _ = rows.Close() }()
+	var matches []semantic.Entity
+	for rows.Next() {
+		entity, err := scanSemanticEntity(rows, repoName)
+		if err != nil {
+			return semantic.Entity{}, err
+		}
+		matches = append(matches, entity)
+	}
+	if err := rows.Err(); err != nil {
+		return semantic.Entity{}, err
+	}
+	if len(matches) == 0 {
+		return semantic.Entity{}, fmt.Errorf("symbol %q has no %s graph entity", symbolID, analyzer)
+	}
+	if len(matches) > 1 {
+		return semantic.Entity{}, fmt.Errorf("symbol %q maps to multiple %s graph entities", symbolID, analyzer)
+	}
+	return matches[0], nil
 }
 
 // GetSemanticRelationships returns all stored semantic edges for verification
 // and maintenance operations. Query tools should prefer TraceSemantic.
 func (s *IndexStore) GetSemanticRelationships(repoID int64) ([]semantic.Relationship, error) {
+	return s.GetSemanticRelationshipsForAnalyzer(repoID, "")
+}
+
+func (s *IndexStore) GetSemanticRelationshipsForAnalyzer(repoID int64, analyzer string) ([]semantic.Relationship, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	repoName := repoNameLocked(s.db, repoID)
-	rows, err := s.db.Query(`SELECT id, from_entity_id, to_entity_id, kind, name, dynamic, confidence, file_path, line
-		FROM semantic_relationships WHERE repo_id = ? ORDER BY id`, repoID)
+	rows, err := s.db.Query(`SELECT id, analyzer, from_entity_id, to_entity_id, kind, name, dynamic, confidence, file_path, line
+		FROM semantic_relationships WHERE repo_id = ? AND (? = '' OR analyzer = ?) ORDER BY id`, repoID, analyzer, analyzer)
 	if err != nil {
 		return nil, err
 	}
@@ -761,7 +846,7 @@ func (s *IndexStore) GetSemanticRelationships(repoID int64) ([]semantic.Relation
 	for rows.Next() {
 		var relationship semantic.Relationship
 		var dynamic int
-		if err := rows.Scan(&relationship.ID, &relationship.FromEntityID, &relationship.ToEntityID, &relationship.Kind, &relationship.Name, &dynamic, &relationship.Confidence, &relationship.File, &relationship.Line); err != nil {
+		if err := rows.Scan(&relationship.ID, &relationship.Analyzer, &relationship.FromEntityID, &relationship.ToEntityID, &relationship.Kind, &relationship.Name, &dynamic, &relationship.Confidence, &relationship.File, &relationship.Line); err != nil {
 			return nil, err
 		}
 		relationship.Repo = repoName
@@ -771,10 +856,10 @@ func (s *IndexStore) GetSemanticRelationships(repoID int64) ([]semantic.Relation
 	return result, rows.Err()
 }
 
-func (s *IndexStore) getSemanticEntitiesLocked(repoID int64) ([]semantic.Entity, error) {
+func (s *IndexStore) getSemanticEntitiesLocked(repoID int64, analyzer string) ([]semantic.Entity, error) {
 	repoName := repoNameLocked(s.db, repoID)
-	rows, err := s.db.Query(`SELECT id, file_path, symbol_id, kind, name, framework, side, line, end_line, dynamic, metadata
-		FROM semantic_entities WHERE repo_id = ? ORDER BY file_path, line, id`, repoID)
+	rows, err := s.db.Query(`SELECT id, analyzer, file_path, symbol_id, kind, name, framework, side, line, end_line, dynamic, metadata
+		FROM semantic_entities WHERE repo_id = ? AND (? = '' OR analyzer = ?) ORDER BY file_path, line, id`, repoID, analyzer, analyzer)
 	if err != nil {
 		return nil, err
 	}
@@ -784,7 +869,7 @@ func (s *IndexStore) getSemanticEntitiesLocked(repoID int64) ([]semantic.Entity,
 		entity := semantic.Entity{Repo: ""}
 		var dynamic int
 		var metadata string
-		if err := rows.Scan(&entity.ID, &entity.File, &entity.SymbolID, &entity.Kind, &entity.Name, &entity.Framework, &entity.Side, &entity.Line, &entity.EndLine, &dynamic, &metadata); err != nil {
+		if err := rows.Scan(&entity.ID, &entity.Analyzer, &entity.File, &entity.SymbolID, &entity.Kind, &entity.Name, &entity.Framework, &entity.Side, &entity.Line, &entity.EndLine, &dynamic, &metadata); err != nil {
 			return nil, err
 		}
 		entity.Repo = repoName
@@ -802,6 +887,10 @@ func (s *IndexStore) getSemanticEntitiesLocked(repoID int64) ([]semantic.Entity,
 // SearchSemantic performs a compact indexed SQL search without reading source
 // files. Query, kind, and side are optional filters.
 func (s *IndexStore) SearchSemantic(repoID int64, query, kind, side string, maxResults int) ([]semantic.Entity, bool, error) {
+	return s.SearchSemanticWithOptions(repoID, query, kind, side, "", false, maxResults)
+}
+
+func (s *IndexStore) SearchSemanticWithOptions(repoID int64, query, kind, side, analyzer string, includeInternal bool, maxResults int) ([]semantic.Entity, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if maxResults <= 0 {
@@ -811,11 +900,31 @@ func (s *IndexStore) SearchSemantic(repoID int64, query, kind, side string, maxR
 		maxResults = 200
 	}
 	repoName := repoNameLocked(s.db, repoID)
-	rows, err := s.db.Query(`SELECT id, file_path, symbol_id, kind, name, framework, side, line, end_line, dynamic, metadata
-		FROM semantic_entities
-		WHERE repo_id = ? AND (? = '' OR lower(name) LIKE '%' || lower(?) || '%')
-		  AND (? = '' OR kind = ?) AND (? = '' OR side = ?)
-		ORDER BY file_path, line, id LIMIT ?`, repoID, query, query, kind, kind, side, side, maxResults+1)
+	queryText := `SELECT id, analyzer, file_path, symbol_id, kind, name, framework, side, line, end_line, dynamic, metadata
+		FROM semantic_entities WHERE repo_id = ?`
+	args := []any{repoID}
+	if analyzer != "" {
+		queryText += " AND analyzer = ?"
+		args = append(args, analyzer)
+	} else if !includeInternal {
+		queryText += " AND analyzer != ?"
+		args = append(args, semantic.AnalyzerGenericGraph)
+	}
+	if query != "" {
+		queryText += " AND lower(name) LIKE '%' || lower(?) || '%'"
+		args = append(args, query)
+	}
+	if kind != "" {
+		queryText += " AND kind = ?"
+		args = append(args, kind)
+	}
+	if side != "" {
+		queryText += " AND side = ?"
+		args = append(args, side)
+	}
+	queryText += " ORDER BY file_path, line, id LIMIT ?"
+	args = append(args, maxResults+1)
+	rows, err := s.db.Query(queryText, args...)
 	if err != nil {
 		return nil, false, err
 	}
@@ -838,15 +947,14 @@ func (s *IndexStore) SearchSemantic(repoID int64, query, kind, side string, maxR
 	return result, truncated, nil
 }
 
-// TraceSemantic traverses stored relationship edges without touching source
-// content. Unresolved edges are returned only when they originate from the
-// requested entity; they are never traversed as if they had a target.
-//
-// TODO: before multi-resource workspace support, replace this bounded in-memory
-// traversal with indexed adjacency queries on (repo_id, from_entity_id) and
-// (repo_id, to_entity_id). Keeping this debt explicit avoids hiding the
-// current scalability limit behind the MCP tool.
+// TraceSemantic is the compatibility wrapper for FiveM relationship tracing.
 func (s *IndexStore) TraceSemantic(repoID int64, entityID, direction string, depth, maxResults int) ([]semantic.TraceEdge, bool, error) {
+	return s.TraceSemanticWithOptions(repoID, entityID, semantic.AnalyzerFiveM, direction, nil, depth, maxResults)
+}
+
+// TraceSemanticWithOptions traverses only indexed adjacency rows for the
+// current frontier. It never materializes the complete repository graph.
+func (s *IndexStore) TraceSemanticWithOptions(repoID int64, entityID, analyzer, direction string, relationshipKinds []string, depth, maxResults int) ([]semantic.TraceEdge, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if depth <= 0 {
@@ -862,42 +970,12 @@ func (s *IndexStore) TraceSemantic(repoID int64, entityID, direction string, dep
 		maxResults = 200
 	}
 	var exists int
-	if err := s.db.QueryRow("SELECT 1 FROM semantic_entities WHERE repo_id = ? AND id = ?", repoID, entityID).Scan(&exists); err != nil {
+	if err := s.db.QueryRow("SELECT 1 FROM semantic_entities WHERE repo_id = ? AND analyzer = ? AND id = ?", repoID, analyzer, entityID).Scan(&exists); err != nil {
 		if err == sql.ErrNoRows {
-			return nil, false, fmt.Errorf("semantic entity %q not found in repository", entityID)
+			return nil, false, fmt.Errorf("semantic entity %q not found in analyzer %q", entityID, analyzer)
 		}
 		return nil, false, err
 	}
-	entities, err := s.getSemanticEntitiesLocked(repoID)
-	if err != nil {
-		return nil, false, err
-	}
-	repoName := repoNameLocked(s.db, repoID)
-	entityMap := make(map[string]semantic.Entity, len(entities))
-	for _, entity := range entities {
-		entityMap[entity.ID] = entity
-	}
-	rows, err := s.db.Query(`SELECT id, from_entity_id, to_entity_id, kind, name, dynamic, confidence, file_path, line
-		FROM semantic_relationships WHERE repo_id = ? ORDER BY id`, repoID)
-	if err != nil {
-		return nil, false, err
-	}
-	defer func() { _ = rows.Close() }()
-	var relationships []semantic.Relationship
-	for rows.Next() {
-		var relationship semantic.Relationship
-		var dynamic int
-		if err := rows.Scan(&relationship.ID, &relationship.FromEntityID, &relationship.ToEntityID, &relationship.Kind, &relationship.Name, &dynamic, &relationship.Confidence, &relationship.File, &relationship.Line); err != nil {
-			return nil, false, err
-		}
-		relationship.Repo = repoName
-		relationship.Dynamic = dynamic != 0
-		relationships = append(relationships, relationship)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, false, err
-	}
-
 	if direction != "incoming" && direction != "outgoing" && direction != "both" {
 		direction = "both"
 	}
@@ -914,31 +992,45 @@ func (s *IndexStore) TraceSemantic(repoID int64, entityID, direction string, dep
 		if current.depth >= depth {
 			continue
 		}
-		for _, relationship := range relationships {
-			matchesOutgoing := (direction == "outgoing" || direction == "both") && relationship.FromEntityID == current.id
-			matchesIncoming := (direction == "incoming" || direction == "both") && relationship.ToEntityID == current.id
-			if !matchesOutgoing && !matchesIncoming {
+		edges, err := s.querySemanticEdgesLocked(repoID, analyzer, direction, relationshipKinds, []string{current.id})
+		if err != nil {
+			return nil, false, err
+		}
+		ids := make([]string, 0, len(edges)*2)
+		for _, edge := range edges {
+			ids = append(ids, edge.FromEntityID, edge.ToEntityID)
+		}
+		endpointMap, err := s.semanticEntitiesByIDsLocked(repoID, analyzer, ids)
+		if err != nil {
+			return nil, false, err
+		}
+		for _, relationship := range edges {
+			from, fromOK := endpointMap[relationship.FromEntityID]
+			to, toOK := endpointMap[relationship.ToEntityID]
+			if !fromOK || !toOK {
 				continue
 			}
-			from, fromOK := entityMap[relationship.FromEntityID]
-			to, toOK := entityMap[relationship.ToEntityID]
-			if !fromOK {
-				continue
-			}
-			edge := semantic.TraceEdge{Relationship: relationship, From: from, Depth: current.depth + 1}
-			if toOK {
-				edge.To = &to
-			}
+			edge := semantic.TraceEdge{Relationship: relationship, From: from, To: &to, Depth: current.depth + 1}
 			result = append(result, edge)
-			nextID := ""
-			if matchesOutgoing && toOK {
-				nextID = to.ID
-			} else if matchesIncoming {
-				nextID = from.ID
-			}
-			if nextID != "" && !visited[nextID] {
-				visited[nextID] = true
-				queue = append(queue, queueItem{nextID, current.depth + 1})
+			if direction == "incoming" {
+				if !visited[from.ID] {
+					visited[from.ID] = true
+					queue = append(queue, queueItem{from.ID, current.depth + 1})
+				}
+			} else if direction == "outgoing" {
+				if !visited[to.ID] {
+					visited[to.ID] = true
+					queue = append(queue, queueItem{to.ID, current.depth + 1})
+				}
+			} else {
+				nextID := to.ID
+				if relationship.ToEntityID == current.id {
+					nextID = from.ID
+				}
+				if !visited[nextID] {
+					visited[nextID] = true
+					queue = append(queue, queueItem{nextID, current.depth + 1})
+				}
 			}
 			if len(result) >= maxResults+1 {
 				break
@@ -952,18 +1044,104 @@ func (s *IndexStore) TraceSemantic(repoID int64, entityID, direction string, dep
 	return result, truncated, nil
 }
 
-func deleteSemanticIndexTx(tx *sql.Tx, repoID int64) error {
-	if _, err := tx.Exec("DELETE FROM semantic_relationships WHERE repo_id = ?", repoID); err != nil {
+func (s *IndexStore) querySemanticEdgesLocked(repoID int64, analyzer, direction string, kinds, frontier []string) ([]semantic.Relationship, error) {
+	if len(frontier) == 0 {
+		return nil, nil
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(frontier)), ",")
+	condition := "from_entity_id IN (" + placeholders + ")"
+	if direction == "incoming" {
+		condition = "to_entity_id IN (" + placeholders + ")"
+	} else if direction == "both" {
+		condition = "(from_entity_id IN (" + placeholders + ") OR to_entity_id IN (" + placeholders + "))"
+	}
+	args := []any{repoID, analyzer}
+	for _, id := range frontier {
+		args = append(args, id)
+	}
+	if direction == "both" {
+		for _, id := range frontier {
+			args = append(args, id)
+		}
+	}
+	query := `SELECT id, analyzer, from_entity_id, to_entity_id, kind, name, dynamic, confidence, file_path, line
+		FROM semantic_relationships WHERE repo_id = ? AND analyzer = ? AND ` + condition
+	if len(kinds) > 0 {
+		kindPlaceholders := strings.TrimRight(strings.Repeat("?,", len(kinds)), ",")
+		query += " AND kind IN (" + kindPlaceholders + ")"
+		for _, kind := range kinds {
+			args = append(args, kind)
+		}
+	}
+	query += " ORDER BY id"
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var result []semantic.Relationship
+	for rows.Next() {
+		var relationship semantic.Relationship
+		var dynamic int
+		if err := rows.Scan(&relationship.ID, &relationship.Analyzer, &relationship.FromEntityID, &relationship.ToEntityID, &relationship.Kind, &relationship.Name, &dynamic, &relationship.Confidence, &relationship.File, &relationship.Line); err != nil {
+			return nil, err
+		}
+		relationship.Repo = repoNameLocked(s.db, repoID)
+		relationship.Dynamic = dynamic != 0
+		result = append(result, relationship)
+	}
+	return result, rows.Err()
+}
+
+func (s *IndexStore) semanticEntitiesByIDsLocked(repoID int64, analyzer string, ids []string) (map[string]semantic.Entity, error) {
+	unique := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			unique[id] = struct{}{}
+		}
+	}
+	if len(unique) == 0 {
+		return map[string]semantic.Entity{}, nil
+	}
+	values := make([]string, 0, len(unique))
+	for id := range unique {
+		values = append(values, id)
+	}
+	query := `SELECT id, analyzer, file_path, symbol_id, kind, name, framework, side, line, end_line, dynamic, metadata
+		FROM semantic_entities WHERE repo_id = ? AND analyzer = ? AND id IN (` + strings.TrimRight(strings.Repeat("?,", len(values)), ",") + ")"
+	args := []any{repoID, analyzer}
+	for _, id := range values {
+		args = append(args, id)
+	}
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	result := make(map[string]semantic.Entity, len(values))
+	repoName := repoNameLocked(s.db, repoID)
+	for rows.Next() {
+		entity, err := scanSemanticEntity(rows, repoName)
+		if err != nil {
+			return nil, err
+		}
+		result[entity.ID] = entity
+	}
+	return result, rows.Err()
+}
+
+func deleteSemanticIndexTx(tx *sql.Tx, repoID int64, analyzer string) error {
+	if _, err := tx.Exec("DELETE FROM semantic_relationships WHERE repo_id = ? AND analyzer = ?", repoID, analyzer); err != nil {
 		return err
 	}
-	_, err := tx.Exec("DELETE FROM semantic_entities WHERE repo_id = ?", repoID)
+	_, err := tx.Exec("DELETE FROM semantic_entities WHERE repo_id = ? AND analyzer = ?", repoID, analyzer)
 	return err
 }
 
-func insertSemanticEntitiesTx(tx *sql.Tx, repoID int64, entities []semantic.Entity) error {
+func insertSemanticEntitiesTx(tx *sql.Tx, repoID int64, analyzer string, entities []semantic.Entity) error {
 	stmt, err := tx.Prepare(`INSERT INTO semantic_entities
-		(id, repo_id, file_path, symbol_id, kind, name, framework, side, line, end_line, dynamic, metadata)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		(id, repo_id, analyzer, file_path, symbol_id, kind, name, framework, side, line, end_line, dynamic, metadata)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -980,17 +1158,24 @@ func insertSemanticEntitiesTx(tx *sql.Tx, repoID int64, entities []semantic.Enti
 		if entity.Dynamic {
 			dynamic = 1
 		}
-		if _, err := stmt.Exec(entity.ID, repoID, entity.File, entity.SymbolID, entity.Kind, entity.Name, entity.Framework, entity.Side, entity.Line, entity.EndLine, dynamic, string(metadata)); err != nil {
+		rowAnalyzer := entity.Analyzer
+		if rowAnalyzer == "" {
+			rowAnalyzer = analyzer
+		}
+		if rowAnalyzer != analyzer {
+			return fmt.Errorf("semantic entity %s belongs to analyzer %q, not %q", entity.ID, rowAnalyzer, analyzer)
+		}
+		if _, err := stmt.Exec(entity.ID, repoID, rowAnalyzer, entity.File, entity.SymbolID, entity.Kind, entity.Name, entity.Framework, entity.Side, entity.Line, entity.EndLine, dynamic, string(metadata)); err != nil {
 			return fmt.Errorf("insert semantic entity %s: %w", entity.ID, err)
 		}
 	}
 	return nil
 }
 
-func insertSemanticRelationshipsTx(tx *sql.Tx, repoID int64, relationships []semantic.Relationship) error {
+func insertSemanticRelationshipsTx(tx *sql.Tx, repoID int64, analyzer string, relationships []semantic.Relationship) error {
 	stmt, err := tx.Prepare(`INSERT INTO semantic_relationships
-		(id, repo_id, from_entity_id, to_entity_id, kind, name, dynamic, confidence, file_path, line)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		(id, repo_id, analyzer, from_entity_id, to_entity_id, kind, name, dynamic, confidence, file_path, line)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -1000,7 +1185,14 @@ func insertSemanticRelationshipsTx(tx *sql.Tx, repoID int64, relationships []sem
 		if relationship.Dynamic {
 			dynamic = 1
 		}
-		if _, err := stmt.Exec(relationship.ID, repoID, relationship.FromEntityID, relationship.ToEntityID, relationship.Kind, relationship.Name, dynamic, relationship.Confidence, relationship.File, relationship.Line); err != nil {
+		rowAnalyzer := relationship.Analyzer
+		if rowAnalyzer == "" {
+			rowAnalyzer = analyzer
+		}
+		if rowAnalyzer != analyzer {
+			return fmt.Errorf("semantic relationship %s belongs to analyzer %q, not %q", relationship.ID, rowAnalyzer, analyzer)
+		}
+		if _, err := stmt.Exec(relationship.ID, repoID, rowAnalyzer, relationship.FromEntityID, relationship.ToEntityID, relationship.Kind, relationship.Name, dynamic, relationship.Confidence, relationship.File, relationship.Line); err != nil {
 			return fmt.Errorf("insert semantic relationship %s: %w", relationship.ID, err)
 		}
 	}
@@ -1013,6 +1205,13 @@ func repoNameLocked(db *sql.DB, repoID int64) string {
 	return repo
 }
 
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
 type semanticScanner interface {
 	Scan(dest ...any) error
 }
@@ -1021,7 +1220,7 @@ func scanSemanticEntity(scanner semanticScanner, repoName string) (semantic.Enti
 	entity := semantic.Entity{}
 	var dynamic int
 	var metadata string
-	if err := scanner.Scan(&entity.ID, &entity.File, &entity.SymbolID, &entity.Kind, &entity.Name, &entity.Framework, &entity.Side, &entity.Line, &entity.EndLine, &dynamic, &metadata); err != nil {
+	if err := scanner.Scan(&entity.ID, &entity.Analyzer, &entity.File, &entity.SymbolID, &entity.Kind, &entity.Name, &entity.Framework, &entity.Side, &entity.Line, &entity.EndLine, &dynamic, &metadata); err != nil {
 		return semantic.Entity{}, err
 	}
 	entity.Repo = repoName
@@ -1734,14 +1933,16 @@ func (s *IndexStore) DeleteFileFromIndex(owner, name, filePath string) error {
 	if _, err := tx.Exec("DELETE FROM symbols WHERE repo_id = ? AND file_path = ?", repoID, filePath); err != nil {
 		return fmt.Errorf("delete symbols for %s: %w", filePath, err)
 	}
+	// Preserve the historical DeleteFileFromIndex contract for the FiveM
+	// analyzer while keeping generic graph rows owned by its own lifecycle.
 	if _, err := tx.Exec(`DELETE FROM semantic_relationships
-		WHERE repo_id = ? AND (file_path = ? OR from_entity_id IN
-		(SELECT id FROM semantic_entities WHERE repo_id = ? AND file_path = ?)
-		OR to_entity_id IN (SELECT id FROM semantic_entities WHERE repo_id = ? AND file_path = ?))`, repoID, filePath, repoID, filePath, repoID, filePath); err != nil {
-		return fmt.Errorf("delete semantic relationships for %s: %w", filePath, err)
+		WHERE repo_id = ? AND analyzer = ? AND (file_path = ? OR from_entity_id IN
+		(SELECT id FROM semantic_entities WHERE repo_id = ? AND analyzer = ? AND file_path = ?)
+		OR to_entity_id IN (SELECT id FROM semantic_entities WHERE repo_id = ? AND analyzer = ? AND file_path = ?))`, repoID, semantic.AnalyzerFiveM, filePath, repoID, semantic.AnalyzerFiveM, filePath, repoID, semantic.AnalyzerFiveM, filePath); err != nil {
+		return fmt.Errorf("delete FiveM semantic relationships for %s: %w", filePath, err)
 	}
-	if _, err := tx.Exec("DELETE FROM semantic_entities WHERE repo_id = ? AND file_path = ?", repoID, filePath); err != nil {
-		return fmt.Errorf("delete semantic entities for %s: %w", filePath, err)
+	if _, err := tx.Exec("DELETE FROM semantic_entities WHERE repo_id = ? AND analyzer = ? AND file_path = ?", repoID, semantic.AnalyzerFiveM, filePath); err != nil {
+		return fmt.Errorf("delete FiveM semantic entities for %s: %w", filePath, err)
 	}
 	var fileID int64
 	if err := tx.QueryRow("SELECT id FROM files WHERE repo_id = ? AND path = ?", repoID, filePath).Scan(&fileID); err == nil {

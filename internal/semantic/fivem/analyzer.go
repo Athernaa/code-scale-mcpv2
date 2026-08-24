@@ -72,6 +72,7 @@ func (a *Analyzer) AnalyzeRepository(ctx context.Context, input semantic.Reposit
 	}
 	result := semantic.Result{}
 	resourceEntity := semantic.Entity{
+		Analyzer:  semantic.AnalyzerFiveM,
 		Repo:      repo,
 		File:      manifestPath,
 		Kind:      KindManifestResource,
@@ -102,6 +103,7 @@ func (a *Analyzer) AnalyzeRepository(ctx context.Context, input semantic.Reposit
 
 	for _, dependency := range manifest.Dependencies {
 		entity := semantic.Entity{
+			Analyzer:  semantic.AnalyzerFiveM,
 			Repo:      repo,
 			File:      manifestPath,
 			Kind:      KindManifestDependency,
@@ -117,6 +119,7 @@ func (a *Analyzer) AnalyzeRepository(ctx context.Context, input semantic.Reposit
 		entity.ID = semantic.StableID("semantic", repo, manifestPath, KindManifestDependency, dependency)
 		result.Entities = append(result.Entities, entity)
 		result.Relationships = append(result.Relationships, semantic.Relationship{
+			Analyzer:     semantic.AnalyzerFiveM,
 			ID:           semantic.StableID("relationship", resourceEntity.ID, entity.ID, RelationshipDependsOn),
 			Repo:         repo,
 			FromEntityID: resourceEntity.ID,
@@ -130,6 +133,7 @@ func (a *Analyzer) AnalyzeRepository(ctx context.Context, input semantic.Reposit
 	}
 	for _, export := range manifest.Exports {
 		entity := semantic.Entity{
+			Analyzer:  semantic.AnalyzerFiveM,
 			Repo:      repo,
 			File:      manifestPath,
 			Kind:      KindExportDefinition,

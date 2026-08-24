@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,45 @@ import (
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
 )
+
+func TestSchemaV7BackfillsLegacySemanticOwnership(t *testing.T) {
+	tmp := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(tmp, "code-scale.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := `
+CREATE TABLE repos (id INTEGER PRIMARY KEY, owner TEXT NOT NULL, name TEXT NOT NULL, repo TEXT NOT NULL UNIQUE, indexed_at TEXT NOT NULL, git_head TEXT, source_type TEXT);
+CREATE TABLE semantic_entities (id TEXT PRIMARY KEY, repo_id INTEGER NOT NULL, file_path TEXT NOT NULL, symbol_id TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', framework TEXT NOT NULL DEFAULT '', side TEXT NOT NULL DEFAULT 'unknown', line INTEGER NOT NULL DEFAULT 0, end_line INTEGER NOT NULL DEFAULT 0, dynamic INTEGER NOT NULL DEFAULT 0, metadata TEXT NOT NULL DEFAULT '{}');
+CREATE TABLE semantic_relationships (id TEXT PRIMARY KEY, repo_id INTEGER NOT NULL, from_entity_id TEXT NOT NULL, to_entity_id TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', dynamic INTEGER NOT NULL DEFAULT 0, confidence REAL NOT NULL DEFAULT 0, file_path TEXT NOT NULL DEFAULT '', line INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+INSERT INTO repos(id, owner, name, repo, indexed_at, source_type) VALUES (1, 'local', 'legacy', 'local/legacy', 'now', 'local');
+INSERT INTO semantic_entities(id, repo_id, file_path, kind, name) VALUES ('legacy-entity', 1, 'main.lua', 'event_handler', 'legacy');
+INSERT INTO schema_version(version) VALUES (6);`
+	if _, err := db.Exec(legacy); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewIndexStore(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	var analyzer string
+	if err := store.DB().QueryRow("SELECT analyzer FROM semantic_entities WHERE id = 'legacy-entity'").Scan(&analyzer); err != nil {
+		t.Fatal(err)
+	}
+	if analyzer != semantic.AnalyzerFiveM {
+		t.Fatalf("legacy semantic row was not backfilled as FiveM: %q", analyzer)
+	}
+	var version int
+	if err := store.DB().QueryRow("SELECT MAX(version) FROM schema_version").Scan(&version); err != nil || version != 7 {
+		t.Fatalf("schema version was not advanced to v7: version=%d err=%v", version, err)
+	}
+}
 
 func testSymbol(file, name string) parser.Symbol {
 	return parser.Symbol{
@@ -426,6 +466,71 @@ func TestSemanticStorageSearchReplaceTraceAndFileIsolation(t *testing.T) {
 		if entity.File == "client.lua" {
 			t.Fatalf("deleted file semantic entity survived: %#v", entity)
 		}
+	}
+}
+
+func TestAnalyzerScopedSemanticStorageAndIndexedTrace(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.ReplaceRepoIndex("local", "analyzer-scope", "local", "", map[string]string{"main.ts": "x"}, map[string]string{"main.ts": "typescript"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID("local/analyzer-scope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fivem := semantic.Entity{ID: "fivem-entity", Analyzer: semantic.AnalyzerFiveM, Repo: "local/analyzer-scope", File: "main.ts", Kind: "event_handler", Name: "event", Line: 1}
+	generic := semantic.Entity{ID: "generic-entity", Analyzer: semantic.AnalyzerGenericGraph, Repo: "local/analyzer-scope", File: "main.ts", SymbolID: "main::run", Kind: "code_symbol", Name: "run", Line: 1}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, semantic.Result{Entities: []semantic.Entity{fivem}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, semantic.Result{Entities: []semantic.Entity{generic}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, semantic.Result{}); err != nil {
+		t.Fatal(err)
+	}
+	entities, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerGenericGraph)
+	if err != nil || len(entities) != 1 || entities[0].ID != generic.ID {
+		t.Fatalf("FiveM replacement damaged generic graph: %#v err=%v", entities, err)
+	}
+	first := semantic.Entity{ID: "cycle-a", Analyzer: semantic.AnalyzerGenericGraph, Repo: "local/analyzer-scope", File: "a.ts", Kind: "code_symbol", Name: "a", SymbolID: "a"}
+	second := semantic.Entity{ID: "cycle-b", Analyzer: semantic.AnalyzerGenericGraph, Repo: "local/analyzer-scope", File: "b.ts", Kind: "code_symbol", Name: "b", SymbolID: "b"}
+	edges := []semantic.Relationship{
+		{ID: "edge-a-b", Analyzer: semantic.AnalyzerGenericGraph, Repo: "local/analyzer-scope", FromEntityID: first.ID, ToEntityID: second.ID, Kind: "calls", File: "a.ts"},
+		{ID: "edge-b-a", Analyzer: semantic.AnalyzerGenericGraph, Repo: "local/analyzer-scope", FromEntityID: second.ID, ToEntityID: first.ID, Kind: "calls", File: "b.ts"},
+	}
+	if err := store.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerGenericGraph, first.File, []semantic.Entity{first}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerGenericGraph, second.File, []semantic.Entity{second}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticRelationshipsForAnalyzer(repoID, semantic.AnalyzerGenericGraph, edges); err != nil {
+		t.Fatal(err)
+	}
+	traced, truncated, err := store.TraceSemanticWithOptions(repoID, first.ID, semantic.AnalyzerGenericGraph, "outgoing", []string{"calls"}, 3, 10)
+	if err != nil || truncated || len(traced) != 2 {
+		t.Fatalf("indexed trace did not handle cycle/filter correctly: %#v truncated=%v err=%v", traced, truncated, err)
+	}
+}
+
+func TestGenericSymbolLookupIgnoresCallFacts(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.ReplaceRepoIndex("local", "symbol-lookup", "local", "", map[string]string{"main.ts": "x"}, map[string]string{"main.ts": "typescript"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID("local/symbol-lookup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	symbol := semantic.Entity{ID: "lookup-symbol", Analyzer: semantic.AnalyzerGenericGraph, Repo: "local/symbol-lookup", File: "main.ts", SymbolID: "main.ts::run#function", Kind: "code_symbol", Name: "run"}
+	fact := semantic.Entity{ID: "lookup-call", Analyzer: semantic.AnalyzerGenericGraph, Repo: "local/symbol-lookup", File: "main.ts", Kind: "call_site", Name: "save", Metadata: map[string]any{"source_symbol_id": symbol.SymbolID}}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, semantic.Result{Entities: []semantic.Entity{symbol, fact}}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := store.GetSemanticEntityBySymbolID(repoID, semantic.AnalyzerGenericGraph, symbol.SymbolID)
+	if err != nil || resolved.ID != symbol.ID {
+		t.Fatalf("generic symbol lookup was polluted by call facts: %#v err=%v", resolved, err)
 	}
 }
 

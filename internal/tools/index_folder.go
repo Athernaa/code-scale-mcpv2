@@ -235,6 +235,17 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 				diagnostics = append(diagnostics, "semantic: "+semanticErr.Error())
 			}
 		}
+		modulePath := ""
+		if moduleContent, readErr := os.ReadFile(filepath.Join(absPath, "go.mod")); readErr == nil {
+			modulePath = goModulePath(moduleContent)
+		}
+		genericCount, genericErr := indexGenericRepository(ctx, deps.Store, owner+"/"+repoName, fileContents, fileLangs, symbolsByFile, modulePath)
+		if genericErr != nil {
+			log.Printf("index_folder: generic graph analysis failed: %v", genericErr)
+			if len(diagnostics) < 3 {
+				diagnostics = append(diagnostics, "generic graph: "+genericErr.Error())
+			}
+		}
 
 		// Count languages
 		langCounts := make(map[string]int)
@@ -254,6 +265,7 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 			"skipped_files":     skippedFiles,
 			"parse_failures":    parseFailures,
 			"semantic_entities": semanticCount,
+			"generic_entities":  genericCount,
 			"_meta": Meta{
 				TimingMs:    t.elapsedMs(),
 				Repo:        owner + "/" + repoName,

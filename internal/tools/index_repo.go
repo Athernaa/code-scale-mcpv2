@@ -160,6 +160,19 @@ func IndexRepoHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, In
 				diagnostics = append(diagnostics, "semantic: "+semanticErr.Error())
 			}
 		}
+		modulePath := ""
+		for _, language := range fileLangs {
+			if language == "go" {
+				if moduleContent, moduleErr := client.FetchFileContent(owner, repoName, "go.mod"); moduleErr == nil {
+					modulePath = goModulePath(moduleContent)
+				}
+				break
+			}
+		}
+		genericCount, genericErr := indexGenericRepository(ctx, deps.Store, owner+"/"+repoName, fileContents, fileLangs, symbolsByFile, modulePath)
+		if genericErr != nil {
+			log.Printf("index_repo: generic graph analysis failed: %v", genericErr)
+		}
 
 		// Count languages
 		langCounts := make(map[string]int)
@@ -178,6 +191,7 @@ func IndexRepoHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, In
 			"skipped_files":     skippedFiles,
 			"parse_failures":    parseFailures,
 			"semantic_entities": semanticCount,
+			"generic_entities":  genericCount,
 			"_meta": Meta{
 				TimingMs:    t.elapsedMs(),
 				Repo:        owner + "/" + repoName,

@@ -118,6 +118,7 @@ func makeEntity(call luaCall, input semantic.FileInput, kind, name string, dynam
 	symbolID := containingSymbol(input.Symbols, line)
 	metadata["byte_offset"] = int(call.Node.StartByte())
 	entity := semantic.Entity{
+		Analyzer:  semantic.AnalyzerFiveM,
 		Repo:      input.Repo,
 		File:      input.File,
 		SymbolID:  symbolID,
@@ -342,6 +343,7 @@ func compatibleCallbackSide(call, registration semantic.Entity) bool {
 
 func relationship(from, to semantic.Entity, kind string) semantic.Relationship {
 	return semantic.Relationship{
+		Analyzer:     semantic.AnalyzerFiveM,
 		ID:           semantic.StableID("relationship", from.ID, to.ID, kind),
 		Repo:         from.Repo,
 		FromEntityID: from.ID,

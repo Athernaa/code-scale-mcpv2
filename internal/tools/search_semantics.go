@@ -8,15 +8,18 @@ import (
 )
 
 type SearchSemanticsArgs struct {
-	Repo       string `json:"repo" jsonschema:"Repository name"`
-	Query      string `json:"query,omitempty" jsonschema:"Optional case-insensitive semantic name query"`
-	Kind       string `json:"kind,omitempty" jsonschema:"Optional semantic kind filter"`
-	Side       string `json:"side,omitempty" jsonschema:"Optional side filter: client, server, shared, unknown"`
-	MaxResults int    `json:"max_results,omitempty" jsonschema:"Maximum results (default 20, max 200)"`
+	Repo            string `json:"repo" jsonschema:"Repository name"`
+	Query           string `json:"query,omitempty" jsonschema:"Optional case-insensitive semantic name query"`
+	Kind            string `json:"kind,omitempty" jsonschema:"Optional semantic kind filter"`
+	Side            string `json:"side,omitempty" jsonschema:"Optional side filter: client, server, shared, unknown"`
+	Analyzer        string `json:"analyzer,omitempty" jsonschema:"Optional analyzer filter, such as fivem or generic_graph"`
+	IncludeInternal bool   `json:"include_internal,omitempty" jsonschema:"Include generic graph site entities"`
+	MaxResults      int    `json:"max_results,omitempty" jsonschema:"Maximum results (default 20, max 200)"`
 }
 
 type semanticSearchResult struct {
 	ID        string `json:"id"`
+	Analyzer  string `json:"analyzer,omitempty"`
 	Kind      string `json:"kind"`
 	Name      string `json:"name"`
 	Operation string `json:"operation,omitempty"`
@@ -38,7 +41,7 @@ func SearchSemanticsHandler(deps *Deps) func(context.Context, *mcp.CallToolReque
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
 		}
-		entities, truncated, err := deps.Store.SearchSemantic(repoID, args.Query, args.Kind, args.Side, args.MaxResults)
+		entities, truncated, err := deps.Store.SearchSemanticWithOptions(repoID, args.Query, args.Kind, args.Side, args.Analyzer, args.IncludeInternal, args.MaxResults)
 		if err != nil {
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
@@ -47,7 +50,7 @@ func SearchSemanticsHandler(deps *Deps) func(context.Context, *mcp.CallToolReque
 		for _, entity := range entities {
 			operation, resource := semanticMetadata(entity)
 			results = append(results, semanticSearchResult{
-				ID: entity.ID, Kind: entity.Kind, Name: entity.Name, Framework: entity.Framework,
+				ID: entity.ID, Analyzer: entity.Analyzer, Kind: entity.Kind, Name: entity.Name, Framework: entity.Framework,
 				Side: entity.Side, File: entity.File, Line: entity.Line, EndLine: entity.EndLine,
 				SymbolID: entity.SymbolID, Operation: operation, Resource: resource, Dynamic: entity.Dynamic,
 			})

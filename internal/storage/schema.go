@@ -53,8 +53,9 @@ CREATE INDEX IF NOT EXISTS idx_symbols_repo     ON symbols(repo_id);
 CREATE INDEX IF NOT EXISTS idx_files_repo       ON files(repo_id);
 
 CREATE TABLE IF NOT EXISTS semantic_entities (
-    id          TEXT PRIMARY KEY,
-    repo_id     INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+	 id          TEXT PRIMARY KEY,
+	 repo_id     INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+	 analyzer    TEXT NOT NULL DEFAULT 'fivem',
     file_path   TEXT NOT NULL,
     symbol_id   TEXT NOT NULL DEFAULT '',
     kind        TEXT NOT NULL,
@@ -68,8 +69,9 @@ CREATE TABLE IF NOT EXISTS semantic_entities (
 );
 
 CREATE TABLE IF NOT EXISTS semantic_relationships (
-    id             TEXT PRIMARY KEY,
-    repo_id        INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+	 id             TEXT PRIMARY KEY,
+	 repo_id        INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+	 analyzer       TEXT NOT NULL DEFAULT 'fivem',
     from_entity_id TEXT NOT NULL,
     to_entity_id   TEXT NOT NULL DEFAULT '',
     kind           TEXT NOT NULL,
@@ -192,5 +194,16 @@ CREATE INDEX IF NOT EXISTS idx_semantic_relationships_from ON semantic_relations
 CREATE INDEX IF NOT EXISTS idx_semantic_relationships_to ON semantic_relationships(repo_id, to_entity_id);
 `
 
+// MigrateV7SQL makes semantic storage analyzer-aware. Existing Phase 3 rows
+// are FiveM rows because FiveM was the only analyzer before this migration.
+const MigrateV7SQL = `
+CREATE INDEX IF NOT EXISTS idx_semantic_entities_analyzer ON semantic_entities(repo_id, analyzer);
+CREATE INDEX IF NOT EXISTS idx_semantic_entities_analyzer_symbol ON semantic_entities(repo_id, analyzer, symbol_id);
+CREATE INDEX IF NOT EXISTS idx_semantic_entities_analyzer_kind ON semantic_entities(repo_id, analyzer, kind);
+CREATE INDEX IF NOT EXISTS idx_semantic_relationships_analyzer ON semantic_relationships(repo_id, analyzer);
+CREATE INDEX IF NOT EXISTS idx_semantic_relationships_analyzer_from ON semantic_relationships(repo_id, analyzer, from_entity_id);
+CREATE INDEX IF NOT EXISTS idx_semantic_relationships_analyzer_to ON semantic_relationships(repo_id, analyzer, to_entity_id);
+`
+
 // CurrentSchemaVersion is the current schema version.
-const CurrentSchemaVersion = 6
+const CurrentSchemaVersion = 7

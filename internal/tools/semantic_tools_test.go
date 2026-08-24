@@ -154,3 +154,52 @@ func TestSemanticSearchPreservesAnalyzerSymbolBridge(t *testing.T) {
 		t.Fatalf("semantic-to-symbol bridge was lost: %#v", decoded)
 	}
 }
+
+func TestGenericTraceBySymbolIDAndImpact(t *testing.T) {
+	store, err := storage.NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	if err := store.ReplaceRepoIndex("local", "generic-tools", "local", "", map[string]string{"a.ts": "a", "b.ts": "b", "c.ts": "c"}, map[string]string{"a.ts": "typescript", "b.ts": "typescript", "c.ts": "typescript"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID("local/generic-tools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := semantic.Entity{ID: "generic-a", Analyzer: semantic.AnalyzerGenericGraph, Repo: "local/generic-tools", File: "a.ts", SymbolID: "a.ts::save#function", Kind: "code_symbol", Name: "save", Line: 1}
+	b := semantic.Entity{ID: "generic-b", Analyzer: semantic.AnalyzerGenericGraph, Repo: "local/generic-tools", File: "b.ts", SymbolID: "b.ts::run#function", Kind: "code_symbol", Name: "run", Line: 2}
+	c := semantic.Entity{ID: "generic-c", Analyzer: semantic.AnalyzerGenericGraph, Repo: "local/generic-tools", File: "c.ts", SymbolID: "c.ts::page#function", Kind: "code_symbol", Name: "page", Line: 3}
+	edges := []semantic.Relationship{
+		{ID: "generic-call-b-a", Analyzer: semantic.AnalyzerGenericGraph, Repo: a.Repo, FromEntityID: b.ID, ToEntityID: a.ID, Kind: "calls", File: b.File, Line: 2},
+		{ID: "generic-ref-c-b", Analyzer: semantic.AnalyzerGenericGraph, Repo: a.Repo, FromEntityID: c.ID, ToEntityID: b.ID, Kind: "references", File: c.File, Line: 3},
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, semantic.Result{Entities: []semantic.Entity{a, b, c}, Relationships: edges}); err != nil {
+		t.Fatal(err)
+	}
+	deps := &Deps{Store: store}
+	traceResult, _, err := TraceRelationshipsHandler(deps)(context.Background(), nil, TraceRelationshipsArgs{
+		Repo: "local/generic-tools", SymbolID: a.SymbolID, Direction: "incoming", RelationshipKinds: []string{"calls"}, Depth: 1, MaxResults: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace := decodeToolJSON(t, traceResult)
+	traceItems := trace["results"].([]any)
+	traceFrom := traceItems[0].(map[string]any)["from"].(map[string]any)
+	if len(traceItems) != 1 || traceFrom["symbol_id"] == nil {
+		t.Fatalf("symbol-id trace did not return compact endpoint bridge: %#v", trace)
+	}
+	impactResult, _, err := AnalyzeImpactHandler(deps)(context.Background(), nil, AnalyzeImpactArgs{
+		Repo: "local/generic-tools", SymbolID: a.SymbolID, Depth: 3, MaxResults: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	impact := decodeToolJSON(t, impactResult)
+	counts := impact["counts"].(map[string]any)
+	if counts["direct"] != float64(1) || counts["transitive"] != float64(1) || counts["files"] != float64(2) {
+		t.Fatalf("impact traversal returned incorrect dependent counts: %#v", impact)
+	}
+}

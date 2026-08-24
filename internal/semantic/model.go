@@ -9,11 +9,17 @@ import (
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
 )
 
+const (
+	AnalyzerFiveM        = "fivem"
+	AnalyzerGenericGraph = "generic_graph"
+)
+
 // Entity is a generic semantic fact extracted from a source file or resource
 // manifest. Kind, Framework, Side, and Metadata are intentionally extensible
 // so analyzers for other ecosystems can use the same storage and query layer.
 type Entity struct {
 	ID        string         `json:"id"`
+	Analyzer  string         `json:"analyzer"`
 	Repo      string         `json:"repo"`
 	File      string         `json:"file"`
 	SymbolID  string         `json:"symbol_id,omitempty"`
@@ -32,6 +38,7 @@ type Entity struct {
 // be presented as a resolved target by callers.
 type Relationship struct {
 	ID           string  `json:"id"`
+	Analyzer     string  `json:"analyzer"`
 	Repo         string  `json:"repo"`
 	FromEntityID string  `json:"from_entity_id"`
 	ToEntityID   string  `json:"to_entity_id,omitempty"`
@@ -68,6 +75,7 @@ type RepositoryInput struct {
 	Repo       string
 	Resource   string
 	SourceType string
+	ModulePath string
 	Files      map[string][]byte
 	Languages  map[string]string
 	Symbols    map[string][]parser.Symbol
