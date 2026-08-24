@@ -35,9 +35,6 @@ func analyzeLuaFile(ctx context.Context, input semantic.FileInput) (semantic.Res
 			return
 		}
 		callee, args := callParts(node, input.Content)
-		if args == nil {
-			return
-		}
 		call := luaCall{Node: node, Callee: callee, Args: args, Source: input.Content}
 		call.Arguments = argumentNodes(args)
 		entities := analyzeCall(call, input)

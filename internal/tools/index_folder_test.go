@@ -121,4 +121,53 @@ func TestIndexFolderPersistsFiveMSemantics(t *testing.T) {
 	if !resourceFound || !exportResourceCorrect {
 		t.Fatalf("semantic resource identity used the storage hash: %#v", entities)
 	}
+	response := decodeToolJSON(t, result)
+	if response["mode"] != "fivem_resource" || response["resource"] != "basic_resource" {
+		t.Fatalf("single resource mode metadata is incorrect: %#v", response)
+	}
+}
+
+func TestIndexFolderDetectsFiveMWorkspaceMode(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"server.cfg":                             "exec resources.cfg\n",
+		"resources.cfg":                          "ensure core_a\nensure app_a\n",
+		"resources/[core]/core_a/fxmanifest.lua": "fx_version 'cerulean'\nserver_script 'server.lua'\n",
+		"resources/[core]/core_a/server.lua":     "RegisterNetEvent('workspace:test')\n",
+		"resources/[app]/app_a/fxmanifest.lua":   "fx_version 'cerulean'\nclient_script 'client.lua'\n",
+		"resources/[app]/app_a/client.lua":       "TriggerServerEvent('workspace:test')\n",
+	}
+	for rel, content := range files {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := storage.NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	result, _, err := IndexFolderHandler(&Deps{Store: store})(context.Background(), nil, IndexFolderArgs{Path: root})
+	if err != nil || result.IsError {
+		t.Fatalf("workspace index failed: result=%#v err=%v", result, err)
+	}
+	decoded := decodeToolJSON(t, result)
+	if decoded["mode"] != "fivem_workspace" || decoded["resources_discovered"] != float64(2) || decoded["resources_enabled"] != float64(2) {
+		t.Fatalf("unexpected workspace response: %#v", decoded)
+	}
+	id, err := repository.Local(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID(id.Repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetWorkspace(repoID); err != nil {
+		t.Fatal(err)
+	}
 }

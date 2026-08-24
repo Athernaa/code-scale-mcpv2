@@ -16,7 +16,10 @@ import (
 	"github.com/Athernaa/code-scale-mcpv2/internal/pathfilter"
 	"github.com/Athernaa/code-scale-mcpv2/internal/repository"
 	"github.com/Athernaa/code-scale-mcpv2/internal/security"
+	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/summarizer"
+	"github.com/Athernaa/code-scale-mcpv2/internal/workspace"
+	workspaceindex "github.com/Athernaa/code-scale-mcpv2/internal/workspace/indexer"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -228,11 +231,43 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 			r, _ := errorResult("save index: " + err.Error())
 			return r, nil, nil
 		}
-		semanticCount, semanticErr := indexSemanticRepository(ctx, deps.Store, owner+"/"+repoName, resourceName, "local", fileContents, fileLangs, symbolsByFile)
-		if semanticErr != nil {
-			log.Printf("index_folder: semantic analysis failed: %v", semanticErr)
-			if len(diagnostics) < 3 {
-				diagnostics = append(diagnostics, "semantic: "+semanticErr.Error())
+		mode, modeErr := workspace.DetectMode(absPath)
+		if modeErr != nil {
+			mode = workspace.KindGeneric
+			diagnostics = append(diagnostics, "workspace: "+modeErr.Error())
+		}
+		semanticCount := 0
+		workspaceCount := 0
+		workspaceRelationships := 0
+		if mode == workspace.KindFiveMWorkspace {
+			repoID, repoIDErr := deps.Store.GetRepoID(owner + "/" + repoName)
+			var wr workspaceindex.Result
+			var semanticErr error
+			if repoIDErr == nil {
+				wr, semanticErr = workspaceindex.Index(ctx, deps.Store, repoID, owner+"/"+repoName, absPath, fileContents, fileLangs, symbolsByFile)
+			} else {
+				semanticErr = repoIDErr
+			}
+			if semanticErr != nil {
+				log.Printf("index_folder: workspace analysis failed: %v", semanticErr)
+				_ = deps.Store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, semantic.Result{})
+				_ = deps.Store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveMWorkspace, semantic.Result{})
+				_ = deps.Store.ClearWorkspaceState(repoID)
+				diagnostics = append(diagnostics, "workspace: "+semanticErr.Error())
+			} else {
+				semanticCount = wr.FiveMCount
+				workspaceCount = wr.WorkspaceCount
+				workspaceRelationships = wr.RelationshipCount
+			}
+		} else {
+			semanticCount, err = indexSemanticRepository(ctx, deps.Store, owner+"/"+repoName, resourceName, "local", fileContents, fileLangs, symbolsByFile)
+			if err != nil {
+				log.Printf("index_folder: semantic analysis failed: %v", err)
+				diagnostics = append(diagnostics, "semantic: "+err.Error())
+			}
+			if repoID, e := deps.Store.GetRepoID(owner + "/" + repoName); e == nil {
+				_ = deps.Store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveMWorkspace, semantic.Result{})
+				_ = deps.Store.ClearWorkspaceState(repoID)
 			}
 		}
 		modulePath := ""
@@ -254,24 +289,50 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 		}
 
 		result := map[string]any{
-			"success":           true,
-			"repo":              owner + "/" + repoName,
-			"folder_path":       absPath,
-			"indexed_at":        time.Now().UTC().Format(time.RFC3339),
-			"files_discovered":  len(sourceFiles),
-			"file_count":        len(fileHashes),
-			"symbol_count":      len(allSymbols),
-			"languages":         langCounts,
-			"skipped_files":     skippedFiles,
-			"parse_failures":    parseFailures,
-			"semantic_entities": semanticCount,
-			"generic_entities":  genericCount,
+			"success":                 true,
+			"mode":                    mode,
+			"repo":                    owner + "/" + repoName,
+			"folder_path":             absPath,
+			"indexed_at":              time.Now().UTC().Format(time.RFC3339),
+			"files_discovered":        len(sourceFiles),
+			"file_count":              len(fileHashes),
+			"symbol_count":            len(allSymbols),
+			"languages":               langCounts,
+			"skipped_files":           skippedFiles,
+			"parse_failures":          parseFailures,
+			"semantic_entities":       semanticCount,
+			"generic_entities":        genericCount,
+			"workspace_entities":      workspaceCount,
+			"workspace_relationships": workspaceRelationships,
 			"_meta": Meta{
 				TimingMs:    t.elapsedMs(),
 				Repo:        owner + "/" + repoName,
 				FileCount:   len(fileHashes),
 				SymbolCount: len(allSymbols),
 			},
+		}
+		if mode == workspace.KindFiveMResource {
+			result["resource"] = resourceName
+		}
+		if mode == workspace.KindFiveMWorkspace {
+			if d, e := workspace.Discover(absPath); e == nil {
+				enabled, disabled, unknown := 0, 0, 0
+				for _, r := range d.Resources {
+					switch r.EnabledState {
+					case "enabled":
+						enabled++
+					case "disabled":
+						disabled++
+					default:
+						unknown++
+					}
+				}
+				result["resources_discovered"] = len(d.Resources)
+				result["resources_enabled"] = enabled
+				result["resources_disabled"] = disabled
+				result["resources_unknown"] = unknown
+				result["duplicate_names"] = d.DuplicateNames
+			}
 		}
 		if len(diagnostics) > 0 {
 			result["diagnostic_samples"] = diagnostics

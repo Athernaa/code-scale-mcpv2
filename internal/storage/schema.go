@@ -205,5 +205,41 @@ CREATE INDEX IF NOT EXISTS idx_semantic_relationships_analyzer_from ON semantic_
 CREATE INDEX IF NOT EXISTS idx_semantic_relationships_analyzer_to ON semantic_relationships(repo_id, analyzer, to_entity_id);
 `
 
+// MigrateV8SQL adds persistent workspace/resource metadata. Resource names are
+// intentionally not unique: duplicate names are valid discovery results but
+// must remain ambiguous during cross-resource resolution.
+const MigrateV8SQL = `
+CREATE TABLE IF NOT EXISTS workspaces (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_id INTEGER NOT NULL UNIQUE REFERENCES repos(id) ON DELETE CASCADE,
+    root_path TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    indexed_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS workspace_resources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    relative_path TEXT NOT NULL,
+    manifest_path TEXT NOT NULL,
+    manifest_type TEXT NOT NULL DEFAULT '',
+    enabled_state TEXT NOT NULL DEFAULT 'unknown',
+    start_order INTEGER NOT NULL DEFAULT 0,
+    group_path TEXT NOT NULL DEFAULT '',
+    UNIQUE(workspace_id, relative_path)
+);
+CREATE TABLE IF NOT EXISTS workspace_configs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    content_hash TEXT NOT NULL DEFAULT '',
+    UNIQUE(workspace_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_workspaces_repo ON workspaces(repo_id);
+CREATE INDEX IF NOT EXISTS idx_workspace_resources_workspace ON workspace_resources(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_workspace_resources_name ON workspace_resources(workspace_id, name);
+CREATE INDEX IF NOT EXISTS idx_workspace_configs_workspace ON workspace_configs(workspace_id);
+`
+
 // CurrentSchemaVersion is the current schema version.
-const CurrentSchemaVersion = 7
+const CurrentSchemaVersion = 8

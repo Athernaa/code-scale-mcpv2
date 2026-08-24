@@ -28,7 +28,7 @@ func NewCodeScaleServer(store *storage.IndexStore) (*mcp.Server, *watcher.Manage
 		Throttle: ratelimit.NewThrottler(),
 	}
 
-	// Register all 18 tools.
+	// Register all 19 tools.
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "index_repo",
 		Description: "Index a GitHub repository's source code for symbol-level retrieval.",
@@ -76,8 +76,13 @@ func NewCodeScaleServer(store *storage.IndexStore) (*mcp.Server, *watcher.Manage
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search_semantics",
-		Description: "Search indexed semantic entities such as FiveM events, callbacks, exports, commands, and resource metadata.",
+		Description: "Search indexed semantic entities such as FiveM events, callbacks, exports, commands, and resource metadata; optionally scope by resource.",
 	}, tools.SearchSemanticsHandler(deps))
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "get_workspace_overview",
+		Description: "Get a compact overview of a detected FiveM workspace and its resources.",
+	}, tools.WorkspaceOverviewHandler(deps))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "trace_relationships",

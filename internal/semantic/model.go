@@ -10,8 +10,9 @@ import (
 )
 
 const (
-	AnalyzerFiveM        = "fivem"
-	AnalyzerGenericGraph = "generic_graph"
+	AnalyzerFiveM          = "fivem"
+	AnalyzerGenericGraph   = "generic_graph"
+	AnalyzerFiveMWorkspace = "fivem_workspace"
 )
 
 // Entity is a generic semantic fact extracted from a source file or resource

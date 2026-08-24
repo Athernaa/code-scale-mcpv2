@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +20,8 @@ import (
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/generic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 	"github.com/Athernaa/code-scale-mcpv2/internal/summarizer"
+	"github.com/Athernaa/code-scale-mcpv2/internal/workspace"
+	workspaceindex "github.com/Athernaa/code-scale-mcpv2/internal/workspace/indexer"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -258,10 +261,30 @@ func (m *Manager) watchLoop(fw *FolderWatch) {
 				}
 			}
 
-			// Only track supported source files
+			// Workspace configuration is indexed as metadata, not as source.
 			lang := parser.DetectLanguage(event.Name)
 			if lang == "" {
-				continue
+				if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+					if mode, _ := workspace.DetectMode(fw.Path); mode == workspace.KindFiveMWorkspace {
+						if local, identityErr := repository.Local(fw.Path); identityErr == nil {
+							if rel, relErr := filepath.Rel(fw.Path, event.Name); relErr == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+								if err := m.store.DeleteFilesUnderPrefix(local.Owner, local.Name, filepath.ToSlash(rel)); err != nil {
+									log.Printf("watcher: directory removal cleanup failed: %v", err)
+								}
+							}
+						}
+						if err := m.rebuildWorkspace(fw.Path, fw.Repo); err != nil {
+							log.Printf("watcher: workspace removal refresh failed: %v", err)
+						}
+					}
+				}
+				if strings.EqualFold(filepath.Ext(event.Name), ".cfg") {
+					pendingMu.Lock()
+					pending[event.Name] = struct{}{}
+					pendingMu.Unlock()
+				} else {
+					continue
+				}
 			}
 
 			// Security filter
@@ -321,6 +344,8 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 		log.Printf("watcher: cannot derive resource name for %s: %v", fw.Path, err)
 		return
 	}
+	mode, _ := workspace.DetectMode(fw.Path)
+	workspaceDirty := false
 
 	for _, fullPath := range paths {
 		relPath, err := filepath.Rel(fw.Path, fullPath)
@@ -338,6 +363,12 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 				repoID, repoErr := m.store.GetRepoID(owner + "/" + repoName)
 				if repoErr != nil {
 					log.Printf("watcher: cannot refresh semantic graph after removing %s: %v", relPath, repoErr)
+				} else if mode == workspace.KindFiveMWorkspace {
+					workspaceDirty = true
+					_ = m.store.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerGenericGraph, relPath, nil)
+					if graphErr := m.refreshGenericRelationships(owner + "/" + repoName); graphErr != nil {
+						log.Printf("watcher: failed to refresh generic relationships: %v", graphErr)
+					}
 				} else if relPath == "fxmanifest.lua" || relPath == "__resource.lua" {
 					_ = m.store.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerGenericGraph, relPath, nil)
 					if rebuildErr := m.rebuildSemanticRepository(repoID, owner+"/"+repoName, resourceName); rebuildErr != nil {
@@ -358,6 +389,10 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 					}
 				}
 			}
+			continue
+		}
+		if strings.EqualFold(filepath.Ext(relPath), ".cfg") {
+			workspaceDirty = true
 			continue
 		}
 
@@ -399,7 +434,9 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 			continue
 		}
 
-		if err := m.updateSemanticFile(owner+"/"+repoName, resourceName, relPath, lang, content, symbols); err != nil {
+		if mode == workspace.KindFiveMWorkspace {
+			workspaceDirty = true
+		} else if err := m.updateSemanticFile(owner+"/"+repoName, resourceName, relPath, lang, content, symbols); err != nil {
 			log.Printf("watcher: semantic update failed for %s: %v", relPath, err)
 		}
 		if err := m.updateGenericFile(owner+"/"+repoName, relPath, lang, content, symbols); err != nil {
@@ -408,6 +445,36 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 
 		log.Printf("watcher: reindexed %s (%d symbols)", relPath, len(symbols))
 	}
+	if workspaceDirty {
+		if err := m.rebuildWorkspace(localID.CanonicalPath, owner+"/"+repoName); err != nil {
+			log.Printf("watcher: workspace refresh failed: %v", err)
+		}
+	}
+}
+
+func (m *Manager) rebuildWorkspace(root, repo string) error {
+	repoID, err := m.store.GetRepoID(repo)
+	if err != nil {
+		return err
+	}
+	files, err := m.store.GetFiles(repoID)
+	if err != nil {
+		return err
+	}
+	contents := map[string][]byte{}
+	langs := map[string]string{}
+	symbols := map[string][]parser.Symbol{}
+	for _, f := range files {
+		data, e := m.store.GetFileContent(repoID, f.Path)
+		if e != nil {
+			continue
+		}
+		contents[f.Path] = data
+		langs[f.Path] = f.Language
+		symbols[f.Path], _ = m.store.GetSymbolsByFile(repoID, f.Path)
+	}
+	_, err = workspaceindex.Index(context.Background(), m.store, repoID, repo, root, contents, langs, symbols)
+	return err
 }
 
 func (m *Manager) updateSemanticFile(repo, resource, filePath, language string, content []byte, symbols []parser.Symbol) error {

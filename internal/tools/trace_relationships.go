@@ -50,16 +50,18 @@ func TraceRelationshipsHandler(deps *Deps) func(context.Context, *mcp.CallToolRe
 			return r, nil, nil
 		}
 		analyzer := args.Analyzer
-		if analyzer == "" {
-			analyzer = semantic.AnalyzerFiveM
-			if args.SymbolID != "" {
-				analyzer = semantic.AnalyzerGenericGraph
-			}
-		}
 		repoID, err := deps.Store.GetRepoID(args.Repo)
 		if err != nil {
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
+		}
+		if analyzer == "" {
+			analyzer = semantic.AnalyzerFiveM
+			if args.SymbolID != "" {
+				analyzer = semantic.AnalyzerGenericGraph
+			} else if _, workspaceErr := deps.Store.GetWorkspace(repoID); workspaceErr == nil {
+				analyzer = semantic.AnalyzerFiveMWorkspace
+			}
 		}
 		entityID := args.EntityID
 		if args.SymbolID != "" {

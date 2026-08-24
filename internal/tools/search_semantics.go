@@ -13,6 +13,7 @@ type SearchSemanticsArgs struct {
 	Kind            string `json:"kind,omitempty" jsonschema:"Optional semantic kind filter"`
 	Side            string `json:"side,omitempty" jsonschema:"Optional side filter: client, server, shared, unknown"`
 	Analyzer        string `json:"analyzer,omitempty" jsonschema:"Optional analyzer filter, such as fivem or generic_graph"`
+	Resource        string `json:"resource,omitempty" jsonschema:"Optional FiveM resource name filter"`
 	IncludeInternal bool   `json:"include_internal,omitempty" jsonschema:"Include generic graph site entities"`
 	MaxResults      int    `json:"max_results,omitempty" jsonschema:"Maximum results (default 20, max 200)"`
 }
@@ -41,7 +42,7 @@ func SearchSemanticsHandler(deps *Deps) func(context.Context, *mcp.CallToolReque
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
 		}
-		entities, truncated, err := deps.Store.SearchSemanticWithOptions(repoID, args.Query, args.Kind, args.Side, args.Analyzer, args.IncludeInternal, args.MaxResults)
+		entities, truncated, err := deps.Store.SearchSemanticWithResourceOptions(repoID, args.Query, args.Kind, args.Side, args.Analyzer, args.Resource, args.IncludeInternal, args.MaxResults)
 		if err != nil {
 			r, _ := errorResult(err.Error())
 			return r, nil, nil

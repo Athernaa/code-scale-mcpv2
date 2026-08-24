@@ -45,8 +45,8 @@ INSERT INTO schema_version(version) VALUES (6);`
 		t.Fatalf("legacy semantic row was not backfilled as FiveM: %q", analyzer)
 	}
 	var version int
-	if err := store.DB().QueryRow("SELECT MAX(version) FROM schema_version").Scan(&version); err != nil || version != 7 {
-		t.Fatalf("schema version was not advanced to v7: version=%d err=%v", version, err)
+	if err := store.DB().QueryRow("SELECT MAX(version) FROM schema_version").Scan(&version); err != nil || version != CurrentSchemaVersion {
+		t.Fatalf("schema version was not advanced to current version: version=%d err=%v", version, err)
 	}
 }
 

@@ -167,6 +167,11 @@ func (s *IndexStore) migrate() error {
 			return fmt.Errorf("migrate v7 indexes: %w", err)
 		}
 	}
+	if currentVersion < 8 {
+		if _, err := s.db.Exec(MigrateV8SQL); err != nil {
+			return fmt.Errorf("migrate v8: %w", err)
+		}
+	}
 
 	// Upsert schema version
 	_, err = s.db.Exec("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", CurrentSchemaVersion)
@@ -891,6 +896,10 @@ func (s *IndexStore) SearchSemantic(repoID int64, query, kind, side string, maxR
 }
 
 func (s *IndexStore) SearchSemanticWithOptions(repoID int64, query, kind, side, analyzer string, includeInternal bool, maxResults int) ([]semantic.Entity, bool, error) {
+	return s.SearchSemanticWithResourceOptions(repoID, query, kind, side, analyzer, "", includeInternal, maxResults)
+}
+
+func (s *IndexStore) SearchSemanticWithResourceOptions(repoID int64, query, kind, side, analyzer, resource string, includeInternal bool, maxResults int) ([]semantic.Entity, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if maxResults <= 0 {
@@ -921,6 +930,10 @@ func (s *IndexStore) SearchSemanticWithOptions(repoID int64, query, kind, side, 
 	if side != "" {
 		queryText += " AND side = ?"
 		args = append(args, side)
+	}
+	if resource != "" {
+		queryText += " AND json_extract(metadata, '$.resource') = ?"
+		args = append(args, resource)
 	}
 	queryText += " ORDER BY file_path, line, id LIMIT ?"
 	args = append(args, maxResults+1)
@@ -969,12 +982,15 @@ func (s *IndexStore) TraceSemanticWithOptions(repoID int64, entityID, analyzer, 
 	if maxResults > 200 {
 		maxResults = 200
 	}
-	var exists int
-	if err := s.db.QueryRow("SELECT 1 FROM semantic_entities WHERE repo_id = ? AND analyzer = ? AND id = ?", repoID, analyzer, entityID).Scan(&exists); err != nil {
+	var entityAnalyzer string
+	if err := s.db.QueryRow("SELECT analyzer FROM semantic_entities WHERE repo_id = ? AND id = ?", repoID, entityID).Scan(&entityAnalyzer); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, false, fmt.Errorf("semantic entity %q not found in analyzer %q", entityID, analyzer)
 		}
 		return nil, false, err
+	}
+	if entityAnalyzer != analyzer && analyzer != semantic.AnalyzerFiveMWorkspace {
+		return nil, false, fmt.Errorf("semantic entity %q belongs to analyzer %q, not %q", entityID, entityAnalyzer, analyzer)
 	}
 	if direction != "incoming" && direction != "outgoing" && direction != "both" {
 		direction = "both"
@@ -1000,7 +1016,10 @@ func (s *IndexStore) TraceSemanticWithOptions(repoID int64, entityID, analyzer, 
 		for _, edge := range edges {
 			ids = append(ids, edge.FromEntityID, edge.ToEntityID)
 		}
-		endpointMap, err := s.semanticEntitiesByIDsLocked(repoID, analyzer, ids)
+		// Workspace edges may intentionally connect workspace-owned relationship
+		// facts to per-resource FiveM entities. The edge itself remains scoped by
+		// analyzer; endpoint lookup is scoped only by repository and stable ID.
+		endpointMap, err := s.semanticEntitiesByIDsLocked(repoID, ids)
 		if err != nil {
 			return nil, false, err
 		}
@@ -1093,7 +1112,7 @@ func (s *IndexStore) querySemanticEdgesLocked(repoID int64, analyzer, direction 
 	return result, rows.Err()
 }
 
-func (s *IndexStore) semanticEntitiesByIDsLocked(repoID int64, analyzer string, ids []string) (map[string]semantic.Entity, error) {
+func (s *IndexStore) semanticEntitiesByIDsLocked(repoID int64, ids []string) (map[string]semantic.Entity, error) {
 	unique := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
 		if id != "" {
@@ -1108,8 +1127,8 @@ func (s *IndexStore) semanticEntitiesByIDsLocked(repoID int64, analyzer string, 
 		values = append(values, id)
 	}
 	query := `SELECT id, analyzer, file_path, symbol_id, kind, name, framework, side, line, end_line, dynamic, metadata
-		FROM semantic_entities WHERE repo_id = ? AND analyzer = ? AND id IN (` + strings.TrimRight(strings.Repeat("?,", len(values)), ",") + ")"
-	args := []any{repoID, analyzer}
+		FROM semantic_entities WHERE repo_id = ? AND id IN (` + strings.TrimRight(strings.Repeat("?,", len(values)), ",") + ")"
+	args := []any{repoID}
 	for _, id := range values {
 		args = append(args, id)
 	}
@@ -1969,6 +1988,74 @@ func (s *IndexStore) DeleteFileFromIndex(owner, name, filePath string) error {
 		_ = os.Remove(contentPath)
 	}
 
+	return nil
+}
+
+// DeleteFilesUnderPrefix removes indexed files and all analyzer facts owned by
+// a removed directory. It is used by workspace watchers for resource removal.
+func (s *IndexStore) DeleteFilesUnderPrefix(owner, name, prefix string) error {
+	if !security.SafeRepoComponent(owner) || !security.SafeRepoComponent(name) || filepath.IsAbs(prefix) || prefix == ".." || strings.HasPrefix(filepath.ToSlash(prefix), "../") {
+		return fmt.Errorf("invalid file prefix")
+	}
+	prefix = strings.TrimSuffix(filepath.ToSlash(filepath.Clean(prefix)), "/")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var repoID int64
+	var err error
+	err = s.db.QueryRow("SELECT id FROM repos WHERE repo = ?", owner+"/"+name).Scan(&repoID)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	pattern := prefix + "/%"
+	if _, err = tx.Exec(`DELETE FROM semantic_relationships WHERE repo_id=? AND (file_path=? OR file_path LIKE ? OR from_entity_id IN (SELECT id FROM semantic_entities WHERE repo_id=? AND (file_path=? OR file_path LIKE ?)) OR to_entity_id IN (SELECT id FROM semantic_entities WHERE repo_id=? AND (file_path=? OR file_path LIKE ?)))`, repoID, prefix, pattern, repoID, prefix, pattern, repoID, prefix, pattern); err != nil {
+		return err
+	}
+	if _, err = tx.Exec("DELETE FROM semantic_entities WHERE repo_id=? AND (file_path=? OR file_path LIKE ?)", repoID, prefix, pattern); err != nil {
+		return err
+	}
+	if _, err = tx.Exec("DELETE FROM symbols WHERE repo_id=? AND (file_path=? OR file_path LIKE ?)", repoID, prefix, pattern); err != nil {
+		return err
+	}
+	rows, err := tx.Query("SELECT id FROM files WHERE repo_id=? AND (path=? OR path LIKE ?)", repoID, prefix, pattern)
+	if err != nil {
+		return err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, err = tx.Exec("DELETE FROM files_fts WHERE rowid=?", id); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.Exec("DELETE FROM files WHERE repo_id=? AND (path=? OR path LIKE ?)", repoID, prefix, pattern); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	dir, err := s.contentDir(owner, name)
+	if err == nil {
+		target := filepath.Join(dir, filepath.FromSlash(prefix))
+		rel, _ := filepath.Rel(filepath.Clean(dir), filepath.Clean(target))
+		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			_ = os.RemoveAll(target)
+		}
+	}
 	return nil
 }
 

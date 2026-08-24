@@ -138,3 +138,13 @@ Python, JavaScript, TypeScript, Go, Rust, Java, PHP, C, C++, Ruby, Kotlin, Swift
 - Watch active development folders with `watch_folder` to keep the index fresh
 - Use `context_lines` on `get_symbol` when you need to see code around a function (e.g., imports, nearby constants)
 - Use `verify: true` on `get_symbol` if you suspect the source file has changed since indexing
+
+### FiveM workspace routing
+
+`index_folder` conservatively reports `generic`, `fivem_resource`, or
+`fivem_workspace`. For a server-data root, use `get_workspace_overview` for a
+bounded summary, then scope `search_semantics` with `resource` and trace the
+returned entity or symbol IDs. Retrieve source only with `get_symbol` for the
+small set of relevant endpoints. Workspace facts include resource names and
+start/config metadata; they do not imply runtime state beyond literal cfg
+commands. Duplicate or dynamic resource targets remain unresolved.
