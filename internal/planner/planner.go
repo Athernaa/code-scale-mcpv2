@@ -14,6 +14,168 @@ import (
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 )
 
+type plannerFileIndex struct {
+	store  *storage.IndexStore
+	repoID int64
+	known  map[string]bool
+	work   *plannerBudget
+	ctx    context.Context
+}
+
+func (f *plannerFileIndex) batch(paths []string) (map[string]bool, error) {
+	if err := contextErr(f.ctx); err != nil {
+		return nil, err
+	}
+	if len(paths) == 0 {
+		return map[string]bool{}, nil
+	}
+	normalized := make([]string, 0, len(paths))
+	for _, path := range paths {
+		path = normalizePath(path)
+		if path != "" {
+			normalized = append(normalized, path)
+		}
+	}
+	if len(normalized) == 0 {
+		return map[string]bool{}, nil
+	}
+	f.work.fileLookups++
+	result, err := f.store.FilesExist(f.repoID, normalized)
+	if err != nil {
+		return nil, err
+	}
+	for path := range result {
+		f.known[path] = true
+	}
+	return result, contextErr(f.ctx)
+}
+
+func (f *plannerFileIndex) exists(path string) (bool, error) {
+	path = normalizePath(path)
+	if path == "" {
+		return false, nil
+	}
+	if value, ok := f.known[path]; ok {
+		return value, nil
+	}
+	result, err := f.batch([]string{path})
+	return result[path], err
+}
+
+type seedCollector struct {
+	repo        string
+	seeds       map[string]*Seed
+	seedAnchors map[string]string
+	entities    map[string]plannerSeedEntity
+	ambiguous   map[string]bool
+	priorities  map[string]int
+	work        *plannerBudget
+}
+
+func newSeedCollector(repo string, work *plannerBudget) *seedCollector {
+	return &seedCollector{repo: repo, seeds: map[string]*Seed{}, seedAnchors: map[string]string{}, entities: map[string]plannerSeedEntity{}, ambiguous: map[string]bool{}, priorities: map[string]int{}, work: work}
+}
+
+func (c *seedCollector) add(entity semantic.Entity, typ, match string, priority int, expand bool) bool {
+	anchor := entitySourceAnchor(entity)
+	if _, exists := c.seeds[anchor]; !exists {
+		if c.work.seedsUsed >= c.work.maxSeeds {
+			c.work.seedExhausted = true
+			return false
+		}
+		c.work.seedsUsed++
+		c.priorities[anchor] = priority
+		seedID := semantic.StableID("planner_seed", c.repo, anchor)
+		c.seedAnchors[seedID] = anchor
+		c.seeds[anchor] = &Seed{ID: seedID, Type: typ, SourceID: entity.ID, SourceIDs: []string{entity.ID}, SymbolID: entity.SymbolID, File: normalizePath(entity.File), Name: entity.Name, Match: match, Authority: entityAuthority(entity), Authorities: nonEmptyValues(entityAuthority(entity))}
+	} else {
+		seed := c.seeds[anchor]
+		seed.SourceIDs = appendUnique(seed.SourceIDs, entity.ID)
+		sort.Strings(seed.SourceIDs)
+		if seed.SourceID == "" || entity.ID < seed.SourceID {
+			seed.SourceID = entity.ID
+		}
+		if seed.Type != "symbol" && typ == "symbol" {
+			seed.Type = typ
+		}
+		if seed.Match == "" || matchPriority(match) > matchPriority(seed.Match) {
+			seed.Match = match
+		}
+		mergeSeedAuthority(seed, entityAuthority(entity))
+		if entity.File != "" && (seed.File == "" || normalizePath(entity.File) < seed.File) {
+			seed.File = normalizePath(entity.File)
+		}
+		if entity.Name != "" && (seed.Name == "" || entity.Name < seed.Name) {
+			seed.Name = entity.Name
+		}
+	}
+	if priority < c.priorities[anchor] {
+		c.priorities[anchor] = priority
+	}
+	if existing, ok := c.entities[entity.ID]; ok {
+		existing.expand = existing.expand || expand
+		existing.priority = minInt(existing.priority, priority)
+		c.entities[entity.ID] = existing
+	} else {
+		c.entities[entity.ID] = plannerSeedEntity{entity: entity, anchor: anchor, priority: priority, expand: expand}
+	}
+	return true
+}
+
+func (c *seedCollector) markAmbiguous(anchor string) {
+	if anchor == "" {
+		return
+	}
+	c.ambiguous[anchor] = true
+	if seed, ok := c.seeds[anchor]; ok {
+		seed.Ambiguous = true
+	}
+}
+
+func (c *seedCollector) sortedSeeds() []Seed {
+	anchors := make([]string, 0, len(c.seeds))
+	for anchor := range c.seeds {
+		anchors = append(anchors, anchor)
+	}
+	sort.Strings(anchors)
+	result := make([]Seed, 0, len(anchors))
+	for _, anchor := range anchors {
+		seed := *c.seeds[anchor]
+		seed.Ambiguous = c.ambiguous[anchor]
+		if len(seed.Authorities) > 0 {
+			seed.Authority = authorityLabel(seed.Authorities)
+		}
+		result = append(result, seed)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		pi := c.priorities[c.seedAnchors[result[i].ID]]
+		pj := c.priorities[c.seedAnchors[result[j].ID]]
+		if pi != pj {
+			return pi < pj
+		}
+		return result[i].ID < result[j].ID
+	})
+	return result
+}
+
+func (c *seedCollector) sortedEntities() []plannerSeedEntity {
+	result := make([]plannerSeedEntity, 0, len(c.entities))
+	for _, item := range c.entities {
+		item.ambiguous = c.ambiguous[item.anchor]
+		result = append(result, item)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].priority != result[j].priority {
+			return result[i].priority < result[j].priority
+		}
+		if result[i].anchor != result[j].anchor {
+			return result[i].anchor < result[j].anchor
+		}
+		return result[i].entity.ID < result[j].entity.ID
+	})
+	return result
+}
+
 func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 	if p == nil || p.Store == nil {
 		return Plan{}, fmt.Errorf("planner store is not configured")
@@ -30,34 +192,41 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 	if request.MaxCandidates < 0 || request.MaxCandidates > HardMaxCandidates {
 		return Plan{}, fmt.Errorf("max_candidates must be between 0 and %d", HardMaxCandidates)
 	}
+	if err := contextErr(ctx); err != nil {
+		return Plan{}, err
+	}
 	maxCandidates := request.MaxCandidates
 	if maxCandidates == 0 {
 		maxCandidates = DefaultMaxCandidates
-	}
-	if ctx == nil {
-		ctx = context.Background()
 	}
 	repoID, err := p.Store.GetRepoID(request.Repo)
 	if err != nil {
 		return Plan{}, err
 	}
-	files, err := p.Store.GetFiles(repoID)
+	work := newPlannerBudget()
+	fileIndex := &plannerFileIndex{store: p.Store, repoID: repoID, known: map[string]bool{}, work: work, ctx: ctx}
+	intent := interpretTask(request.Task)
+	fileHints, err := fileIndex.batch(intent.FileHints)
 	if err != nil {
 		return Plan{}, err
 	}
-	fileSet := make(map[string]bool, len(files))
-	for _, file := range files {
-		fileSet[normalizePath(file.Path)] = true
+	fileHint := firstExistingFileHint(intent.FileHints, fileHints)
+	if request.FocusFile != "" {
+		focusFile := normalizePath(request.FocusFile)
+		exists, lookupErr := fileIndex.exists(focusFile)
+		if lookupErr != nil {
+			return Plan{}, lookupErr
+		}
+		if !exists {
+			return Plan{}, fmt.Errorf("focus_file %q is not indexed", request.FocusFile)
+		}
+		request.FocusFile = focusFile
 	}
-	if request.FocusFile != "" && !fileSet[normalizePath(request.FocusFile)] {
-		return Plan{}, fmt.Errorf("focus_file %q is not indexed", request.FocusFile)
-	}
-	intent := interpretTask(request.Task)
 	health, err := p.indexHealth(repoID)
 	if err != nil {
 		return Plan{}, err
 	}
-	result := Plan{Repo: request.Repo, TaskClass: intent.TaskClass, TaskConfidence: intent.Confidence, IndexState: health.state, IndexIncomplete: health.incomplete, Diagnostics: append([]string(nil), health.diagnostics...), DegradedResources: append([]string(nil), health.degraded...)}
+	result := Plan{Repo: request.Repo, TaskClass: intent.TaskClass, TaskConfidence: intent.Confidence, IndexState: health.state, IndexIncomplete: health.incomplete, Diagnostics: append([]string(nil), health.diagnostics...), DegradedResources: append([]string(nil), health.degraded...), Truncated: health.truncated}
 	if request.FocusResource != "" {
 		request.FocusResource = p.applyResourceFocus(repoID, request.FocusResource, &result, &intent)
 	}
@@ -66,136 +235,239 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 	}
 
 	acc := make(map[string]*candidateAccumulator)
-	seedEntities := make([]semantic.Entity, 0)
-	seedSymbols := make([]parser.Symbol, 0)
-	seenSeed := make(map[string]bool)
-	seenSymbols := make(map[string]bool)
-	exactSymbolCount, exactSemanticCount := 0, 0
+	collector := newSeedCollector(request.Repo, work)
+	exactAnchorsByHint := map[string]map[string]bool{}
+	exactTruncatedByHint := map[string]bool{}
+	exactSymbolAnchors := map[string]bool{}
+	matchedHints := map[string]bool{}
 
 	if request.FocusSymbolID != "" {
 		symbol, lookupErr := p.Store.GetSymbolByID(repoID, request.FocusSymbolID)
 		if lookupErr != nil {
 			return Plan{}, fmt.Errorf("focus_symbol_id: %w", lookupErr)
 		}
-		seedSymbols = append(seedSymbols, *symbol)
-		seenSymbols[symbol.ID] = true
-		result.Seeds = append(result.Seeds, Seed{ID: symbol.ID, Type: "symbol", SourceID: symbol.ID, SymbolID: symbol.ID, File: symbol.File, Name: symbol.Name, Match: "explicit_focus"})
-		addSymbolCandidate(acc, request.Repo, *symbol, []string{"explicit_focus"}, 0, fileSet)
 		entity := genericEntityForSymbol(request.Repo, *symbol)
-		seedEntities = append(seedEntities, entity)
-		seenSeed[entity.ID] = true
+		collector.add(entity, "symbol", "explicit_focus", 0, true)
+		addSymbolCandidate(acc, request.Repo, *symbol, []string{"explicit_focus"}, 0, work)
+		exactSymbolAnchors[entitySourceAnchor(entity)] = true
 	}
 
-	fileHint := firstExistingFileHint(intent.FileHints, fileSet)
-	for _, hint := range appendUniqueAll(nil, intent.SymbolHints...) {
-		if err := ctx.Err(); err != nil {
+	for _, hint := range sortedUnique(intent.SymbolHints) {
+		if err := contextErr(ctx); err != nil {
 			return Plan{}, err
 		}
-		symbols, searchErr := p.Store.SearchSymbolsExact(repoID, hint, fileHint, HardMaxCandidates+1)
+		if !work.allowLookup() || work.exactRows >= work.maxExactAnchors {
+			work.exactExhausted = true
+			break
+		}
+		work.exactQueries++
+		remaining := work.maxExactAnchors - work.exactRows
+		perQuery := minInt(DefaultMaxExactAnchors, remaining)
+		symbols, searchErr := p.Store.SearchSymbolsExact(repoID, hint, fileHint, perQuery+1)
 		if searchErr != nil {
 			return Plan{}, searchErr
 		}
-		if len(symbols) > 0 {
-			exactSymbolCount += len(symbols)
-			if len(symbols) > 1 {
-				result.Ambiguities = append(result.Ambiguities, Ambiguity{Kind: "symbol", Query: hint, CandidateCount: len(symbols)})
-			}
-			for _, symbol := range symbols {
-				if !seenSymbols[symbol.ID] {
-					seedSymbols = append(seedSymbols, symbol)
-					seenSymbols[symbol.ID] = true
-					addSymbolCandidate(acc, request.Repo, symbol, []string{"exact_symbol_match"}, 0, fileSet)
-					entity := genericEntityForSymbol(request.Repo, symbol)
-					if !seenSeed[entity.ID] {
-						seedEntities = append(seedEntities, entity)
-						seenSeed[entity.ID] = true
-					}
-				}
-			}
+		anchors := exactAnchorsByHint[hint]
+		if anchors == nil {
+			anchors = map[string]bool{}
+			exactAnchorsByHint[hint] = anchors
+		}
+		if len(symbols) > perQuery {
+			exactTruncatedByHint[hint] = true
+			symbols = symbols[:perQuery]
+		}
+		for _, symbol := range symbols {
+			work.exactRows++
+			entity := genericEntityForSymbol(request.Repo, symbol)
+			anchor := entitySourceAnchor(entity)
+			anchors[anchor] = true
+			exactSymbolAnchors[anchor] = true
+			matchedHints[hint] = true
+			collector.add(entity, "symbol", "exact_symbol_match", 10, true)
+			addSymbolCandidate(acc, request.Repo, symbol, []string{"exact_symbol_match"}, 0, work)
 		}
 	}
 
-	semanticHints := appendUniqueAll(nil, intent.SemanticHints...)
-	for _, hint := range semanticHints {
-		entities, truncated, searchErr := p.Store.SearchSemanticWithResourceTargetFrameworkOptions(repoID, hint, "", "", "", "", "", "", true, HardMaxCandidates+1)
+	exactSemanticAnchors := map[string]bool{}
+	for _, hint := range sortedUnique(intent.SemanticHints) {
+		if err := contextErr(ctx); err != nil {
+			return Plan{}, err
+		}
+		if !work.allowLookup() || work.semanticRows >= work.maxSemanticRows {
+			work.exactExhausted = true
+			break
+		}
+		work.semanticQueries++
+		remaining := work.maxSemanticRows - work.semanticRows
+		perQuery := minInt(DefaultMaxSemanticRows/2, remaining)
+		entities, truncated, searchErr := p.Store.SearchSemanticWithResourceTargetFrameworkOptions(repoID, hint, "", "", "", "", "", "", true, perQuery)
 		if searchErr != nil {
 			return Plan{}, searchErr
 		}
-		exact := make([]semantic.Entity, 0)
+		anchors := exactAnchorsByHint[hint]
+		if anchors == nil {
+			anchors = map[string]bool{}
+			exactAnchorsByHint[hint] = anchors
+		}
+		semanticExactMatches := 0
 		for _, entity := range entities {
-			if entity.Analyzer == semantic.AnalyzerFiveMWorkspace {
-				// Workspace entities are topology/relationship endpoints. Seed
-				// the canonical per-resource fact and traverse workspace edges
-				// separately so analyzer ownership remains unambiguous.
+			if work.semanticRows >= work.maxSemanticRows {
+				work.exactExhausted = true
+				break
+			}
+			work.semanticRows++
+			if entity.Analyzer == semantic.AnalyzerFiveMWorkspace || entity.Kind == framework.KindStatus {
 				continue
 			}
-			operation, _ := entity.Metadata["operation"].(string)
+			operation := metadataOperation(entity)
 			if fileHint != "" && normalizePath(entity.File) != fileHint {
 				continue
 			}
-			if entity.Name == hint || operation == hint {
-				exact = append(exact, entity)
+			if entity.Name != hint && operation != hint {
+				continue
 			}
-		}
-		if truncated && len(exact) >= HardMaxCandidates {
-			result.Ambiguities = append(result.Ambiguities, Ambiguity{Kind: "semantic", Query: hint, CandidateCount: HardMaxCandidates + 1})
-		}
-		if len(exact) > 0 {
-			exactSemanticCount += len(exact)
-			if len(exact) > 1 {
-				result.Ambiguities = append(result.Ambiguities, Ambiguity{Kind: "semantic", Query: hint, CandidateCount: len(exact)})
+			anchor := entitySourceAnchor(entity)
+			anchors[anchor] = true
+			exactSemanticAnchors[anchor] = true
+			matchedHints[hint] = true
+			semanticExactMatches++
+			priority := 20
+			if entity.Kind == framework.KindOperation {
+				priority = 15
+				intent.ExpansionDepth = 2
 			}
-			for _, entity := range exact {
-				if entity.Kind == framework.KindOperation {
-					intent.ExpansionDepth = 2
-				}
-				if !seenSeed[entity.ID] {
-					seedEntities = append(seedEntities, entity)
-					seenSeed[entity.ID] = true
-				}
-				addEntityCandidate(acc, entity, []string{semanticReason(entity, hint)}, 0, fileSet)
-				result.Seeds = append(result.Seeds, seedFromEntity(entity, "exact_semantic_match"))
-			}
+			collector.add(entity, "semantic_entity", semanticReason(entity, hint), priority, true)
+			addEntityCandidate(acc, entity, []string{semanticReason(entity, hint)}, 0, work)
 		}
-	}
-	if len(seedSymbols) > 0 {
-		// Symbol seeds are emitted once, in stable order, even when a symbol
-		// also has several semantic facts.
-		for _, symbol := range seedSymbols {
-			if !seedAlready(result.Seeds, symbol.ID) {
-				result.Seeds = append(result.Seeds, Seed{ID: symbol.ID, Type: "symbol", SourceID: symbol.ID, SymbolID: symbol.ID, File: symbol.File, Name: symbol.Name, Match: "exact_symbol_match"})
-			}
-		}
-	}
-	adjustTaskClass(&intent, exactSymbolCount, exactSemanticCount)
-	result.TaskClass, result.TaskConfidence = intent.TaskClass, intent.Confidence
-	for _, hint := range intent.Terms {
-		if !hasMatchingSeed(result.Seeds, hint) && !hasMatchingFile(hint, fileSet) {
-			result.UnresolvedHints = appendUnique(result.UnresolvedHints, hint)
+		if truncated && semanticExactMatches >= perQuery {
+			exactTruncatedByHint[hint] = true
 		}
 	}
 
-	if (len(seedEntities) > 0 && intent.TaskClass != "exact_symbol") || request.IncludeImpact {
-		p.expand(ctx, repoID, seedEntities, intent, request, acc, fileSet, &result)
-	}
-	// A find/locate request deliberately remains seed-only. An explicit focus
-	// still receives relationship context for a fix/trace request.
-	if len(seedEntities) == 0 && len(seedSymbols) == 0 && len(result.UnresolvedHints) == 0 && len(intent.FileHints) > 0 {
-		for _, hint := range intent.FileHints {
-			if fileSet[normalizePath(hint)] {
-				addFileCandidate(acc, request.Repo, normalizePath(hint), fileSet)
+	for _, hint := range sortedKeys(exactAnchorsByHint) {
+		anchors := exactAnchorsByHint[hint]
+		count := len(anchors)
+		if exactTruncatedByHint[hint] {
+			count++
+		}
+		if count > 1 {
+			addAmbiguity(&result, Ambiguity{Kind: "source_anchor", Query: hint, CandidateCount: count, Truncated: exactTruncatedByHint[hint]})
+			for anchor := range anchors {
+				collector.markAmbiguous(anchor)
 			}
 		}
 	}
-	p.hydrateCandidates(repoID, acc)
-	result = finalize(result, acc, maxCandidates, request.FocusFile, request.FocusResource, health)
+
+	// Weak prose is never allowed to create a large exact-seed set. Fallback
+	// lookup is deliberately small and reuses the indexed symbol search tiers.
+	fallbackTerms := append([]string{}, intent.HighSignalHints...)
+	if intent.BroadIntent {
+		fallbackTerms = append(fallbackTerms, intent.WeakTerms...)
+	}
+	for _, hint := range sortedUnique(fallbackTerms) {
+		if matchedHints[hint] || !work.allowLookup() || work.fallbackMatches >= work.maxFallbackMatches {
+			if work.fallbackMatches >= work.maxFallbackMatches {
+				work.fallbackExhausted = true
+			}
+			continue
+		}
+		if err := contextErr(ctx); err != nil {
+			return Plan{}, err
+		}
+		work.fallbackQueries++
+		perQuery := minInt(work.maxFallbackPerTerm, work.maxFallbackMatches-work.fallbackMatches)
+		fallback, searchErr := p.Store.SearchSymbolsWithTier(repoID, hint, "", "", fileHint, perQuery)
+		if searchErr != nil {
+			return Plan{}, searchErr
+		}
+		accepted := 0
+		for _, item := range fallback {
+			work.fallbackMatches++
+			if item.Tier == storage.MatchTierFuzzy {
+				continue
+			}
+			entity := genericEntityForSymbol(request.Repo, item.Symbol)
+			collector.add(entity, "symbol", "lexical_fallback", 80, false)
+			addSymbolCandidate(acc, request.Repo, item.Symbol, []string{"lexical_fallback", "broad_entry_point"}, 0, work)
+			accepted++
+			if accepted >= work.maxFallbackPerTerm {
+				break
+			}
+		}
+		if accepted > 0 {
+			matchedHints[hint] = true
+		}
+	}
+	if work.fallbackMatches >= work.maxFallbackMatches {
+		work.fallbackExhausted = true
+	}
+
+	uniqueExactAnchors := map[string]bool{}
+	for _, anchors := range exactAnchorsByHint {
+		for anchor := range anchors {
+			uniqueExactAnchors[anchor] = true
+		}
+	}
+	hasSymbolExact := false
+	for anchor := range exactSymbolAnchors {
+		if uniqueExactAnchors[anchor] {
+			hasSymbolExact = true
+			break
+		}
+	}
+	_ = exactSemanticAnchors
+	adjustTaskClass(&intent, len(uniqueExactAnchors), hasSymbolExact)
+	result.TaskClass, result.TaskConfidence = intent.TaskClass, intent.Confidence
+	result.Seeds = collector.sortedSeeds()
+	for _, hint := range intent.Terms {
+		if !matchedHints[hint] && !hasMatchingFile(hint, fileHints) {
+			appendUnresolved(&result, hint)
+		}
+	}
+
+	seedEntities := collector.sortedEntities()
+	if (len(seedEntities) > 0 && intent.TaskClass != "exact_symbol") || request.IncludeImpact {
+		if err := p.expand(ctx, repoID, seedEntities, intent, request, acc, work, &result); err != nil {
+			return Plan{}, err
+		}
+	}
+	if len(seedEntities) == 0 && len(result.UnresolvedHints) == 0 && len(intent.FileHints) > 0 {
+		for _, hint := range intent.FileHints {
+			if fileHints[normalizePath(hint)] {
+				addFileCandidate(acc, request.Repo, normalizePath(hint), work)
+			}
+		}
+	}
+	applyFocusEvidence(acc, request.FocusFile, request.FocusResource, work)
+	if err := contextErr(ctx); err != nil {
+		return Plan{}, err
+	}
+	if err := p.hydrateCandidates(ctx, repoID, acc); err != nil {
+		return Plan{}, err
+	}
+	result.Seeds, err = p.filterCurrentSeeds(ctx, repoID, result.Seeds, fileIndex)
+	if err != nil {
+		return Plan{}, err
+	}
+	files, err := fileIndex.batch(candidateFiles(acc))
+	if err != nil {
+		return Plan{}, err
+	}
+	result = finalize(result, acc, maxCandidates, request.FocusFile, request.FocusResource, files)
+	applyBudgetDiagnostics(&result, work)
 	if request.Debug {
-		result.Debug = &DebugDetails{EvidenceCount: evidenceCount(acc), CandidatesConsidered: len(acc), SeedsConsidered: len(result.Seeds)}
+		result.Debug = &DebugDetails{EvidenceCount: evidenceCount(acc), CandidatesConsidered: len(acc), SeedsConsidered: len(result.Seeds), SeedBudgetUsed: work.seedsUsed, EvidenceBudgetUsed: work.evidenceUsed, GraphEdgesConsidered: work.graphEdges, TraceQueries: work.traceQueries, ExactQueries: work.exactQueries, SemanticQueries: work.semanticQueries, FallbackQueries: work.fallbackQueries, ExactMatchesConsidered: work.exactRows, SemanticMatchesConsidered: work.semanticRows, FallbackMatchesConsidered: work.fallbackMatches, FileLookups: work.fileLookups}
+	}
+	if err := contextErr(ctx); err != nil {
+		return Plan{}, err
 	}
 	return result, nil
 }
 
-func (p *Planner) hydrateCandidates(repoID int64, acc map[string]*candidateAccumulator) {
+func (p *Planner) hydrateCandidates(ctx context.Context, repoID int64, acc map[string]*candidateAccumulator) error {
+	if err := contextErr(ctx); err != nil {
+		return err
+	}
 	ids := make([]string, 0)
 	for _, candidate := range acc {
 		if candidate.symbol == nil && candidate.entity != nil && candidate.entity.SymbolID != "" {
@@ -204,7 +476,7 @@ func (p *Planner) hydrateCandidates(repoID int64, acc map[string]*candidateAccum
 	}
 	symbols, err := p.Store.GetSymbolsByIDs(repoID, ids)
 	if err != nil {
-		return
+		return err
 	}
 	for _, candidate := range acc {
 		if candidate.symbol != nil || candidate.entity == nil {
@@ -221,6 +493,44 @@ func (p *Planner) hydrateCandidates(repoID int64, acc map[string]*candidateAccum
 			candidate.repo = candidate.entity.Repo
 		}
 	}
+	return contextErr(ctx)
+}
+
+func (p *Planner) filterCurrentSeeds(ctx context.Context, repoID int64, seeds []Seed, files *plannerFileIndex) ([]Seed, error) {
+	if err := contextErr(ctx); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(seeds))
+	paths := make([]string, 0, len(seeds))
+	for _, seed := range seeds {
+		if seed.SymbolID != "" {
+			ids = append(ids, seed.SymbolID)
+		}
+		if seed.File != "" {
+			paths = append(paths, seed.File)
+		}
+	}
+	symbols, err := p.Store.GetSymbolsByIDs(repoID, ids)
+	if err != nil {
+		return nil, err
+	}
+	validFiles, err := files.batch(paths)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]Seed, 0, len(seeds))
+	for _, seed := range seeds {
+		if seed.SymbolID != "" {
+			if _, ok := symbols[seed.SymbolID]; !ok {
+				continue
+			}
+		}
+		if seed.File != "" && !validFiles[normalizePath(seed.File)] {
+			continue
+		}
+		result = append(result, seed)
+	}
+	return result, contextErr(ctx)
 }
 
 type healthState struct {
@@ -228,10 +538,19 @@ type healthState struct {
 	incomplete  bool
 	diagnostics []string
 	degraded    []string
+	truncated   bool
 }
 
 func (p *Planner) indexHealth(repoID int64) (healthState, error) {
 	health := healthState{state: "complete"}
+	fileCount, err := p.Store.CountFiles(repoID)
+	if err != nil {
+		return healthState{}, err
+	}
+	if fileCount == 0 {
+		health.state = "unknown"
+		health.diagnostics = append(health.diagnostics, "empty_index")
+	}
 	workspaceInfo, err := p.Store.GetWorkspace(repoID)
 	if err == nil {
 		health.incomplete = workspaceInfo.Incomplete || workspaceInfo.IndexTruncated || workspaceInfo.FilesDiscoveredTotal != workspaceInfo.FilesIndexed
@@ -242,7 +561,7 @@ func (p *Planner) indexHealth(repoID int64) (healthState, error) {
 	} else if !storage.IsNotFound(err) {
 		return healthState{}, err
 	}
-	frameworkFacts, _, err := p.Store.SearchSemanticWithResourceTargetFrameworkOptions(repoID, "", framework.KindStatus, "", semantic.AnalyzerFramework, "", "", "", true, 100)
+	frameworkFacts, truncated, err := p.Store.SearchSemanticWithResourceTargetFrameworkOptions(repoID, "", framework.KindStatus, "", semantic.AnalyzerFramework, "", "", "", true, MaxDegradedResources+1)
 	if err != nil {
 		return healthState{}, err
 	}
@@ -252,17 +571,26 @@ func (p *Planner) indexHealth(repoID int64) (healthState, error) {
 			continue
 		}
 		status, _ := entity.Metadata["status"].(string)
-		if status == "failed" {
-			seen[entity.Name] = true
+		if status != "failed" {
+			continue
+		}
+		seen[entity.Name] = true
+		if len(health.degraded) < MaxDegradedResources {
 			health.degraded = append(health.degraded, entity.Name)
+		} else {
+			truncated = true
 		}
 	}
 	sort.Strings(health.degraded)
 	if len(health.degraded) > 0 {
 		health.diagnostics = append(health.diagnostics, "framework_analysis_degraded")
-		if !health.incomplete {
+		if !health.incomplete && health.state != "unknown" {
 			health.state = "degraded"
 		}
+	}
+	if truncated {
+		health.truncated = true
+		health.diagnostics = append(health.diagnostics, "degraded_framework_resources_truncated")
 	}
 	return health, nil
 }
@@ -271,7 +599,7 @@ func (p *Planner) applyResourceFocus(repoID int64, focus string, result *Plan, i
 	resources, err := p.Store.GetWorkspaceResources(repoID)
 	if err != nil {
 		if !storage.IsNotFound(err) {
-			result.Diagnostics = append(result.Diagnostics, "focus_resource_lookup_failed")
+			appendDiagnostic(result, "focus_resource_lookup_failed")
 		}
 		return focus
 	}
@@ -284,11 +612,11 @@ func (p *Planner) applyResourceFocus(repoID int64, focus string, result *Plan, i
 		}
 	}
 	if matches == 0 {
-		result.Diagnostics = append(result.Diagnostics, "focus_resource_not_found")
+		appendDiagnostic(result, "focus_resource_not_found")
 		return focus
 	}
 	if matches > 1 {
-		result.Ambiguities = append(result.Ambiguities, Ambiguity{Kind: "resource", Query: focus, CandidateCount: matches})
+		addAmbiguity(result, Ambiguity{Kind: "resource", Query: focus, CandidateCount: matches})
 		intent.ResourceHints = appendUnique(intent.ResourceHints, focus)
 		return focus
 	}
@@ -311,7 +639,7 @@ func (p *Planner) taskResourceHint(repoID int64, terms []string, result *Plan) s
 			}
 		}
 		if matches > 1 {
-			result.Ambiguities = append(result.Ambiguities, Ambiguity{Kind: "resource", Query: term, CandidateCount: matches})
+			addAmbiguity(result, Ambiguity{Kind: "resource", Query: term, CandidateCount: matches})
 			continue
 		}
 		if matches == 1 {
@@ -321,7 +649,7 @@ func (p *Planner) taskResourceHint(repoID int64, terms []string, result *Plan) s
 	return ""
 }
 
-func (p *Planner) expand(ctx context.Context, repoID int64, seeds []semantic.Entity, intent TaskIntent, request Request, acc map[string]*candidateAccumulator, fileSet map[string]bool, result *Plan) {
+func (p *Planner) expand(ctx context.Context, repoID int64, seeds []plannerSeedEntity, intent TaskIntent, request Request, acc map[string]*candidateAccumulator, work *plannerBudget, result *Plan) error {
 	depth := intent.ExpansionDepth
 	if depth <= 0 {
 		depth = 1
@@ -332,15 +660,17 @@ func (p *Planner) expand(ctx context.Context, repoID int64, seeds []semantic.Ent
 	if intent.TaskClass == "localized_change" && !request.IncludeImpact {
 		depth = 1
 	}
-	for _, seed := range seeds {
-		if err := ctx.Err(); err != nil {
-			return
+	for _, seedItem := range seeds {
+		if err := contextErr(ctx); err != nil {
+			return err
 		}
+		if seedItem.ambiguous || !seedItem.expand {
+			continue
+		}
+		seed := seedItem.entity
 		if seed.Analyzer == semantic.AnalyzerFramework {
 			switch entityAuthority(seed) {
 			case framework.ProviderStatusExternal, framework.ProviderStatusLocalAmbiguous, framework.ProviderStatusLocalMissing:
-				// Raw/unverified framework syntax is useful as a candidate, but
-				// it must never expand into a provider or object lineage.
 				continue
 			}
 		}
@@ -348,30 +678,70 @@ func (p *Planner) expand(ctx context.Context, repoID int64, seeds []semantic.Ent
 		if seed.Analyzer == semantic.AnalyzerFiveM || seed.Analyzer == semantic.AnalyzerFramework {
 			analyzers = append(analyzers, semantic.AnalyzerFiveMWorkspace)
 		}
+		baseDirection := intent.TraceDirection
+		if baseDirection != "incoming" && baseDirection != "outgoing" && baseDirection != "both" {
+			baseDirection = "both"
+		}
+		directions := []struct {
+			value  string
+			impact bool
+		}{{value: baseDirection}}
+		if request.IncludeImpact && baseDirection != "incoming" && baseDirection != "both" {
+			directions = append(directions, struct {
+				value  string
+				impact bool
+			}{value: "incoming", impact: true})
+		}
 		for _, analyzer := range analyzers {
-			edges, truncated, err := p.Store.TraceSemanticWithOptions(repoID, seed.ID, analyzer, intent.TraceDirection, nil, depth, 100)
-			if err != nil {
-				continue
-			}
-			if truncated {
-				result.Truncated = true
-			}
-			for _, edge := range edges {
-				addTraceEntity(acc, edge.From, seed, edge, fileSet)
-				if edge.To != nil {
-					addTraceEntity(acc, *edge.To, seed, edge, fileSet)
+			for _, direction := range directions {
+				if !work.allowTrace() {
+					work.traceExhausted = true
+					return nil
+				}
+				remaining := work.maxGraphEdges - work.graphEdges
+				if remaining <= 0 {
+					work.graphExhausted = true
+					return nil
+				}
+				work.traceQueries++
+				edges, truncated, err := p.Store.TraceSemanticWithOptions(repoID, seed.ID, analyzer, direction.value, nil, depth, minInt(remaining, 100))
+				if err != nil {
+					if cancelErr := contextErr(ctx); cancelErr != nil {
+						return cancelErr
+					}
+					if traceRootUnavailable(err) {
+						continue
+					}
+					return err
+				}
+				if cancelErr := contextErr(ctx); cancelErr != nil {
+					return cancelErr
+				}
+				work.graphEdges += len(edges)
+				if truncated {
+					result.Truncated = true
+				}
+				for _, edge := range edges {
+					addTraceEntity(acc, edge.From, seed, edge, direction.impact, work)
+					if edge.To != nil {
+						addTraceEntity(acc, *edge.To, seed, edge, direction.impact, work)
+					}
 				}
 			}
 		}
 	}
+	return contextErr(ctx)
 }
 
-func addTraceEntity(acc map[string]*candidateAccumulator, entity semantic.Entity, seed semantic.Entity, edge semantic.TraceEdge, fileSet map[string]bool) {
+func addTraceEntity(acc map[string]*candidateAccumulator, entity semantic.Entity, seed semantic.Entity, edge semantic.TraceEdge, impact bool, work *plannerBudget) {
 	reasons := []string{relationshipReason(edge, seed)}
+	if impact {
+		reasons = append(reasons, "impact_direct")
+	}
 	if edge.Depth > 1 {
 		reasons = append(reasons, "impact_transitive")
 	}
-	addEntityCandidate(acc, entity, reasons, edge.Depth, fileSet)
+	addEntityCandidateWithRelationship(acc, entity, reasons, edge.Depth, edge.Relationship.ID, work)
 }
 
 func relationshipReason(edge semantic.TraceEdge, seed semantic.Entity) string {
@@ -400,68 +770,148 @@ func relationshipReason(edge semantic.TraceEdge, seed semantic.Entity) string {
 	}
 }
 
-func addSymbolCandidate(acc map[string]*candidateAccumulator, repo string, symbol parser.Symbol, reasons []string, distance int, files map[string]bool) {
-	if symbol.File == "" || !files[normalizePath(symbol.File)] {
-		return
-	}
+func addSymbolCandidate(acc map[string]*candidateAccumulator, repo string, symbol parser.Symbol, reasons []string, distance int, work *plannerBudget) {
 	key := "symbol:" + symbol.ID
 	a := acc[key]
+	created := false
 	if a == nil {
-		a = &candidateAccumulator{key: key, repo: repo, symbol: &symbol, reasons: map[string]Evidence{}, authorities: map[string]bool{}, analyzers: map[string]bool{}, distance: distance, file: normalizePath(symbol.File), line: symbol.Line, endLine: symbol.EndLine, name: symbol.Name, kind: symbol.Kind}
+		a = newAccumulator(key, repo)
 		acc[key] = a
+		created = true
 	}
+	accepted := false
 	for _, reason := range reasons {
-		a.reasons[reason] = Evidence{Kind: "symbol", SourceID: symbol.ID, Depth: distance, Strength: reasonStrength(reason), NoteCode: reason}
+		if addEvidence(a, Evidence{Kind: "symbol", SourceID: symbol.ID, Depth: distance, Strength: reasonStrength(reason), NoteCode: reason}, work) {
+			accepted = true
+		}
+	}
+	if created && !accepted {
+		delete(acc, key)
+		return
+	}
+	if a.symbol == nil || symbolLess(symbol, *a.symbol) {
+		copySymbol := symbol
+		a.symbol = &copySymbol
+		a.file, a.line, a.endLine, a.name, a.kind = normalizePath(symbol.File), symbol.Line, symbol.EndLine, symbol.Name, symbol.Kind
 	}
 	if distance < a.distance {
 		a.distance = distance
 	}
 }
 
-func addEntityCandidate(acc map[string]*candidateAccumulator, entity semantic.Entity, reasons []string, distance int, files map[string]bool) {
-	if entity.File != "" && !files[normalizePath(entity.File)] {
-		return
-	}
+func addEntityCandidate(acc map[string]*candidateAccumulator, entity semantic.Entity, reasons []string, distance int, work *plannerBudget) {
+	addEntityCandidateWithRelationship(acc, entity, reasons, distance, "", work)
+}
+
+func addEntityCandidateWithRelationship(acc map[string]*candidateAccumulator, entity semantic.Entity, reasons []string, distance int, relationshipID string, work *plannerBudget) {
 	key := "entity:" + entity.ID
 	if entity.SymbolID != "" {
 		key = "symbol:" + entity.SymbolID
 	}
 	a := acc[key]
+	created := false
 	if a == nil {
-		copyEntity := entity
-		a = &candidateAccumulator{key: key, repo: entity.Repo, entity: &copyEntity, reasons: map[string]Evidence{}, authorities: map[string]bool{}, analyzers: map[string]bool{}, distance: distance, file: normalizePath(entity.File), line: entity.Line, endLine: entity.EndLine, name: entity.Name, kind: entity.Kind, resource: entityResource(entity), resourcePath: entityResourcePath(entity), targetResource: entityTargetResource(entity), framework: entity.Framework, side: entity.Side}
+		a = newAccumulator(key, entity.Repo)
 		acc[key] = a
-	} else if a.entity != nil && a.entity.ID != entity.ID {
-		a.reasons["same_symbol"] = Evidence{Kind: "semantic", SourceID: entity.ID, Depth: distance, Strength: reasonStrength("same_symbol"), NoteCode: "same_symbol"}
+		created = true
 	}
-	a.analyzers[entity.Analyzer] = true
-	authority := entityAuthority(entity)
-	if authority != "" {
-		a.authorities[authority] = true
-	}
+	accepted := false
 	for _, reason := range reasons {
-		a.reasons[reason] = Evidence{Kind: "semantic", SourceID: entity.ID, Relationship: entity.Kind, Depth: distance, Strength: reasonStrength(reason), Authority: authority, NoteCode: reason}
+		if addEvidence(a, Evidence{Kind: "semantic", SourceID: entity.ID, RelationshipID: relationshipID, Relationship: entity.Kind, Depth: distance, Strength: reasonStrength(reason), Authority: entityAuthority(entity), NoteCode: reason}, work) {
+			accepted = true
+		}
+	}
+	if created && !accepted {
+		delete(acc, key)
+		return
+	}
+	mergeEntityMetadata(a, entity)
+	if entity.File != "" && (a.file == "" || normalizePath(entity.File) < a.file) {
+		a.file = normalizePath(entity.File)
+		a.line = entity.Line
+		a.endLine = entity.EndLine
+	}
+	if entity.Name != "" && (a.name == "" || entity.Name < a.name) {
+		a.name = entity.Name
+	}
+	if entity.Kind != "" && (a.kind == "" || entity.Kind < a.kind) {
+		a.kind = entity.Kind
+	}
+	if a.entity == nil || entity.ID < a.entity.ID {
+		copyEntity := entity
+		a.entity = &copyEntity
 	}
 	if distance < a.distance {
 		a.distance = distance
 	}
 }
 
-func addFileCandidate(acc map[string]*candidateAccumulator, repo, file string, files map[string]bool) {
-	if !files[file] {
-		return
+func newAccumulator(key, repo string) *candidateAccumulator {
+	return &candidateAccumulator{key: key, repo: repo, evidenceByID: map[string]Evidence{}, reasonCodes: map[string]bool{}, authorities: map[string]bool{}, analyzers: map[string]bool{}, frameworks: map[string]bool{}, resources: map[string]bool{}, resourcePaths: map[string]bool{}, targetResources: map[string]bool{}, sides: map[string]bool{}, distance: 1 << 30}
+}
+
+func addEvidence(a *candidateAccumulator, evidence Evidence, work *plannerBudget) bool {
+	identity := semantic.StableID("planner_evidence", evidence.Kind, evidence.SourceID, evidence.RelationshipID, evidence.Relationship, fmt.Sprintf("%d", evidence.Depth), evidence.NoteCode)
+	if _, exists := a.evidenceByID[identity]; exists {
+		a.reasonCodes[evidence.NoteCode] = true
+		return true
 	}
-	key := "file:" + file
-	if acc[key] == nil {
-		acc[key] = &candidateAccumulator{key: key, repo: repo, reasons: map[string]Evidence{"exact_file_match": {Kind: "file", SourceID: file, Strength: 700, NoteCode: "exact_file_match"}}, authorities: map[string]bool{}, analyzers: map[string]bool{}, distance: 0, file: file, name: filepath.Base(filepath.FromSlash(file)), kind: "file"}
+	if work.evidenceUsed >= work.maxEvidence {
+		work.evidenceExhausted = true
+		return false
+	}
+	work.evidenceUsed++
+	a.evidenceByID[identity] = evidence
+	a.reasonCodes[evidence.NoteCode] = true
+	if evidence.Authority != "" {
+		a.authorities[evidence.Authority] = true
+	}
+	return true
+}
+
+func mergeEntityMetadata(a *candidateAccumulator, entity semantic.Entity) {
+	if entity.Analyzer != "" {
+		a.analyzers[entity.Analyzer] = true
+	}
+	if value := entityAuthority(entity); value != "" {
+		a.authorities[value] = true
+	}
+	if entity.Framework != "" {
+		a.frameworks[entity.Framework] = true
+	}
+	if value := entityResource(entity); value != "" {
+		a.resources[value] = true
+	}
+	if value := entityResourcePath(entity); value != "" {
+		a.resourcePaths[normalizePath(value)] = true
+	}
+	if value := entityTargetResource(entity); value != "" {
+		a.targetResources[value] = true
+	}
+	if entity.Side != "" {
+		a.sides[entity.Side] = true
 	}
 }
 
-func finalize(result Plan, acc map[string]*candidateAccumulator, max int, focusFile, focusResource string, health healthState) Plan {
+func addFileCandidate(acc map[string]*candidateAccumulator, repo, file string, work *plannerBudget) {
+	key := "file:" + file
+	a := acc[key]
+	if a == nil {
+		a = newAccumulator(key, repo)
+		acc[key] = a
+	}
+	addEvidence(a, Evidence{Kind: "file", SourceID: file, Strength: 700, NoteCode: "exact_file_match"}, work)
+	a.file, a.name, a.kind, a.distance = file, filepath.Base(filepath.FromSlash(file)), "file", 0
+}
+
+func finalize(result Plan, acc map[string]*candidateAccumulator, max int, focusFile, focusResource string, files map[string]bool) Plan {
 	all := make([]Candidate, 0, len(acc))
 	for _, item := range acc {
 		candidate := candidateFromAccumulator(item, focusFile, focusResource)
-		if candidate.File == "" {
+		if candidate.File == "" || !files[candidate.File] {
+			continue
+		}
+		if candidate.SymbolID != "" && item.symbol == nil {
 			continue
 		}
 		all = append(all, candidate)
@@ -495,53 +945,80 @@ func finalize(result Plan, acc map[string]*candidateAccumulator, max int, focusF
 			result.Peripheral = append(result.Peripheral, candidate)
 		}
 	}
+	sort.Slice(result.Ambiguities, func(i, j int) bool {
+		if result.Ambiguities[i].Kind != result.Ambiguities[j].Kind {
+			return result.Ambiguities[i].Kind < result.Ambiguities[j].Kind
+		}
+		return result.Ambiguities[i].Query < result.Ambiguities[j].Query
+	})
+	sort.Strings(result.UnresolvedHints)
+	sort.Strings(result.Diagnostics)
 	return result
 }
 
 func candidateFromAccumulator(a *candidateAccumulator, focusFile, focusResource string) Candidate {
-	authority := bestAuthority(a.authorities)
+	authority := authorityLabel(sortedSet(a.authorities))
 	score := 100
-	for reason := range a.reasons {
+	for reason := range a.reasonCodes {
 		if value := reasonStrength(reason); value > score {
 			score = value
 		}
 	}
-	if focusFile != "" && normalizePath(focusFile) == a.file {
-		a.reasons["focus_file"] = Evidence{Kind: "file", SourceID: a.file, Strength: 735, NoteCode: "focus_file"}
-		score += 35
-	}
-	if focusResource != "" && a.resource == focusResource {
-		a.reasons["same_resource"] = Evidence{Kind: "resource", SourceID: focusResource, Strength: 650, NoteCode: "same_resource"}
-		score += 35
-	}
+	score += authorityAdjustmentForSet(a.authorities)
 	if a.distance > 1 {
 		score -= 120
 	}
-	score += authorityAdjustment(authority)
 	if a.symbol == nil {
 		score -= 80
 	}
 	tier := "peripheral"
-	if hasReason(a.reasons, "explicit_focus", "exact_symbol_match", "exact_semantic_match", "framework_operation_match") {
+	if hasReason(a, "explicit_focus", "exact_symbol_match", "exact_semantic_match", "framework_operation_match") {
 		tier = "primary"
-	} else if (a.distance <= 1 || hasReason(a.reasons, "framework_provider", "export_provider")) && len(a.reasons) > 0 {
+	} else if hasReason(a, "lexical_fallback", "broad_entry_point") {
+		tier = "peripheral"
+	} else if (a.distance <= 1 || hasReason(a, "framework_provider", "export_provider")) && len(a.reasonCodes) > 0 {
 		tier = "supporting"
 	}
-	if a.distance == 0 && a.symbol != nil && tier == "peripheral" {
+	if a.distance == 0 && a.symbol != nil && tier == "peripheral" && !hasReason(a, "lexical_fallback", "broad_entry_point") {
 		tier = "primary"
 	}
-	reasons := make([]string, 0, len(a.reasons))
-	for reason := range a.reasons {
-		reasons = append(reasons, reason)
+	reasons := sortedSet(a.reasonCodes)
+	analyzers := sortedSet(a.analyzers)
+	frameworks := sortedSet(a.frameworks)
+	resources := sortedSet(a.resources)
+	resourcePaths := sortedSet(a.resourcePaths)
+	targetResources := sortedSet(a.targetResources)
+	sides := sortedSet(a.sides)
+	return Candidate{ID: semantic.StableID("planner_candidate", a.repo, a.key), SymbolID: symbolID(a), File: a.file, Line: a.line, EndLine: a.endLine, Name: a.name, Kind: a.kind, Resource: singleValue(resources), ResourcePath: singleValue(resourcePaths), TargetResource: singleValue(targetResources), Framework: singleValue(frameworks), Frameworks: frameworks, Side: singleValue(sides), Sides: sides, Resources: resources, ResourcePaths: resourcePaths, TargetResources: targetResources, Analyzers: analyzers, Score: score, Tier: tier, ReasonCodes: reasons, Authority: authority, Authorities: sortedSet(a.authorities), Distance: maxInt(0, a.distance), EstimatedScope: maxInt(0, a.endLine-a.line+1)}
+}
+
+func applyFocusEvidence(acc map[string]*candidateAccumulator, focusFile, focusResource string, work *plannerBudget) {
+	keys := make([]string, 0, len(acc))
+	for key := range acc {
+		keys = append(keys, key)
 	}
-	sort.Strings(reasons)
-	analyzers := make([]string, 0, len(a.analyzers))
-	for analyzer := range a.analyzers {
-		analyzers = append(analyzers, analyzer)
+	sort.Strings(keys)
+	for _, key := range keys {
+		a := acc[key]
+		if focusFile != "" && normalizePath(focusFile) == a.file {
+			addEvidence(a, Evidence{Kind: "file", SourceID: a.file, Strength: 735, NoteCode: "focus_file"}, work)
+		}
+		if focusResource != "" && a.resources[focusResource] {
+			addEvidence(a, Evidence{Kind: "resource", SourceID: focusResource, Strength: 650, NoteCode: "same_resource"}, work)
+		}
 	}
-	sort.Strings(analyzers)
-	id := semantic.StableID("planner_candidate", a.repo, a.key)
-	return Candidate{ID: id, SymbolID: symbolID(a), File: a.file, Line: a.line, EndLine: a.endLine, Name: a.name, Kind: a.kind, Resource: a.resource, ResourcePath: a.resourcePath, TargetResource: a.targetResource, Framework: a.framework, Side: a.side, Analyzers: analyzers, Score: score, Tier: tier, ReasonCodes: reasons, Authority: authority, Distance: a.distance, EstimatedScope: maxInt(0, a.endLine-a.line+1)}
+}
+
+func candidateFiles(acc map[string]*candidateAccumulator) []string {
+	files, seen := []string{}, map[string]bool{}
+	for _, item := range acc {
+		if item.file != "" && !seen[item.file] {
+			seen[item.file] = true
+			files = append(files, item.file)
+		}
+	}
+	sort.Strings(files)
+	return files
 }
 
 func symbolID(a *candidateAccumulator) string {
@@ -554,22 +1031,23 @@ func symbolID(a *candidateAccumulator) string {
 	return ""
 }
 
-func seedFromEntity(entity semantic.Entity, match string) Seed {
-	return Seed{ID: entity.ID, Type: "semantic_entity", SourceID: entity.ID, SymbolID: entity.SymbolID, File: entity.File, Name: entity.Name, Match: match, Authority: entityAuthority(entity)}
-}
-
 func genericEntityForSymbol(repo string, symbol parser.Symbol) semantic.Entity {
 	return semantic.Entity{ID: semantic.StableID("generic_symbol", repo, symbol.ID), Analyzer: semantic.AnalyzerGenericGraph, Repo: repo, File: symbol.File, SymbolID: symbol.ID, Kind: generic.KindCodeSymbol, Name: symbol.Name, Side: "unknown", Line: symbol.Line, EndLine: symbol.EndLine}
 }
 
 func semanticReason(entity semantic.Entity, hint string) string {
-	if entity.Kind == framework.KindOperation || entity.Name == hint {
-		if entity.Kind == framework.KindOperation {
-			return "framework_operation_match"
-		}
-		return "exact_semantic_match"
+	if entity.Kind == framework.KindOperation && (entity.Name == hint || metadataOperation(entity) == hint) {
+		return "framework_operation_match"
 	}
 	return "exact_semantic_match"
+}
+
+func metadataOperation(entity semantic.Entity) string {
+	if entity.Metadata == nil {
+		return ""
+	}
+	value, _ := entity.Metadata["operation"].(string)
+	return value
 }
 
 func entityResource(entity semantic.Entity) string {
@@ -619,29 +1097,31 @@ func entityAuthority(entity semantic.Entity) string {
 	return ""
 }
 
-func bestAuthority(values map[string]bool) string {
-	order := []string{framework.ProviderStatusLocalAmbiguous, framework.ProviderStatusLocalMissing, framework.ProviderStatusExternal, framework.ProviderStatusLocalVerified}
-	for _, value := range order {
-		if values[value] {
-			return value
-		}
+func authorityLabel(values []string) string {
+	values = sortedUnique(values)
+	if len(values) == 1 {
+		return values[0]
+	}
+	if len(values) > 1 {
+		return "mixed"
 	}
 	return ""
 }
 
-func authorityAdjustment(authority string) int {
-	switch authority {
-	case framework.ProviderStatusLocalVerified:
+func authorityAdjustmentForSet(values map[string]bool) int {
+	if values[framework.ProviderStatusLocalVerified] {
 		return 90
-	case framework.ProviderStatusExternal:
-		return -100
-	case framework.ProviderStatusLocalAmbiguous:
-		return -160
-	case framework.ProviderStatusLocalMissing:
-		return -130
-	default:
-		return 0
 	}
+	if values[framework.ProviderStatusLocalAmbiguous] {
+		return -160
+	}
+	if values[framework.ProviderStatusLocalMissing] {
+		return -130
+	}
+	if values[framework.ProviderStatusExternal] {
+		return -100
+	}
+	return 0
 }
 
 func reasonStrength(reason string) int {
@@ -664,23 +1144,30 @@ func reasonStrength(reason string) int {
 		return 760
 	case "same_resource":
 		return 650
-	case "impact_transitive":
-		return 500
 	case "exact_file_match":
 		return 700
+	case "impact_direct":
+		return 690
+	case "impact_transitive":
+		return 500
+	case "broad_entry_point":
+		return 360
+	case "lexical_fallback":
+		return 340
 	default:
 		return 300
 	}
 }
 
-func hasReason(values map[string]Evidence, reasons ...string) bool {
+func hasReason(a *candidateAccumulator, reasons ...string) bool {
 	for _, reason := range reasons {
-		if _, ok := values[reason]; ok {
+		if a.reasonCodes[reason] {
 			return true
 		}
 	}
 	return false
 }
+
 func tierRank(tier string) int {
 	switch tier {
 	case "primary":
@@ -691,47 +1178,45 @@ func tierRank(tier string) int {
 		return 2
 	}
 }
+
 func maxInt(a, b int) int {
 	if a > b {
 		return a
 	}
 	return b
 }
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func normalizePath(path string) string {
 	return strings.TrimPrefix(filepath.ToSlash(filepath.Clean(filepath.FromSlash(path))), "./")
 }
+
 func firstExistingFileHint(hints []string, files map[string]bool) string {
 	for _, hint := range hints {
-		if files[normalizePath(hint)] {
-			return normalizePath(hint)
+		hint = normalizePath(hint)
+		if files[hint] {
+			return hint
 		}
 	}
 	return ""
 }
+
 func hasMatchingFile(hint string, files map[string]bool) bool { return files[normalizePath(hint)] }
-func hasMatchingSeed(seeds []Seed, hint string) bool {
-	for _, seed := range seeds {
-		if seed.Name == hint || seed.File == hint || seed.SymbolID == hint {
-			return true
-		}
-	}
-	return false
-}
-func seedAlready(seeds []Seed, id string) bool {
-	for _, seed := range seeds {
-		if seed.SourceID == id {
-			return true
-		}
-	}
-	return false
-}
+
 func evidenceCount(acc map[string]*candidateAccumulator) int {
 	total := 0
 	for _, item := range acc {
-		total += len(item.reasons)
+		total += len(item.evidenceByID)
 	}
 	return total
 }
+
 func appendUnique(values []string, value string) []string {
 	for _, existing := range values {
 		if existing == value {
@@ -739,4 +1224,196 @@ func appendUnique(values []string, value string) []string {
 		}
 	}
 	return append(values, value)
+}
+
+func sortedUnique(values []string) []string {
+	result, seen := []string{}, map[string]bool{}
+	for _, value := range values {
+		if value != "" && !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
+func sortedKeys(values map[string]map[string]bool) []string {
+	result := make([]string, 0, len(values))
+	for key := range values {
+		result = append(result, key)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func sortedSet(values map[string]bool) []string {
+	result := make([]string, 0, len(values))
+	for value := range values {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func singleValue(values []string) string {
+	if len(values) == 1 {
+		return values[0]
+	}
+	return ""
+}
+
+func nonEmptyValues(value string) []string {
+	if value == "" {
+		return nil
+	}
+	return []string{value}
+}
+
+func symbolLess(left, right parser.Symbol) bool {
+	if left.File != right.File {
+		return left.File < right.File
+	}
+	if left.Line != right.Line {
+		return left.Line < right.Line
+	}
+	return left.ID < right.ID
+}
+
+func sourceAnchor(file, symbolID string, line, endLine int, kind, name string) string {
+	if symbolID != "" {
+		return "symbol:" + symbolID
+	}
+	return semantic.StableID("source_anchor", normalizePath(file), fmt.Sprintf("%d", line), fmt.Sprintf("%d", endLine), kind, name)
+}
+
+func entitySourceAnchor(entity semantic.Entity) string {
+	return sourceAnchor(entity.File, entity.SymbolID, entity.Line, entity.EndLine, entity.Kind, entity.Name)
+}
+
+func seedAnchorFromSeed(seed Seed) string {
+	if seed.SymbolID != "" {
+		return "symbol:" + seed.SymbolID
+	}
+	return sourceAnchor(seed.File, "", 0, 0, seed.Type, seed.Name)
+}
+
+func matchPriority(match string) int {
+	switch match {
+	case "explicit_focus":
+		return 100
+	case "exact_symbol_match":
+		return 90
+	case "framework_operation_match", "exact_semantic_match":
+		return 80
+	case "lexical_fallback":
+		return 20
+	default:
+		return 10
+	}
+}
+
+func mergeSeedAuthority(seed *Seed, authority string) {
+	if authority == "" {
+		return
+	}
+	seed.Authorities = appendUnique(seed.Authorities, authority)
+	sort.Strings(seed.Authorities)
+	seed.Authority = authorityLabel(seed.Authorities)
+}
+
+func contextErr(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	return ctx.Err()
+}
+
+func traceRootUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "semantic entity") && (strings.Contains(message, "not found in analyzer") || strings.Contains(message, "belongs to analyzer"))
+}
+
+func (b *plannerBudget) allowLookup() bool {
+	return b.exactQueries+b.semanticQueries+b.fallbackQueries < 64
+}
+
+func (b *plannerBudget) allowTrace() bool {
+	return b.traceQueries < b.maxTraceQueries
+}
+
+func applyBudgetDiagnostics(result *Plan, work *plannerBudget) {
+	if work.seedExhausted {
+		result.Truncated = true
+		appendDiagnostic(result, "planner_seed_budget_exhausted")
+	}
+	if work.evidenceExhausted {
+		result.Truncated = true
+		appendDiagnostic(result, "planner_evidence_budget_exhausted")
+	}
+	if work.graphExhausted {
+		result.Truncated = true
+		appendDiagnostic(result, "planner_graph_budget_exhausted")
+	}
+	if work.traceExhausted {
+		result.Truncated = true
+		appendDiagnostic(result, "planner_trace_query_budget_exhausted")
+	}
+	if work.exactExhausted {
+		result.Truncated = true
+		appendDiagnostic(result, "planner_lookup_budget_exhausted")
+	}
+	if work.fallbackExhausted {
+		result.Truncated = true
+		appendDiagnostic(result, "planner_fallback_budget_exhausted")
+	}
+}
+
+func addAmbiguity(result *Plan, ambiguity Ambiguity) {
+	for index, existing := range result.Ambiguities {
+		if existing.Kind == ambiguity.Kind && existing.Query == ambiguity.Query {
+			if ambiguity.CandidateCount > existing.CandidateCount {
+				result.Ambiguities[index].CandidateCount = ambiguity.CandidateCount
+			}
+			result.Ambiguities[index].Truncated = existing.Truncated || ambiguity.Truncated
+			return
+		}
+	}
+	if len(result.Ambiguities) >= MaxAmbiguities {
+		result.Truncated = true
+		appendDiagnostic(result, "planner_ambiguity_budget_exhausted")
+		return
+	}
+	result.Ambiguities = append(result.Ambiguities, ambiguity)
+}
+
+func appendUnresolved(result *Plan, hint string) {
+	if hint == "" || containsValue(result.UnresolvedHints, hint) {
+		return
+	}
+	if len(result.UnresolvedHints) >= MaxUnresolvedHints {
+		result.Truncated = true
+		appendDiagnostic(result, "planner_unresolved_hint_budget_exhausted")
+		return
+	}
+	result.UnresolvedHints = append(result.UnresolvedHints, hint)
+}
+
+func appendDiagnostic(result *Plan, diagnostic string) {
+	if diagnostic == "" || containsValue(result.Diagnostics, diagnostic) || len(result.Diagnostics) >= MaxDiagnostics {
+		return
+	}
+	result.Diagnostics = append(result.Diagnostics, diagnostic)
+}
+
+func containsValue(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }

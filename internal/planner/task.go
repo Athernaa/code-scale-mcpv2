@@ -20,6 +20,13 @@ var stopwords = map[string]bool{
 	"locate": true, "to": true, "ubah": true, "untuk": true, "where": true, "who": true, "yang": true, "dan": true,
 }
 
+var broadMarkers = map[string]bool{
+	"architecture": true, "system": true, "subsystem": true, "whole": true,
+	"overall": true, "review": true, "audit": true, "redesign": true,
+	"migration": true, "arsitektur": true, "sistem": true, "keseluruhan": true,
+	"redesain": true, "migrasi": true,
+}
+
 func interpretTask(task string) TaskIntent {
 	intent := TaskIntent{RawTask: task, TaskClass: "broad_unknown", Confidence: "low", ExpansionDepth: 1}
 	quoted := quotedPattern.FindAllStringSubmatch(task, -1)
@@ -28,21 +35,25 @@ func interpretTask(task string) TaskIntent {
 			if match[i] != "" {
 				intent.QuotedIdentifiers = appendTaskUnique(intent.QuotedIdentifiers, match[i])
 				intent.Terms = appendTaskUnique(intent.Terms, match[i])
+				intent.HighSignalHints = appendTaskUnique(intent.HighSignalHints, match[i])
 				break
 			}
 		}
 	}
 	for _, token := range identifierPattern.FindAllString(task, -1) {
 		lower := strings.ToLower(token)
+		if broadMarkers[lower] {
+			intent.BroadIntent = true
+		}
 		if stopwords[lower] || len(token) < 3 {
 			continue
 		}
-		if strings.ContainsAny(token, ".:/[]-_") || hasCodeCase(token) || !isPlainWord(token) {
-			intent.Terms = appendTaskUnique(intent.Terms, token)
-			continue
-		}
-		// Plain words remain lookup hints only when they are not common prose.
 		intent.Terms = appendTaskUnique(intent.Terms, token)
+		if strings.ContainsAny(token, ".:/[]-_") || hasCodeCase(token) || !isPlainWord(token) || looksLikeOperation(token) {
+			intent.HighSignalHints = appendTaskUnique(intent.HighSignalHints, token)
+		} else {
+			intent.WeakTerms = appendTaskUnique(intent.WeakTerms, token)
+		}
 	}
 	if len(intent.Terms) > 32 {
 		intent.Terms = intent.Terms[:32]
@@ -54,9 +65,6 @@ func interpretTask(task string) TaskIntent {
 		if looksLikeOperation(term) {
 			intent.FrameworkOperations = appendTaskUnique(intent.FrameworkOperations, term)
 		}
-		// After stopword removal, every remaining term is a bounded exact
-		// lookup hint. This preserves lowercase identifiers such as save while
-		// refusing to interpret common prose as a symbol.
 		intent.SymbolHints = appendTaskUnique(intent.SymbolHints, term)
 		intent.SemanticHints = appendTaskUnique(intent.SemanticHints, term)
 	}
@@ -66,6 +74,8 @@ func interpretTask(task string) TaskIntent {
 	}
 	lower := strings.ToLower(task)
 	switch {
+	case intent.BroadIntent:
+		intent.TaskClass, intent.Confidence = "broad_unknown", "medium"
 	case strings.Contains(lower, "caller") || strings.Contains(lower, "who calls"):
 		intent.TaskClass, intent.Confidence, intent.TraceDirection = "relationship_trace", "medium", "incoming"
 	case strings.Contains(lower, "what does") || strings.Contains(lower, "callees") || strings.Contains(lower, "calls"):
@@ -82,19 +92,28 @@ func interpretTask(task string) TaskIntent {
 	return intent
 }
 
-func adjustTaskClass(intent *TaskIntent, exactSymbols, exactSemantic int) {
-	if exactSymbols == 0 && exactSemantic == 0 {
+func adjustTaskClass(intent *TaskIntent, exactAnchors int, hasSymbolAnchor bool) {
+	if intent.BroadIntent {
+		if exactAnchors > 0 {
+			intent.Confidence = "medium"
+		}
+		intent.TaskClass = "broad_unknown"
+		return
+	}
+	if exactAnchors == 0 {
 		if intent.TaskClass != "relationship_trace" && intent.TaskClass != "cross_resource" {
 			intent.TaskClass, intent.Confidence = "broad_unknown", "low"
 		}
 		return
 	}
-	if exactSymbols == 1 && exactSemantic == 0 && intent.TaskClass == "broad_unknown" {
+	if exactAnchors == 1 && hasSymbolAnchor && intent.TaskClass == "broad_unknown" {
 		intent.TaskClass, intent.Confidence = "exact_symbol", "high"
-	} else if exactSemantic == 1 && exactSymbols == 0 && intent.TaskClass == "broad_unknown" {
+	} else if exactAnchors == 1 && !hasSymbolAnchor && intent.TaskClass == "broad_unknown" {
 		intent.TaskClass, intent.Confidence = "exact_semantic", "high"
-	} else if exactSymbols > 1 || exactSemantic > 1 {
-		if intent.Confidence == "high" {
+	} else if exactAnchors > 1 {
+		if intent.TaskClass != "relationship_trace" && intent.TaskClass != "cross_resource" {
+			intent.TaskClass, intent.Confidence = "broad_unknown", "low"
+		} else if intent.Confidence == "high" {
 			intent.Confidence = "medium"
 		}
 	}

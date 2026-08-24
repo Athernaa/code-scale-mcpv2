@@ -12,6 +12,23 @@ const (
 	DefaultMaxCandidates = 20
 	HardMaxCandidates    = 100
 	MaxTaskLength        = 8192
+
+	DefaultMaxSeeds           = 32
+	HardMaxSeeds              = 128
+	DefaultMaxEvidence        = 256
+	HardMaxEvidence           = 1024
+	DefaultMaxGraphEdges      = 256
+	HardMaxGraphEdges         = 1024
+	DefaultMaxTraceQueries    = 32
+	HardMaxTraceQueries       = 128
+	DefaultMaxExactAnchors    = 128
+	DefaultMaxSemanticRows    = 128
+	DefaultMaxFallbackMatches = 64
+	DefaultMaxFallbackPerTerm = 8
+	MaxAmbiguities            = 32
+	MaxUnresolvedHints        = 32
+	MaxDiagnostics            = 32
+	MaxDegradedResources      = 32
 )
 
 type Request struct {
@@ -44,49 +61,69 @@ type Plan struct {
 }
 
 type Seed struct {
-	ID        string `json:"id"`
-	Type      string `json:"type"`
-	SourceID  string `json:"source_id"`
-	SymbolID  string `json:"symbol_id,omitempty"`
-	File      string `json:"file,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Match     string `json:"match"`
-	Authority string `json:"authority,omitempty"`
-	Ambiguous bool   `json:"ambiguous,omitempty"`
+	ID          string   `json:"id"`
+	Type        string   `json:"type"`
+	SourceID    string   `json:"source_id"`
+	SourceIDs   []string `json:"source_ids,omitempty"`
+	SymbolID    string   `json:"symbol_id,omitempty"`
+	File        string   `json:"file,omitempty"`
+	Name        string   `json:"name,omitempty"`
+	Match       string   `json:"match"`
+	Authority   string   `json:"authority,omitempty"`
+	Authorities []string `json:"authorities,omitempty"`
+	Ambiguous   bool     `json:"ambiguous,omitempty"`
 }
 
 type Candidate struct {
-	ID             string   `json:"id"`
-	SymbolID       string   `json:"symbol_id,omitempty"`
-	File           string   `json:"file"`
-	Line           int      `json:"line"`
-	EndLine        int      `json:"end_line,omitempty"`
-	Name           string   `json:"name"`
-	Kind           string   `json:"kind"`
-	Resource       string   `json:"resource,omitempty"`
-	ResourcePath   string   `json:"resource_path,omitempty"`
-	TargetResource string   `json:"target_resource,omitempty"`
-	Framework      string   `json:"framework,omitempty"`
-	Side           string   `json:"side,omitempty"`
-	Analyzers      []string `json:"analyzers,omitempty"`
-	Score          int      `json:"score"`
-	Tier           string   `json:"tier"`
-	ReasonCodes    []string `json:"reason_codes"`
-	Authority      string   `json:"authority,omitempty"`
-	Distance       int      `json:"distance"`
-	EstimatedScope int      `json:"estimated_scope,omitempty"`
+	ID              string   `json:"id"`
+	SymbolID        string   `json:"symbol_id,omitempty"`
+	File            string   `json:"file"`
+	Line            int      `json:"line"`
+	EndLine         int      `json:"end_line,omitempty"`
+	Name            string   `json:"name"`
+	Kind            string   `json:"kind"`
+	Resource        string   `json:"resource,omitempty"`
+	ResourcePath    string   `json:"resource_path,omitempty"`
+	TargetResource  string   `json:"target_resource,omitempty"`
+	Framework       string   `json:"framework,omitempty"`
+	Frameworks      []string `json:"frameworks,omitempty"`
+	Side            string   `json:"side,omitempty"`
+	Sides           []string `json:"sides,omitempty"`
+	Resources       []string `json:"resources,omitempty"`
+	ResourcePaths   []string `json:"resource_paths,omitempty"`
+	TargetResources []string `json:"target_resources,omitempty"`
+	Analyzers       []string `json:"analyzers,omitempty"`
+	Score           int      `json:"score"`
+	Tier            string   `json:"tier"`
+	ReasonCodes     []string `json:"reason_codes"`
+	Authority       string   `json:"authority,omitempty"`
+	Authorities     []string `json:"authorities,omitempty"`
+	Distance        int      `json:"distance"`
+	EstimatedScope  int      `json:"estimated_scope,omitempty"`
 }
 
 type Ambiguity struct {
 	Kind           string `json:"kind"`
 	Query          string `json:"query"`
 	CandidateCount int    `json:"candidate_count"`
+	Truncated      bool   `json:"truncated,omitempty"`
 }
 
 type DebugDetails struct {
-	EvidenceCount        int `json:"evidence_count"`
-	CandidatesConsidered int `json:"candidates_considered"`
-	SeedsConsidered      int `json:"seeds_considered"`
+	EvidenceCount             int `json:"evidence_count"`
+	CandidatesConsidered      int `json:"candidates_considered"`
+	SeedsConsidered           int `json:"seeds_considered"`
+	SeedBudgetUsed            int `json:"seed_budget_used"`
+	EvidenceBudgetUsed        int `json:"evidence_budget_used"`
+	GraphEdgesConsidered      int `json:"graph_edges_considered"`
+	TraceQueries              int `json:"trace_queries"`
+	ExactQueries              int `json:"exact_queries"`
+	SemanticQueries           int `json:"semantic_queries"`
+	FallbackQueries           int `json:"fallback_queries"`
+	ExactMatchesConsidered    int `json:"exact_matches_considered"`
+	SemanticMatchesConsidered int `json:"semantic_matches_considered"`
+	FallbackMatchesConsidered int `json:"fallback_matches_considered"`
+	FileLookups               int `json:"file_lookups"`
 }
 
 type TaskIntent struct {
@@ -102,16 +139,20 @@ type TaskIntent struct {
 	Confidence          string
 	TraceDirection      string
 	ExpansionDepth      int
+	HighSignalHints     []string
+	WeakTerms           []string
+	BroadIntent         bool
 }
 
 type Evidence struct {
-	Kind         string
-	SourceID     string
-	Relationship string
-	Depth        int
-	Strength     int
-	Authority    string
-	NoteCode     string
+	Kind           string
+	SourceID       string
+	Relationship   string
+	RelationshipID string
+	Depth          int
+	Strength       int
+	Authority      string
+	NoteCode       string
 }
 
 type Planner struct {
@@ -128,22 +169,79 @@ func (p *Planner) Plan(ctx context.Context, request Request) (Plan, error) {
 }
 
 type candidateAccumulator struct {
-	key            string
-	repo           string
-	entity         *semantic.Entity
-	symbol         *parser.Symbol
-	reasons        map[string]Evidence
-	authorities    map[string]bool
-	analyzers      map[string]bool
-	distance       int
-	resource       string
-	resourcePath   string
-	targetResource string
-	framework      string
-	side           string
-	file           string
-	line           int
-	endLine        int
-	name           string
-	kind           string
+	key             string
+	repo            string
+	entity          *semantic.Entity
+	symbol          *parser.Symbol
+	evidenceByID    map[string]Evidence
+	reasonCodes     map[string]bool
+	authorities     map[string]bool
+	analyzers       map[string]bool
+	frameworks      map[string]bool
+	resources       map[string]bool
+	resourcePaths   map[string]bool
+	targetResources map[string]bool
+	sides           map[string]bool
+	distance        int
+	resource        string
+	resourcePath    string
+	targetResource  string
+	framework       string
+	side            string
+	file            string
+	line            int
+	endLine         int
+	name            string
+	kind            string
+}
+
+type plannerSeedEntity struct {
+	entity    semantic.Entity
+	anchor    string
+	priority  int
+	expand    bool
+	ambiguous bool
+}
+
+type plannerBudget struct {
+	maxSeeds           int
+	maxEvidence        int
+	maxGraphEdges      int
+	maxTraceQueries    int
+	maxExactAnchors    int
+	maxSemanticRows    int
+	maxFallbackMatches int
+	maxFallbackPerTerm int
+
+	seedsUsed       int
+	evidenceUsed    int
+	graphEdges      int
+	traceQueries    int
+	exactQueries    int
+	semanticQueries int
+	fallbackQueries int
+	exactRows       int
+	semanticRows    int
+	fallbackMatches int
+	fileLookups     int
+
+	seedExhausted     bool
+	evidenceExhausted bool
+	graphExhausted    bool
+	traceExhausted    bool
+	exactExhausted    bool
+	fallbackExhausted bool
+}
+
+func newPlannerBudget() *plannerBudget {
+	return &plannerBudget{
+		maxSeeds:           DefaultMaxSeeds,
+		maxEvidence:        DefaultMaxEvidence,
+		maxGraphEdges:      DefaultMaxGraphEdges,
+		maxTraceQueries:    DefaultMaxTraceQueries,
+		maxExactAnchors:    DefaultMaxExactAnchors,
+		maxSemanticRows:    DefaultMaxSemanticRows,
+		maxFallbackMatches: DefaultMaxFallbackMatches,
+		maxFallbackPerTerm: DefaultMaxFallbackPerTerm,
+	}
 }

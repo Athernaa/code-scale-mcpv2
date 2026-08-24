@@ -279,6 +279,218 @@ func TestPlannerBoundsAndRepositoryIsolation(t *testing.T) {
 	}
 }
 
+func TestPlannerPreservesEvidenceAcrossAnalyzersAndAuthority(t *testing.T) {
+	store := plannerStore(t, "local", "evidence")
+	defer store.Close()
+	repo := "local/evidence"
+	symbol := plannerSymbol("server.lua", "run", 1)
+	if err := replacePlannerIndex(store, "local", "evidence", repo, []parser.Symbol{symbol}); err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := plannerCodeSymbol(repo, symbol)
+	event := semantic.Entity{ID: "event-run", Analyzer: semantic.AnalyzerFiveM, Repo: repo, File: symbol.File, SymbolID: symbol.ID, Kind: fivem.KindEventHandler, Name: "run", Side: "server", Line: 1, Metadata: map[string]any{"source_resource": "app"}}
+	verified := semantic.Entity{ID: "verified-run", Analyzer: semantic.AnalyzerFramework, Repo: repo, File: symbol.File, SymbolID: symbol.ID, Kind: framework.KindOperation, Name: "run", Framework: "qbx", Side: "server", Line: 1, Metadata: map[string]any{"operation": "run", "provider_status": framework.ProviderStatusLocalVerified, "provider_verified": true}}
+	external := semantic.Entity{ID: "external-run", Analyzer: semantic.AnalyzerFramework, Repo: repo, File: symbol.File, SymbolID: symbol.ID, Kind: framework.KindAPICall, Name: "run", Framework: "ox_inventory", Side: "server", Line: 1, Metadata: map[string]any{"provider_status": framework.ProviderStatusExternal, "provider_verified": false}}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, semantic.Result{Entities: []semantic.Entity{base}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, semantic.Result{Entities: []semantic.Entity{event}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, semantic.Result{Entities: []semantic.Entity{verified, external}}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Seeds) != 1 || candidateCount(result) != 1 {
+		t.Fatalf("same source anchor was not normalized: %#v", result)
+	}
+	candidate := result.Primary[0]
+	if candidate.SymbolID != symbol.ID || candidate.Authority != "mixed" || len(candidate.Authorities) != 2 {
+		t.Fatalf("mixed authority or symbol bridge was lost: %#v", candidate)
+	}
+	if len(candidate.Frameworks) != 2 || !containsString(candidate.ReasonCodes, "exact_symbol_match") || !containsString(candidate.ReasonCodes, "exact_semantic_match") {
+		t.Fatalf("distinct analyzer evidence was lost: %#v", candidate)
+	}
+}
+
+func TestPlannerUniqueAnchorClassificationAndBroadMarker(t *testing.T) {
+	store := plannerStore(t, "local", "classification")
+	defer store.Close()
+	repo := "local/classification"
+	load := plannerSymbol("player.go", "LoadCharacter", 1)
+	dependency := plannerSymbol("player.go", "readInventory", 8)
+	if err := replacePlannerIndex(store, "local", "classification", repo, []parser.Symbol{load, dependency}); err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadEntity := plannerCodeSymbol(repo, load)
+	loadSemantic := semantic.Entity{ID: "load-event", Analyzer: semantic.AnalyzerFiveM, Repo: repo, File: load.File, SymbolID: load.ID, Kind: fivem.KindEventHandler, Name: "LoadCharacter", Side: "server", Line: 1}
+	dependencyEntity := plannerCodeSymbol(repo, dependency)
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, semantic.Result{Entities: []semantic.Entity{loadEntity, dependencyEntity}, Relationships: []semantic.Relationship{plannerRelationship(repo, loadEntity, dependencyEntity, generic.RelationshipCalls)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, semantic.Result{Entities: []semantic.Entity{loadSemantic}}); err != nil {
+		t.Fatal(err)
+	}
+	narrow, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "LoadCharacter"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if narrow.TaskClass != "exact_symbol" || narrow.TaskConfidence != "high" || len(narrow.Seeds) != 1 {
+		t.Fatalf("duplicate analyzer rows changed exact classification: %#v", narrow)
+	}
+	broad, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "review LoadCharacter architecture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if broad.TaskClass != "broad_unknown" || len(broad.Supporting) == 0 {
+		t.Fatalf("broad marker was narrowed or lost representative context: %#v", broad)
+	}
+}
+
+func TestPlannerAmbiguousFixUsesGlobalBudgets(t *testing.T) {
+	store := plannerStore(t, "local", "ambiguous-scale")
+	defer store.Close()
+	repo := "local/ambiguous-scale"
+	symbols := make([]parser.Symbol, 0, 150)
+	entities := make([]semantic.Entity, 0, 150)
+	for i := 0; i < 150; i++ {
+		symbol := plannerSymbol(fmt.Sprintf("file-%03d.go", i), "init", 1)
+		symbols = append(symbols, symbol)
+		entities = append(entities, plannerCodeSymbol(repo, symbol))
+	}
+	if err := replacePlannerIndex(store, "local", "ambiguous-scale", repo, symbols); err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, semantic.Result{Entities: entities}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "fix init", Debug: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TaskClass != "broad_unknown" || result.TaskConfidence != "low" || len(result.Seeds) > DefaultMaxSeeds || result.Debug == nil || result.Debug.TraceQueries != 0 || !result.Truncated || len(result.Ambiguities) == 0 {
+		t.Fatalf("ambiguous fix exceeded bounded expansion: %#v", result)
+	}
+}
+
+func TestPlannerBroadFallbackEntryPointsAreWeakAndBounded(t *testing.T) {
+	store := plannerStore(t, "local", "broad")
+	defer store.Close()
+	repo := "local/broad"
+	symbols := []parser.Symbol{plannerSymbol("character.go", "LoadCharacter", 1), plannerSymbol("repository.go", "CharacterRepository", 1)}
+	if err := replacePlannerIndex(store, "local", "broad", repo, symbols); err != nil {
+		t.Fatal(err)
+	}
+	result, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "review character persistence architecture", Debug: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TaskClass != "broad_unknown" || candidateCount(result) == 0 {
+		t.Fatalf("broad entry points were not returned: %#v", result)
+	}
+	for _, candidate := range append(append(append([]Candidate{}, result.Primary...), result.Supporting...), result.Peripheral...) {
+		if containsString(candidate.ReasonCodes, "lexical_fallback") && candidate.Tier == "primary" {
+			t.Fatalf("fallback was treated as an exact primary: %#v", candidate)
+		}
+	}
+}
+
+func TestPlannerIncludeImpactAddsIncomingEvidence(t *testing.T) {
+	store := plannerStore(t, "local", "impact")
+	defer store.Close()
+	repo := "local/impact"
+	a := plannerSymbol("a.go", "CallA", 1)
+	b := plannerSymbol("b.go", "HandleB", 1)
+	c := plannerSymbol("c.go", "CallC", 1)
+	if err := replacePlannerIndex(store, "local", "impact", repo, []parser.Symbol{a, b, c}); err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aEntity, bEntity, cEntity := plannerCodeSymbol(repo, a), plannerCodeSymbol(repo, b), plannerCodeSymbol(repo, c)
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, semantic.Result{Entities: []semantic.Entity{aEntity, bEntity, cEntity}, Relationships: []semantic.Relationship{plannerRelationship(repo, aEntity, bEntity, generic.RelationshipCalls), plannerRelationship(repo, bEntity, cEntity, generic.RelationshipCalls)}}); err != nil {
+		t.Fatal(err)
+	}
+	without, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "what does HandleB call"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidateFileMissing(without, c.File) || !candidateFileMissing(without, a.File) {
+		t.Fatalf("outgoing-only plan included the wrong direction: %#v", without)
+	}
+	with, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "what does HandleB call", IncludeImpact: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidateFileMissing(with, a.File) || !containsCandidate(with.Supporting, a.ID, "impact_direct") {
+		t.Fatalf("incoming impact was not included: %#v", with)
+	}
+}
+
+func TestPlannerEmptyIndexAndCancellationAreTruthful(t *testing.T) {
+	store := plannerStore(t, "local", "empty")
+	defer store.Close()
+	if err := replacePlannerIndex(store, "local", "empty", "local/empty", nil); err != nil {
+		t.Fatal(err)
+	}
+	result, err := New(store).Plan(context.Background(), Request{Repo: "local/empty", Task: "review architecture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IndexState != "unknown" || !containsString(result.Diagnostics, "empty_index") || candidateCount(result) != 0 {
+		t.Fatalf("empty index was reported as healthy/populated: %#v", result)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = New(store).Plan(canceled, Request{Repo: "local/empty", Task: "review architecture"})
+	if err != context.Canceled {
+		t.Fatalf("cancellation was swallowed: %v", err)
+	}
+}
+
+func TestPlannerFocusFileUsesBoundedIndexedExistence(t *testing.T) {
+	store := plannerStore(t, "local", "large-files")
+	defer store.Close()
+	repo := "local/large-files"
+	target := plannerSymbol("src/target.go", "Target", 1)
+	files := make(map[string]string, 10001)
+	languages := make(map[string]string, 10001)
+	for i := 0; i < 10000; i++ {
+		path := fmt.Sprintf("generated/%05d.go", i)
+		files[path] = "hash-" + path
+		languages[path] = "go"
+	}
+	files[target.File] = "hash-target"
+	languages[target.File] = "go"
+	if err := store.ReplaceRepoIndex("local", "large-files", "local", "", files, languages, []parser.Symbol{target}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "find Target", FocusFile: target.File})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Primary) != 1 || result.Primary[0].File != target.File {
+		t.Fatalf("bounded focus-file lookup failed on large index: %#v", result)
+	}
+}
+
 func plannerStore(t *testing.T, owner, name string) *storage.IndexStore {
 	t.Helper()
 	store, err := storage.NewIndexStore(t.TempDir())

@@ -731,6 +731,72 @@ func (s *IndexStore) GetFiles(repoID int64) ([]FileInfo, error) {
 	return s.getFilesLocked(repoID)
 }
 
+// FileExists checks one indexed repository-relative path without loading the
+// repository's complete file list. Query-time consumers use this for bounded
+// scope validation.
+func (s *IndexStore) FileExists(repoID int64, filePath string) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var exists int
+	err := s.db.QueryRow("SELECT 1 FROM files WHERE repo_id = ? AND path = ? LIMIT 1", repoID, filePath).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return err == nil && exists == 1, err
+}
+
+// FilesExist checks a bounded set of indexed paths in one query. Missing
+// paths are omitted, allowing callers to enforce source-backed invariants
+// without materializing every file in a repository.
+func (s *IndexStore) FilesExist(repoID int64, filePaths []string) (map[string]bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	unique := make(map[string]struct{}, len(filePaths))
+	for _, filePath := range filePaths {
+		if filePath != "" {
+			unique[filePath] = struct{}{}
+		}
+	}
+	result := make(map[string]bool, len(unique))
+	if len(unique) == 0 {
+		return result, nil
+	}
+	paths := make([]string, 0, len(unique))
+	for path := range unique {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(paths)), ",")
+	args := make([]any, 0, len(paths)+1)
+	args = append(args, repoID)
+	for _, path := range paths {
+		args = append(args, path)
+	}
+	rows, err := s.db.Query("SELECT path FROM files WHERE repo_id = ? AND path IN ("+placeholders+")", args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, err
+		}
+		result[path] = true
+	}
+	return result, rows.Err()
+}
+
+// CountFiles returns the current indexed file count without loading file
+// metadata. It is used for truthful empty-index health reporting.
+func (s *IndexStore) CountFiles(repoID int64) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var count int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM files WHERE repo_id = ?", repoID).Scan(&count)
+	return count, err
+}
+
 // ReplaceSemanticIndex is the compatibility wrapper for the original FiveM
 // semantic API. New analyzers must use the analyzer-scoped operation.
 func (s *IndexStore) ReplaceSemanticIndex(repoID int64, result semantic.Result) error {
