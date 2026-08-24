@@ -6,6 +6,7 @@ import (
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
 	"github.com/Athernaa/code-scale-mcpv2/internal/planner"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
+	"github.com/Athernaa/code-scale-mcpv2/internal/sufficiency"
 )
 
 const (
@@ -92,31 +93,35 @@ type Omitted struct {
 }
 
 type Debug struct {
-	SourceCandidatesConsidered int   `json:"source_candidates_considered"`
-	SourceReads                int   `json:"source_reads"`
-	SourceBytesRead            int64 `json:"source_bytes_read"`
-	SectionsIncluded           int   `json:"sections_included"`
-	SectionsPartial            int   `json:"sections_partial"`
+	SourceCandidatesConsidered int    `json:"source_candidates_considered"`
+	SourceReads                int    `json:"source_reads"`
+	SourceBytesRead            int64  `json:"source_bytes_read"`
+	SectionsIncluded           int    `json:"sections_included"`
+	SectionsPartial            int    `json:"sections_partial"`
+	SufficiencyStatus          string `json:"sufficiency_status"`
+	SufficiencyStage           string `json:"sufficiency_stage"`
 }
 
 type Package struct {
-	Repo              string              `json:"repo"`
-	TaskClass         string              `json:"task_class"`
-	TaskConfidence    string              `json:"task_confidence"`
-	IndexState        string              `json:"index_state"`
-	IndexIncomplete   bool                `json:"index_incomplete"`
-	Sections          []Section           `json:"sections,omitempty"`
-	Ambiguities       []planner.Ambiguity `json:"ambiguities,omitempty"`
-	Diagnostics       []string            `json:"diagnostics,omitempty"`
-	DegradedResources []string            `json:"degraded_framework_resources,omitempty"`
-	Rounds            []Round             `json:"rounds,omitempty"`
-	Omitted           Omitted             `json:"omitted"`
-	StopReason        string              `json:"stop_reason"`
-	PlannerTruncated  bool                `json:"planner_truncated"`
-	ContextTruncated  bool                `json:"context_truncated"`
-	Truncated         bool                `json:"truncated"`
-	Budget            Budget              `json:"budget"`
-	Debug             *Debug              `json:"debug,omitempty"`
+	Repo              string               `json:"repo"`
+	TaskClass         string               `json:"task_class"`
+	TaskConfidence    string               `json:"task_confidence"`
+	IndexState        string               `json:"index_state"`
+	IndexIncomplete   bool                 `json:"index_incomplete"`
+	Sections          []Section            `json:"sections,omitempty"`
+	Ambiguities       []planner.Ambiguity  `json:"ambiguities,omitempty"`
+	UnresolvedHints   []string             `json:"unresolved_hints,omitempty"`
+	Diagnostics       []string             `json:"diagnostics,omitempty"`
+	DegradedResources []string             `json:"degraded_framework_resources,omitempty"`
+	Rounds            []Round              `json:"rounds,omitempty"`
+	Omitted           Omitted              `json:"omitted"`
+	StopReason        string               `json:"stop_reason"`
+	PlannerTruncated  bool                 `json:"planner_truncated"`
+	ContextTruncated  bool                 `json:"context_truncated"`
+	Truncated         bool                 `json:"truncated"`
+	Sufficiency       sufficiency.Decision `json:"sufficiency"`
+	Budget            Budget               `json:"budget"`
+	Debug             *Debug               `json:"debug,omitempty"`
 }
 
 type PlanProvider interface {

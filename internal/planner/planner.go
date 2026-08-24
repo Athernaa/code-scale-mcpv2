@@ -574,12 +574,20 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 	if logicalExactCount == 0 && len(semanticFamilies) > 0 {
 		logicalExactCount = 1
 	}
+	requestedTaskClass := intent.TaskClass
 	adjustTaskClass(&intent, logicalExactCount, hasSymbolExact, strongExact)
 	result.TaskClass, result.TaskConfidence = intent.TaskClass, intent.Confidence
+	result.TraceDirection = intent.TraceDirection
+	result.BroadIntent = intent.BroadIntent
+	result.RequestedTaskClass = requestedTaskClass
+	result.AnchorStrength = plannerAnchorStrength(request, logicalExactCount, strongExact, len(semanticFamilies), len(acc))
 	result.Seeds = collector.sortedSeeds()
 	for _, hint := range intent.Terms {
 		if !matchedHints[hint] && !hasMatchingFile(hint, fileHints) {
 			appendUnresolved(&result, hint)
+			if plannerContainsString(intent.HighSignalHints, hint) {
+				result.UnresolvedHighSignal = append(result.UnresolvedHighSignal, hint)
+			}
 		}
 	}
 
@@ -626,6 +634,31 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 		return Plan{}, err
 	}
 	return result, nil
+}
+
+func plannerContainsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func plannerAnchorStrength(request Request, exactAnchors int, strongExact bool, semanticFamilies, candidates int) string {
+	if request.FocusSymbolID != "" {
+		return "explicit_focus"
+	}
+	if strongExact {
+		return "strong_exact"
+	}
+	if exactAnchors > 0 || semanticFamilies > 0 {
+		return "weak_exact"
+	}
+	if candidates > 0 {
+		return "weak_lexical"
+	}
+	return "none"
 }
 
 func (p *Planner) hydrateCandidates(ctx context.Context, repoID int64, acc map[string]*candidateAccumulator) error {

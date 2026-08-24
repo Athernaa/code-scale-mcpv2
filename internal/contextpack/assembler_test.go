@@ -15,6 +15,7 @@ import (
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/generic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
+	"github.com/Athernaa/code-scale-mcpv2/internal/sufficiency"
 	"github.com/Athernaa/code-scale-mcpv2/internal/workspace"
 	workspaceindex "github.com/Athernaa/code-scale-mcpv2/internal/workspace/indexer"
 )
@@ -64,6 +65,50 @@ func TestAssembleEnforcesFinalSerializedBudgetAndProtectsPrimary(t *testing.T) {
 		if len(pkg.Sections) == 0 || pkg.Sections[0].SymbolID != primary.ID {
 			t.Fatalf("primary was displaced at budget %d: %#v", budget, pkg)
 		}
+	}
+}
+
+func TestSufficiencyStopsExactFindAfterAnchor(t *testing.T) {
+	store, repo, primary, support, weak := assemblyFixture(t)
+	defer store.Close()
+	plan := planner.Plan{Repo: repo, TaskClass: "exact_symbol", TaskConfidence: "high", IndexState: "complete", Primary: []planner.Candidate{candidate(primary, "primary", 9000, "exact_symbol_match")}, Supporting: []planner.Candidate{candidate(support, "supporting", 7000, "direct_callee")}, Peripheral: []planner.Candidate{candidate(weak, "peripheral", 100, "lexical_fallback")}}
+	pkg, err := New(staticPlanner{plan: plan}, store).Assemble(context.Background(), Request{Repo: repo, Task: "find Primary", MaxContextTokens: 2000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pkg.Sufficiency.Status != sufficiency.StatusSufficient || pkg.StopReason != "sufficiency_satisfied" || pkg.ContextTruncated || pkg.Truncated || len(pkg.Sections) != 1 || len(pkg.Rounds) != 1 {
+		t.Fatalf("exact find did not stop after anchor: %+v", pkg)
+	}
+}
+
+func TestSufficiencyLocalizedChangeContinuesThroughDirectSupport(t *testing.T) {
+	store := assemblyStore(t)
+	defer store.Close()
+	repo := "local/localized-sufficiency"
+	primarySource, supportSource := "func Primary() {}\n", "func Support() {}\n"
+	primary := indexedSymbol("primary.go", "Primary", primarySource)
+	support := indexedSymbol("support.go", "Support", supportSource)
+	writeAssemblyRepo(t, store, repo, map[string]string{"primary.go": primarySource, "support.go": supportSource}, []parser.Symbol{primary, support})
+	plan := planner.Plan{Repo: repo, TaskClass: "localized_change", TaskConfidence: "high", IndexState: "complete", Primary: []planner.Candidate{candidate(primary, "primary", 9000, "exact_symbol_match")}, Supporting: []planner.Candidate{candidate(support, "supporting", 7000, "direct_callee")}}
+	pkg, err := New(staticPlanner{plan: plan}, store).Assemble(context.Background(), Request{Repo: repo, Task: "fix Primary", MaxContextTokens: 2000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pkg.Sufficiency.Status != sufficiency.StatusSufficient || len(pkg.Sections) != 2 || len(pkg.Rounds) != 2 {
+		t.Fatalf("localized change did not retrieve required support: %+v", pkg)
+	}
+}
+
+func TestPostSerializationGuardRevokesStaleSufficiency(t *testing.T) {
+	store, repo, primary, support, _ := assemblyFixture(t)
+	defer store.Close()
+	plan := planner.Plan{Repo: repo, TaskClass: "localized_change", TaskConfidence: "high", IndexState: "complete", Primary: []planner.Candidate{candidate(primary, "primary", 9000, "exact_symbol_match")}, Supporting: []planner.Candidate{candidate(support, "supporting", 7000, "direct_callee")}}
+	pkg, err := New(staticPlanner{plan: plan}, store).Assemble(context.Background(), Request{Repo: repo, Task: "fix Primary", MaxContextTokens: MinContextTokenBudget})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pkg.Budget.UsedTokens > MinContextTokenBudget || pkg.Sufficiency.Status == sufficiency.StatusSufficient {
+		t.Fatalf("final serialization retained stale sufficiency or exceeded budget: %+v", pkg)
 	}
 }
 
@@ -145,6 +190,11 @@ func TestAssembleDebugDoesNotChangePacking(t *testing.T) {
 		if normal.Sections[i].CandidateID != debug.Sections[i].CandidateID || normal.Sections[i].Source != debug.Sections[i].Source {
 			t.Fatalf("debug changed section %d", i)
 		}
+	}
+	normalSufficiency, _ := json.Marshal(normal.Sufficiency)
+	debugSufficiency, _ := json.Marshal(debug.Sufficiency)
+	if string(normalSufficiency) != string(debugSufficiency) || normal.StopReason != debug.StopReason {
+		t.Fatalf("debug changed sufficiency decision: normal=%+v debug=%+v", normal.Sufficiency, debug.Sufficiency)
 	}
 	counter, _ := NewTokenCounter(TokenizerO200K)
 	for _, pkg := range []Package{normal, debug} {
@@ -415,6 +465,60 @@ func TestAssemblerUsesRealPlannerGenericRelationships(t *testing.T) {
 	}
 }
 
+func TestRealGenericFindStopsEarlierThanFix(t *testing.T) {
+	store := assemblyStore(t)
+	defer store.Close()
+	repo := "local/real-generic-sufficiency"
+	sources := map[string]string{"save.go": "package app\nfunc SaveUser() { writeDB() }\n", "db.go": "package app\nfunc writeDB() {}\n", "handler.go": "package app\nfunc Handler() { SaveUser() }\n"}
+	files := map[string]string{}
+	languages := map[string]string{}
+	symbols := map[string][]parser.Symbol{}
+	allSymbols := []parser.Symbol{}
+	for file, source := range sources {
+		files[file] = parser.ComputeContentHash([]byte(source))
+		languages[file] = "go"
+		parsed, err := parser.ParseFile([]byte(source), file, "go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		symbols[file] = parsed
+		allSymbols = append(allSymbols, parsed...)
+	}
+	if err := store.ReplaceRepoIndex("local", "real-generic-sufficiency", "local", "", files, languages, allSymbols); err != nil {
+		t.Fatal(err)
+	}
+	for file, source := range sources {
+		if err := store.SaveContentFile("local", "real-generic-sufficiency", file, []byte(source)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	repoID, err := store.GetRepoID(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericResult, err := generic.NewAnalyzer().AnalyzeRepository(context.Background(), semantic.RepositoryInput{Repo: repo, Files: byteFiles(sources), Languages: languages, Symbols: symbols})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, genericResult); err != nil {
+		t.Fatal(err)
+	}
+	findPackage, err := New(planner.New(store), store).Assemble(context.Background(), Request{Repo: repo, Task: "find SaveUser", MaxContextTokens: 2000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixPackage, err := New(planner.New(store), store).Assemble(context.Background(), Request{Repo: repo, Task: "fix SaveUser", MaxContextTokens: 2000, IncludeImpact: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findPackage.Sufficiency.Status != sufficiency.StatusSufficient || len(findPackage.Rounds) != 1 || len(findPackage.Sections) >= len(fixPackage.Sections) || fixPackage.Sufficiency.Status != sufficiency.StatusSufficient {
+		t.Fatalf("real generic find/fix stopping policy failed: find=%+v fix=%+v", findPackage, fixPackage)
+	}
+	if findPackage.Budget.UsedTokens >= fixPackage.Budget.UsedTokens {
+		t.Fatalf("find task did not consume less context: find=%d fix=%d", findPackage.Budget.UsedTokens, fixPackage.Budget.UsedTokens)
+	}
+}
+
 func TestAssemblerPreservesFiveMFrameworkAuthorityWithoutFabricatingProvider(t *testing.T) {
 	store := assemblyStore(t)
 	defer store.Close()
@@ -438,7 +542,7 @@ func TestAssemblerPreservesFiveMFrameworkAuthorityWithoutFabricatingProvider(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pkg.Sections) != 2 || pkg.Sections[0].Resource != "app" || pkg.Sections[0].TargetResource != "ox_inventory" || pkg.Sections[1].Authority != "local_verified" {
+	if len(pkg.Sections) != 2 || pkg.Sufficiency.Status != sufficiency.StatusSufficient || pkg.Sections[0].Resource != "app" || pkg.Sections[0].TargetResource != "ox_inventory" || pkg.Sections[1].Authority != "local_verified" {
 		t.Fatalf("framework ownership was lost: %#v", pkg.Sections)
 	}
 
@@ -449,7 +553,7 @@ func TestAssemblerPreservesFiveMFrameworkAuthorityWithoutFabricatingProvider(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(externalPkg.Sections) != 1 || externalPkg.Sections[0].SymbolID != caller.ID {
+	if len(externalPkg.Sections) != 1 || externalPkg.Sufficiency.Status != sufficiency.StatusBlocked || externalPkg.Sections[0].SymbolID != caller.ID {
 		t.Fatalf("external usage fabricated provider context: %#v", externalPkg.Sections)
 	}
 }
@@ -533,7 +637,7 @@ func TestAssembleRealisticFiveMWorkspaceContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	naturalData, _ := json.Marshal(natural)
-	if natural.TaskClass != "broad_unknown" || natural.TaskConfidence != "low" || counter.Count(string(naturalData)) > 4000 || !containsFile(natural.Sections, "resources/[jobs]/banana_jobs/server/main.lua") || !containsFile(natural.Sections, "resources/[ox]/ox_inventory/server/main.lua") || !sectionsContainText(natural.Sections, "exports.banana_core:GetPlayer") || !sectionsContainText(natural.Sections, "exports.ox_inventory:AddItem") {
+	if natural.TaskClass != "broad_unknown" || natural.TaskConfidence != "low" || natural.Sufficiency.Status != sufficiency.StatusIndeterminate || counter.Count(string(naturalData)) > 4000 || !containsFile(natural.Sections, "resources/[jobs]/banana_jobs/server/main.lua") || !containsFile(natural.Sections, "resources/[ox]/ox_inventory/server/main.lua") || !sectionsContainText(natural.Sections, "exports.banana_core:GetPlayer") || !sectionsContainText(natural.Sections, "exports.ox_inventory:AddItem") {
 		t.Fatalf("natural workspace task lacked bounded character/inventory context: %#v", natural)
 	}
 	naturalAgain, err := New(planner.New(store), store).Assemble(context.Background(), Request{Repo: repo, Task: "fix character inventory loading", MaxContextTokens: 4000, IncludeImpact: true})
@@ -543,6 +647,20 @@ func TestAssembleRealisticFiveMWorkspaceContext(t *testing.T) {
 	naturalAgainData, _ := json.Marshal(naturalAgain)
 	if string(naturalData) != string(naturalAgainData) {
 		t.Fatal("natural workspace context assembly was not deterministic")
+	}
+	var loadCharacterID string
+	for _, symbol := range allSymbols {
+		if symbol.Name == "LoadCharacter" {
+			loadCharacterID = symbol.ID
+			break
+		}
+	}
+	focused, err := New(planner.New(store), store).Assemble(context.Background(), Request{Repo: repo, Task: "find LoadCharacter", FocusSymbolID: loadCharacterID, MaxContextTokens: 4000, IncludeImpact: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if focused.Sufficiency.Status != sufficiency.StatusSufficient {
+		t.Fatalf("trusted focused character task did not reach sufficient evidence: %+v", focused.Sufficiency)
 	}
 }
 
@@ -641,6 +759,14 @@ func writeAssemblyRepo(t *testing.T, store *storage.IndexStore, repo string, sou
 			t.Fatal(err)
 		}
 	}
+}
+
+func byteFiles(sources map[string]string) map[string][]byte {
+	result := make(map[string][]byte, len(sources))
+	for file, source := range sources {
+		result[file] = []byte(source)
+	}
+	return result
 }
 
 func sectionIndex(sections []Section, symbolID string) int {

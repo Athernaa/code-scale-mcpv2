@@ -62,6 +62,14 @@ type Plan struct {
 	Truncated         bool          `json:"truncated"`
 	Debug             *DebugDetails `json:"debug,omitempty"`
 
+	// Internal task-profile facts are consumed by bounded downstream policy
+	// such as context sufficiency. They are not part of the planner DTO.
+	TraceDirection       string   `json:"-"`
+	AnchorStrength       string   `json:"-"`
+	BroadIntent          bool     `json:"-"`
+	RequestedTaskClass   string   `json:"-"`
+	UnresolvedHighSignal []string `json:"-"`
+
 	// rankingDebug is populated only while finalizing a plan. It is deliberately
 	// not part of the normal DTO; the bounded public view is copied into Debug
 	// only when requested.

@@ -4,20 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
 	"github.com/Athernaa/code-scale-mcpv2/internal/planner"
+	"github.com/Athernaa/code-scale-mcpv2/internal/sufficiency"
 )
 
 type Assembler struct {
-	Planner PlanProvider
-	Store   SourceStore
+	Planner   PlanProvider
+	Store     SourceStore
+	Evaluator sufficiency.Evaluator
 }
 
 func New(planProvider PlanProvider, store SourceStore) *Assembler {
-	return &Assembler{Planner: planProvider, Store: store}
+	return &Assembler{Planner: planProvider, Store: store, Evaluator: sufficiency.New()}
 }
 
 type stagedCandidate struct {
@@ -78,7 +81,7 @@ func (a *Assembler) Assemble(ctx context.Context, request Request) (Package, err
 
 	reserve := metadataReserve(budget)
 	usable := budget - reserve
-	pkg := Package{Repo: request.Repo, TaskClass: plan.TaskClass, TaskConfidence: plan.TaskConfidence, IndexState: plan.IndexState, IndexIncomplete: plan.IndexIncomplete, Ambiguities: boundedAmbiguities(plan.Ambiguities, 8), Diagnostics: boundedStrings(plan.Diagnostics, 8), DegradedResources: boundedStrings(plan.DegradedResources, 16), PlannerTruncated: plan.Truncated, Budget: Budget{RequestedTokens: budget, UsableTokens: usable, Tokenizer: counter.Name(), Exact: counter.Exact()}}
+	pkg := Package{Repo: request.Repo, TaskClass: plan.TaskClass, TaskConfidence: plan.TaskConfidence, IndexState: plan.IndexState, IndexIncomplete: plan.IndexIncomplete, Ambiguities: boundedAmbiguities(plan.Ambiguities, 8), UnresolvedHints: boundedStrings(plan.UnresolvedHints, 8), Diagnostics: boundedStrings(plan.Diagnostics, 8), DegradedResources: boundedStrings(plan.DegradedResources, 16), PlannerTruncated: plan.Truncated, Budget: Budget{RequestedTokens: budget, UsableTokens: usable, Tokenizer: counter.Name(), Exact: counter.Exact()}}
 	pkg.Omitted.LowerPriority = ambiguityDropped
 	debug := &Debug{}
 	originals := map[string]string{}
@@ -87,6 +90,7 @@ func (a *Assembler) Assemble(ctx context.Context, request Request) (Package, err
 	supportReserveRemaining := supportReserve
 	seenSymbols, seenRanges := map[string]bool{}, map[string]bool{}
 	stop := "candidates_exhausted"
+	evaluatedStage := ""
 	for stageRank, stage := range []string{"anchor", "direct_support", "domain_support", "peripheral"} {
 		if err := ctx.Err(); err != nil {
 			return Package{}, err
@@ -166,6 +170,17 @@ func (a *Assembler) Assemble(ctx context.Context, request Request) (Package, err
 			}
 		}
 		pkg.Rounds = append(pkg.Rounds, round)
+		evaluatedStage = stage
+		decision := a.evaluateSufficiency(plan, pkg, request, stage)
+		pkg.Sufficiency = decision
+		if decision.Status == sufficiency.StatusSufficient {
+			stop = "sufficiency_satisfied"
+			break
+		}
+		if decision.Status == sufficiency.StatusBlocked {
+			stop = "blocked_by_sufficiency"
+			break
+		}
 		if stage == "direct_support" && supportReserveRemaining > 0 {
 			reclaimCapacity := minInt(remaining, supportReserveRemaining)
 			reclaimRemaining := reclaimAnchorReserve(pkg.Sections, originals, reclaimCapacity, counter)
@@ -173,6 +188,9 @@ func (a *Assembler) Assemble(ctx context.Context, request Request) (Package, err
 			remaining -= reclaimed
 			supportReserveRemaining -= reclaimed
 		}
+	}
+	if evaluatedStage == "" {
+		evaluatedStage = "peripheral"
 	}
 	debug.SectionsIncluded = len(pkg.Sections)
 	if len(pkg.Sections) == 0 && pkg.Omitted.SourceUnavailable > 0 {
@@ -185,8 +203,26 @@ func (a *Assembler) Assemble(ctx context.Context, request Request) (Package, err
 	pkg.ContextTruncated = pkg.Omitted.TokenBudget > 0 || pkg.Omitted.SourceReadLimit > 0 || debug.SectionsPartial > 0
 	pkg.Truncated = pkg.PlannerTruncated || pkg.ContextTruncated
 	pkg.Debug = debug
-	if err := finalizePackage(ctx, &pkg, originals, debug, counter, budget); err != nil {
-		return Package{}, err
+	for i := 0; i < 4; i++ {
+		decision := a.evaluateSufficiency(plan, pkg, request, evaluatedStage)
+		pkg.Sufficiency = decision
+		debug.SufficiencyStatus = decision.Status
+		debug.SufficiencyStage = decision.EvaluatedAfterStage
+		before := sectionFingerprint(pkg.Sections)
+		if err := finalizePackage(ctx, &pkg, originals, debug, counter, budget); err != nil {
+			return Package{}, err
+		}
+		after := a.evaluateSufficiency(plan, pkg, request, evaluatedStage)
+		if reflect.DeepEqual(decision, after) && before == sectionFingerprint(pkg.Sections) {
+			pkg.Sufficiency = after
+			break
+		}
+		pkg.Sufficiency = after
+	}
+	if pkg.Sufficiency.Status == sufficiency.StatusSufficient {
+		pkg.StopReason = "sufficiency_satisfied"
+	} else if pkg.Sufficiency.Status == sufficiency.StatusBlocked && pkg.StopReason == "sufficiency_satisfied" {
+		pkg.StopReason = "blocked_by_sufficiency"
 	}
 	if !request.Debug {
 		pkg.Debug = nil
@@ -382,13 +418,12 @@ func hydrateEstimates(pool []stagedCandidate, symbols map[string]parser.Symbol) 
 
 func supportClassFor(candidate planner.Candidate) supportClass {
 	for _, reason := range candidate.ReasonCodes {
-		switch reason {
-		case "direct_callee", "direct_caller", "framework_provider", "export_provider", "event_peer", "callback_peer", "impact_direct":
+		if planner.IsCriticalSupportReason(reason) {
 			return supportCritical
 		}
 	}
 	for _, reason := range candidate.ReasonCodes {
-		if reason == "direct_reference" || reason == "direct_import" {
+		if planner.IsSecondarySupportReason(reason) {
 			return supportSecondary
 		}
 	}

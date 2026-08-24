@@ -7,6 +7,22 @@ import (
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/generic"
 )
 
+// IsCriticalSupportReason identifies relationship evidence that can be a
+// required implementation dependency for sufficiency policy.
+func IsCriticalSupportReason(reason string) bool {
+	switch reason {
+	case "direct_callee", "direct_caller", "framework_provider", "export_provider", "event_peer", "callback_peer", "impact_direct":
+		return true
+	default:
+		return false
+	}
+}
+
+// IsSecondarySupportReason identifies useful but non-required support.
+func IsSecondarySupportReason(reason string) bool {
+	return reason == "direct_reference" || reason == "direct_import"
+}
+
 type semanticRole string
 
 const (
