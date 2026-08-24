@@ -52,6 +52,43 @@ CREATE INDEX IF NOT EXISTS idx_symbols_file     ON symbols(file_path);
 CREATE INDEX IF NOT EXISTS idx_symbols_repo     ON symbols(repo_id);
 CREATE INDEX IF NOT EXISTS idx_files_repo       ON files(repo_id);
 
+CREATE TABLE IF NOT EXISTS semantic_entities (
+    id          TEXT PRIMARY KEY,
+    repo_id     INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    file_path   TEXT NOT NULL,
+    symbol_id   TEXT NOT NULL DEFAULT '',
+    kind        TEXT NOT NULL,
+    name        TEXT NOT NULL DEFAULT '',
+    framework   TEXT NOT NULL DEFAULT '',
+    side        TEXT NOT NULL DEFAULT 'unknown',
+    line        INTEGER NOT NULL DEFAULT 0,
+    end_line    INTEGER NOT NULL DEFAULT 0,
+    dynamic     INTEGER NOT NULL DEFAULT 0,
+    metadata    TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS semantic_relationships (
+    id             TEXT PRIMARY KEY,
+    repo_id        INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    from_entity_id TEXT NOT NULL,
+    to_entity_id   TEXT NOT NULL DEFAULT '',
+    kind           TEXT NOT NULL,
+    name           TEXT NOT NULL DEFAULT '',
+    dynamic        INTEGER NOT NULL DEFAULT 0,
+    confidence     REAL NOT NULL DEFAULT 0,
+    file_path      TEXT NOT NULL DEFAULT '',
+    line           INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_semantic_entities_repo ON semantic_entities(repo_id);
+CREATE INDEX IF NOT EXISTS idx_semantic_entities_kind ON semantic_entities(repo_id, kind);
+CREATE INDEX IF NOT EXISTS idx_semantic_entities_name ON semantic_entities(repo_id, name);
+CREATE INDEX IF NOT EXISTS idx_semantic_entities_file ON semantic_entities(repo_id, file_path);
+CREATE INDEX IF NOT EXISTS idx_semantic_entities_symbol ON semantic_entities(repo_id, symbol_id);
+CREATE INDEX IF NOT EXISTS idx_semantic_relationships_repo ON semantic_relationships(repo_id);
+CREATE INDEX IF NOT EXISTS idx_semantic_relationships_from ON semantic_relationships(repo_id, from_entity_id);
+CREATE INDEX IF NOT EXISTS idx_semantic_relationships_to ON semantic_relationships(repo_id, to_entity_id);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
     name, qualified_name, signature, summary, docstring,
     content='symbols', content_rowid='id'
@@ -113,5 +150,47 @@ CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
 );
 `
 
+// MigrateV6SQL adds generic semantic entities and relationships. FiveM is the
+// first analyzer, but the schema deliberately stores framework and kind as
+// strings for future analyzers.
+const MigrateV6SQL = `
+CREATE TABLE IF NOT EXISTS semantic_entities (
+    id          TEXT PRIMARY KEY,
+    repo_id     INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    file_path   TEXT NOT NULL,
+    symbol_id   TEXT NOT NULL DEFAULT '',
+    kind        TEXT NOT NULL,
+    name        TEXT NOT NULL DEFAULT '',
+    framework   TEXT NOT NULL DEFAULT '',
+    side        TEXT NOT NULL DEFAULT 'unknown',
+    line        INTEGER NOT NULL DEFAULT 0,
+    end_line    INTEGER NOT NULL DEFAULT 0,
+    dynamic     INTEGER NOT NULL DEFAULT 0,
+    metadata    TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS semantic_relationships (
+    id             TEXT PRIMARY KEY,
+    repo_id        INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    from_entity_id TEXT NOT NULL,
+    to_entity_id   TEXT NOT NULL DEFAULT '',
+    kind           TEXT NOT NULL,
+    name           TEXT NOT NULL DEFAULT '',
+    dynamic        INTEGER NOT NULL DEFAULT 0,
+    confidence     REAL NOT NULL DEFAULT 0,
+    file_path      TEXT NOT NULL DEFAULT '',
+    line           INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_semantic_entities_repo ON semantic_entities(repo_id);
+CREATE INDEX IF NOT EXISTS idx_semantic_entities_kind ON semantic_entities(repo_id, kind);
+CREATE INDEX IF NOT EXISTS idx_semantic_entities_name ON semantic_entities(repo_id, name);
+CREATE INDEX IF NOT EXISTS idx_semantic_entities_file ON semantic_entities(repo_id, file_path);
+CREATE INDEX IF NOT EXISTS idx_semantic_entities_symbol ON semantic_entities(repo_id, symbol_id);
+CREATE INDEX IF NOT EXISTS idx_semantic_relationships_repo ON semantic_relationships(repo_id);
+CREATE INDEX IF NOT EXISTS idx_semantic_relationships_from ON semantic_relationships(repo_id, from_entity_id);
+CREATE INDEX IF NOT EXISTS idx_semantic_relationships_to ON semantic_relationships(repo_id, to_entity_id);
+`
+
 // CurrentSchemaVersion is the current schema version.
-const CurrentSchemaVersion = 5
+const CurrentSchemaVersion = 6

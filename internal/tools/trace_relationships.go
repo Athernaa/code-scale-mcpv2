@@ -1,0 +1,101 @@
+package tools
+
+import (
+	"context"
+
+	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+type TraceRelationshipsArgs struct {
+	Repo       string `json:"repo" jsonschema:"Repository name"`
+	EntityID   string `json:"entity_id" jsonschema:"Semantic entity ID"`
+	Direction  string `json:"direction,omitempty" jsonschema:"Traversal direction: incoming, outgoing, or both (default both)"`
+	Depth      int    `json:"depth,omitempty" jsonschema:"Maximum traversal depth (default 2, max 3)"`
+	MaxResults int    `json:"max_results,omitempty" jsonschema:"Maximum graph edges (default 50, max 200)"`
+}
+
+type semanticEndpoint struct {
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`
+	Name    string `json:"name"`
+	Side    string `json:"side,omitempty"`
+	File    string `json:"file"`
+	Line    int    `json:"line"`
+	Dynamic bool   `json:"dynamic,omitempty"`
+}
+
+type relationshipTraceResult struct {
+	RelationshipID string            `json:"relationship_id"`
+	Kind           string            `json:"kind"`
+	Name           string            `json:"name,omitempty"`
+	Dynamic        bool              `json:"dynamic,omitempty"`
+	Confidence     float64           `json:"confidence,omitempty"`
+	Depth          int               `json:"depth"`
+	From           semanticEndpoint  `json:"from"`
+	To             *semanticEndpoint `json:"to,omitempty"`
+}
+
+func TraceRelationshipsHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, TraceRelationshipsArgs) (*mcp.CallToolResult, any, error) {
+	return func(ctx context.Context, req *mcp.CallToolRequest, args TraceRelationshipsArgs) (*mcp.CallToolResult, any, error) {
+		t := newTimer()
+		repoID, err := deps.Store.GetRepoID(args.Repo)
+		if err != nil {
+			r, _ := errorResult(err.Error())
+			return r, nil, nil
+		}
+		edges, err := deps.Store.TraceSemantic(repoID, args.EntityID, args.Direction, args.Depth, args.MaxResults)
+		if err != nil {
+			r, _ := errorResult(err.Error())
+			return r, nil, nil
+		}
+		results := make([]relationshipTraceResult, 0, len(edges))
+		for _, edge := range edges {
+			item := relationshipTraceResult{
+				RelationshipID: edge.ID,
+				Kind:           edge.Kind,
+				Name:           edge.Name,
+				Dynamic:        edge.Dynamic,
+				Confidence:     edge.Confidence,
+				Depth:          edge.Depth,
+				From:           endpoint(edge.From),
+			}
+			if edge.To != nil {
+				to := endpoint(*edge.To)
+				item.To = &to
+			}
+			results = append(results, item)
+		}
+		result := map[string]any{
+			"repo":      args.Repo,
+			"entity_id": args.EntityID,
+			"direction": normalizedDirection(args.Direction),
+			"results":   results,
+			"truncated": args.MaxResults > 0 && len(results) >= minTraceLimit(args.MaxResults),
+			"_meta":     deps.meta(t, args.Repo, args.MaxResults > 0 && len(results) >= minTraceLimit(args.MaxResults), 0, 0),
+		}
+		r, _ := toTextResult(result)
+		return r, nil, nil
+	}
+}
+
+func endpoint(entity semantic.Entity) semanticEndpoint {
+	return semanticEndpoint{ID: entity.ID, Kind: entity.Kind, Name: entity.Name, Side: entity.Side, File: entity.File, Line: entity.Line, Dynamic: entity.Dynamic}
+}
+
+func normalizedDirection(direction string) string {
+	if direction == "incoming" || direction == "outgoing" || direction == "both" {
+		return direction
+	}
+	return "both"
+}
+
+func minTraceLimit(value int) int {
+	if value <= 0 {
+		return 50
+	}
+	if value > 200 {
+		return 200
+	}
+	return value
+}

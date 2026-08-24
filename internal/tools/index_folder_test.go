@@ -74,3 +74,38 @@ func TestIndexFolderAppliesGitignoreAndExtraPatterns(t *testing.T) {
 		t.Fatalf("unexpected indexing diagnostics: %#v", response)
 	}
 }
+
+func TestIndexFolderPersistsFiveMSemantics(t *testing.T) {
+	resourcePath := filepath.Join("..", "..", "testdata", "fivem", "basic_resource")
+	store, err := storage.NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	result, _, err := IndexFolderHandler(&Deps{Store: store})(context.Background(), nil, IndexFolderArgs{Path: resourcePath})
+	if err != nil || result.IsError {
+		t.Fatalf("index_folder failed for FiveM fixture: result=%#v err=%v", result, err)
+	}
+	id, err := repository.Local(resourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID(id.Repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entities, err := store.GetSemanticEntities(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, entity := range entities {
+		if entity.Kind == "event_handler" && entity.Name == "avenlo:createCharacter" && entity.Side == "server" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("indexed FiveM semantics missing server handler: %#v", entities)
+	}
+}

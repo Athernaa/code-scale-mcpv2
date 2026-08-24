@@ -1,0 +1,3 @@
+Config = {
+    eventName = 'avenlo:shared'
+}

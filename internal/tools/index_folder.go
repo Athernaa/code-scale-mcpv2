@@ -184,6 +184,8 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 		// Collect results
 		fileHashes := make(map[string]string)
 		fileLangs := make(map[string]string)
+		fileContents := make(map[string][]byte)
+		symbolsByFile := make(map[string][]parser.Symbol)
 		var allSymbols []parser.Symbol
 		skippedFiles := 0
 		parseFailures := 0
@@ -202,6 +204,8 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 			}
 			fileHashes[pr.path] = pr.hash
 			fileLangs[pr.path] = pr.language
+			fileContents[pr.path] = pr.content
+			symbolsByFile[pr.path] = pr.symbols
 			allSymbols = append(allSymbols, pr.symbols...)
 
 			// Save content file
@@ -219,6 +223,13 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 			r, _ := errorResult("save index: " + err.Error())
 			return r, nil, nil
 		}
+		semanticCount, semanticErr := indexSemanticRepository(ctx, deps.Store, owner+"/"+repoName, repoName, "local", fileContents, fileLangs, symbolsByFile)
+		if semanticErr != nil {
+			log.Printf("index_folder: semantic analysis failed: %v", semanticErr)
+			if len(diagnostics) < 3 {
+				diagnostics = append(diagnostics, "semantic: "+semanticErr.Error())
+			}
+		}
 
 		// Count languages
 		langCounts := make(map[string]int)
@@ -227,16 +238,17 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 		}
 
 		result := map[string]any{
-			"success":          true,
-			"repo":             owner + "/" + repoName,
-			"folder_path":      absPath,
-			"indexed_at":       time.Now().UTC().Format(time.RFC3339),
-			"files_discovered": len(sourceFiles),
-			"file_count":       len(fileHashes),
-			"symbol_count":     len(allSymbols),
-			"languages":        langCounts,
-			"skipped_files":    skippedFiles,
-			"parse_failures":   parseFailures,
+			"success":           true,
+			"repo":              owner + "/" + repoName,
+			"folder_path":       absPath,
+			"indexed_at":        time.Now().UTC().Format(time.RFC3339),
+			"files_discovered":  len(sourceFiles),
+			"file_count":        len(fileHashes),
+			"symbol_count":      len(allSymbols),
+			"languages":         langCounts,
+			"skipped_files":     skippedFiles,
+			"parse_failures":    parseFailures,
+			"semantic_entities": semanticCount,
 			"_meta": Meta{
 				TimingMs:    t.elapsedMs(),
 				Repo:        owner + "/" + repoName,

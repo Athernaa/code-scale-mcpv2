@@ -101,17 +101,19 @@ func IndexRepoHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, In
 		}
 
 		// Fetch file contents concurrently
-		fileContents := client.FetchFilesConcurrently(owner, repoName, sourcePaths, 20)
+		fetchedContents := client.FetchFilesConcurrently(owner, repoName, sourcePaths, 20)
 
 		// Parse and index
 		fileHashes := make(map[string]string)
 		fileLangs := make(map[string]string)
+		fileContents := make(map[string][]byte)
+		symbolsByFile := make(map[string][]parser.Symbol)
 		var allSymbols []parser.Symbol
-		skippedFiles := len(sourcePaths) - len(fileContents)
+		skippedFiles := len(sourcePaths) - len(fetchedContents)
 		parseFailures := 0
 		var diagnostics []string
 
-		for path, content := range fileContents {
+		for path, content := range fetchedContents {
 			// Skip binary content
 			if security.IsBinaryContent(content) {
 				skippedFiles++
@@ -132,6 +134,8 @@ func IndexRepoHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, In
 			h := sha256.Sum256(content)
 			fileHashes[path] = hex.EncodeToString(h[:])
 			fileLangs[path] = lang
+			fileContents[path] = content
+			symbolsByFile[path] = symbols
 			allSymbols = append(allSymbols, symbols...)
 
 			// Save content file
@@ -149,6 +153,13 @@ func IndexRepoHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, In
 			r, _ := errorResult("save index: " + err.Error())
 			return r, nil, nil
 		}
+		semanticCount, semanticErr := indexSemanticRepository(ctx, deps.Store, owner+"/"+repoName, repoName, "github", fileContents, fileLangs, symbolsByFile)
+		if semanticErr != nil {
+			log.Printf("index_repo: semantic analysis failed: %v", semanticErr)
+			if len(diagnostics) < 3 {
+				diagnostics = append(diagnostics, "semantic: "+semanticErr.Error())
+			}
+		}
 
 		// Count languages
 		langCounts := make(map[string]int)
@@ -157,15 +168,16 @@ func IndexRepoHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, In
 		}
 
 		result := map[string]any{
-			"success":          true,
-			"repo":             owner + "/" + repoName,
-			"indexed_at":       time.Now().UTC().Format(time.RFC3339),
-			"files_discovered": len(sourcePaths),
-			"file_count":       len(fileHashes),
-			"symbol_count":     len(allSymbols),
-			"languages":        langCounts,
-			"skipped_files":    skippedFiles,
-			"parse_failures":   parseFailures,
+			"success":           true,
+			"repo":              owner + "/" + repoName,
+			"indexed_at":        time.Now().UTC().Format(time.RFC3339),
+			"files_discovered":  len(sourcePaths),
+			"file_count":        len(fileHashes),
+			"symbol_count":      len(allSymbols),
+			"languages":         langCounts,
+			"skipped_files":     skippedFiles,
+			"parse_failures":    parseFailures,
+			"semantic_entities": semanticCount,
 			"_meta": Meta{
 				TimingMs:    t.elapsedMs(),
 				Repo:        owner + "/" + repoName,

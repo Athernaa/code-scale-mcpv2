@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
+	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
 )
 
 func testSymbol(file, name string) parser.Symbol {
@@ -357,6 +358,65 @@ func TestUpsertFileIndexAddsNewFile(t *testing.T) {
 	files, err := store.GetFiles(repoID)
 	if err != nil || len(files) != 2 {
 		t.Fatalf("expected two files after new-file upsert, files=%#v err=%v", files, err)
+	}
+}
+
+func TestSemanticStorageSearchReplaceTraceAndFileIsolation(t *testing.T) {
+	store := newTestStore(t)
+	files := map[string]string{"client.lua": "client", "server.lua": "server"}
+	langs := map[string]string{"client.lua": "lua", "server.lua": "lua"}
+	if err := store.ReplaceRepoIndex("local", "semantic", "local", "", files, langs, nil); err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID("local/semantic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	trigger := semantic.Entity{ID: "trigger", Repo: "local/semantic", File: "client.lua", Kind: "event_trigger", Name: "avenlo:create", Framework: "fivem", Side: "client", Line: 1}
+	handler := semantic.Entity{ID: "handler", Repo: "local/semantic", File: "server.lua", Kind: "event_handler", Name: "avenlo:create", Framework: "fivem", Side: "server", Line: 1}
+	unrelated := semantic.Entity{ID: "unrelated", Repo: "local/semantic", File: "server.lua", Kind: "command_registration", Name: "revive", Framework: "fivem", Side: "server", Line: 2}
+	link := semantic.Relationship{ID: "link", Repo: "local/semantic", FromEntityID: trigger.ID, ToEntityID: handler.ID, Kind: "triggers", Name: trigger.Name, Confidence: 1, File: trigger.File, Line: 1}
+	if err := store.ReplaceSemanticIndex(repoID, semantic.Result{Entities: []semantic.Entity{trigger, handler, unrelated}, Relationships: []semantic.Relationship{link}}); err != nil {
+		t.Fatal(err)
+	}
+	results, err := store.SearchSemantic(repoID, "create", "event_handler", "server", 20)
+	if err != nil || len(results) != 1 || results[0].ID != handler.ID {
+		t.Fatalf("semantic search filtering failed: %#v err=%v", results, err)
+	}
+	edges, err := store.TraceSemantic(repoID, trigger.ID, "outgoing", 2, 50)
+	if err != nil || len(edges) != 1 || edges[0].To == nil || edges[0].To.ID != handler.ID {
+		t.Fatalf("semantic trace failed: %#v err=%v", edges, err)
+	}
+
+	newTrigger := semantic.Entity{ID: "new-trigger", Repo: "local/semantic", File: "client.lua", Kind: "event_trigger", Name: "avenlo:updated", Framework: "fivem", Side: "client", Line: 1}
+	if err := store.ReplaceSemanticFile(repoID, "client.lua", []semantic.Entity{newTrigger}); err != nil {
+		t.Fatal(err)
+	}
+	entities, err := store.GetSemanticEntities(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entityIDs := map[string]bool{}
+	for _, entity := range entities {
+		entityIDs[entity.ID] = true
+	}
+	if !entityIDs[newTrigger.ID] || !entityIDs[handler.ID] || !entityIDs[unrelated.ID] || entityIDs[trigger.ID] {
+		t.Fatalf("file replacement did not preserve unrelated semantic entities: %#v", entities)
+	}
+	if err := store.ReplaceSemanticRelationships(repoID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteFileFromIndex("local", "semantic", "client.lua"); err != nil {
+		t.Fatal(err)
+	}
+	entities, err = store.GetSemanticEntities(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entity := range entities {
+		if entity.File == "client.lua" {
+			t.Fatalf("deleted file semantic entity survived: %#v", entity)
+		}
 	}
 }
 

@@ -28,7 +28,7 @@ func NewCodeScaleServer(store *storage.IndexStore) (*mcp.Server, *watcher.Manage
 		Throttle: ratelimit.NewThrottler(),
 	}
 
-	// Register all 15 tools.
+	// Register all 17 tools.
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "index_repo",
 		Description: "Index a GitHub repository's source code for symbol-level retrieval.",
@@ -73,6 +73,16 @@ func NewCodeScaleServer(store *storage.IndexStore) (*mcp.Server, *watcher.Manage
 		Name:        "search_text",
 		Description: "Full-text search across all indexed file contents. Use context_lines for snippet windows around matches.",
 	}, tools.SearchTextHandler(deps))
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "search_semantics",
+		Description: "Search indexed semantic entities such as FiveM events, callbacks, exports, commands, and resource metadata.",
+	}, tools.SearchSemanticsHandler(deps))
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "trace_relationships",
+		Description: "Trace compact semantic relationships from an entity using incoming, outgoing, or both directions.",
+	}, tools.TraceRelationshipsHandler(deps))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "batch_execute",

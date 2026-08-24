@@ -1,6 +1,7 @@
 package watcher
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -13,6 +14,8 @@ import (
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
 	"github.com/Athernaa/code-scale-mcpv2/internal/repository"
 	"github.com/Athernaa/code-scale-mcpv2/internal/security"
+	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
+	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/fivem"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 	"github.com/Athernaa/code-scale-mcpv2/internal/summarizer"
 	"github.com/fsnotify/fsnotify"
@@ -325,6 +328,8 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 			log.Printf("watcher: file removed %s, cleaning index", relPath)
 			if err := m.store.DeleteFileFromIndex(owner, repoName, relPath); err != nil {
 				log.Printf("watcher: failed to remove %s from index: %v", relPath, err)
+			} else if err := m.refreshSemanticRelationships(owner + "/" + repoName); err != nil {
+				log.Printf("watcher: failed to refresh semantic relationships after removing %s: %v", relPath, err)
 			}
 			continue
 		}
@@ -367,6 +372,79 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 			continue
 		}
 
+		if err := m.updateSemanticFile(owner+"/"+repoName, repoName, relPath, lang, content, symbols); err != nil {
+			log.Printf("watcher: semantic update failed for %s: %v", relPath, err)
+		}
+
 		log.Printf("watcher: reindexed %s (%d symbols)", relPath, len(symbols))
 	}
+}
+
+func (m *Manager) updateSemanticFile(repo, resource, filePath, language string, content []byte, symbols []parser.Symbol) error {
+	repoID, err := m.store.GetRepoID(repo)
+	if err != nil {
+		return err
+	}
+	if filePath == "fxmanifest.lua" || filePath == "__resource.lua" {
+		return m.rebuildSemanticRepository(repoID, repo, resource)
+	}
+	entities, err := m.store.GetSemanticEntities(repoID)
+	if err != nil {
+		return err
+	}
+	side := "unknown"
+	for _, entity := range entities {
+		if entity.Kind == fivem.KindManifestResource {
+			side = fivem.ClassifyPathFromEntity(entity, filePath)
+			break
+		}
+	}
+	result, err := fivem.NewAnalyzer().AnalyzeFile(context.Background(), semantic.FileInput{
+		Repo: repo, Resource: resource, File: filePath, Language: language,
+		Content: content, Symbols: symbols, Side: side,
+	})
+	if err != nil {
+		return err
+	}
+	if err := m.store.ReplaceSemanticFile(repoID, filePath, result.Entities); err != nil {
+		return err
+	}
+	return m.refreshSemanticRelationships(repo)
+}
+
+func (m *Manager) refreshSemanticRelationships(repo string) error {
+	repoID, err := m.store.GetRepoID(repo)
+	if err != nil {
+		return err
+	}
+	entities, err := m.store.GetSemanticEntities(repoID)
+	if err != nil {
+		return err
+	}
+	return m.store.ReplaceSemanticRelationships(repoID, fivem.ResolveRelationships(entities))
+}
+
+func (m *Manager) rebuildSemanticRepository(repoID int64, repo, resource string) error {
+	files, err := m.store.GetFiles(repoID)
+	if err != nil {
+		return err
+	}
+	input := semantic.RepositoryInput{
+		Repo: repo, Resource: resource, SourceType: "local",
+		Files: make(map[string][]byte), Languages: make(map[string]string), Symbols: make(map[string][]parser.Symbol),
+	}
+	for _, file := range files {
+		content, err := m.store.GetFileContent(repoID, file.Path)
+		if err != nil {
+			continue
+		}
+		input.Files[file.Path] = content
+		input.Languages[file.Path] = file.Language
+		input.Symbols[file.Path], _ = m.store.GetSymbolsByFile(repoID, file.Path)
+	}
+	result, err := fivem.NewAnalyzer().AnalyzeRepository(context.Background(), input)
+	if err != nil {
+		return err
+	}
+	return m.store.ReplaceSemanticIndex(repoID, result)
 }
