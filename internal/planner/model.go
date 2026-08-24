@@ -25,6 +25,9 @@ const (
 	DefaultMaxSemanticRows    = 128
 	DefaultMaxFallbackMatches = 64
 	DefaultMaxFallbackPerTerm = 8
+	DefaultMaxExactQueries    = 24
+	DefaultMaxSemanticQueries = 24
+	DefaultMaxFallbackQueries = 16
 	MaxAmbiguities            = 32
 	MaxUnresolvedHints        = 32
 	MaxDiagnostics            = 32
@@ -212,6 +215,9 @@ type plannerBudget struct {
 	maxSemanticRows    int
 	maxFallbackMatches int
 	maxFallbackPerTerm int
+	maxExactQueries    int
+	maxSemanticQueries int
+	maxFallbackQueries int
 
 	seedsUsed       int
 	evidenceUsed    int
@@ -243,5 +249,8 @@ func newPlannerBudget() *plannerBudget {
 		maxSemanticRows:    DefaultMaxSemanticRows,
 		maxFallbackMatches: DefaultMaxFallbackMatches,
 		maxFallbackPerTerm: DefaultMaxFallbackPerTerm,
+		maxExactQueries:    DefaultMaxExactQueries,
+		maxSemanticQueries: DefaultMaxSemanticQueries,
+		maxFallbackQueries: DefaultMaxFallbackQueries,
 	}
 }

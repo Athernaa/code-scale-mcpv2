@@ -1109,6 +1109,45 @@ func (s *IndexStore) SearchSemanticWithResourceTargetFrameworkOptions(repoID int
 	return result, truncated, nil
 }
 
+// SearchSemanticExact returns semantic entities whose name or normalized
+// operation is exactly query. It is intentionally separate from the
+// substring-oriented search surface used by interactive semantic search.
+func (s *IndexStore) SearchSemanticExact(repoID int64, query string, maxResults int) ([]semantic.Entity, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if maxResults <= 0 {
+		maxResults = 20
+	}
+	if maxResults > 200 {
+		maxResults = 200
+	}
+	repoName := repoNameLocked(s.db, repoID)
+	rows, err := s.db.Query(`SELECT id, analyzer, file_path, symbol_id, kind, name, framework, side, line, end_line, dynamic, metadata
+		FROM semantic_entities
+		WHERE repo_id = ? AND (name = ? OR json_extract(metadata, '$.operation') = ?)
+		ORDER BY file_path, line, id LIMIT ?`, repoID, query, query, maxResults+1)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = rows.Close() }()
+	result := make([]semantic.Entity, 0, maxResults+1)
+	for rows.Next() {
+		entity, scanErr := scanSemanticEntity(rows, repoName)
+		if scanErr != nil {
+			return nil, false, scanErr
+		}
+		result = append(result, entity)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	truncated := len(result) > maxResults
+	if truncated {
+		result = result[:maxResults]
+	}
+	return result, truncated, nil
+}
+
 // TraceSemantic is the compatibility wrapper for FiveM relationship tracing.
 func (s *IndexStore) TraceSemantic(repoID int64, entityID, direction string, depth, maxResults int) ([]semantic.TraceEdge, bool, error) {
 	return s.TraceSemanticWithOptions(repoID, entityID, semantic.AnalyzerFiveM, direction, nil, depth, maxResults)

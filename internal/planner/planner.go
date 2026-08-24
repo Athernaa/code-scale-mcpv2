@@ -78,6 +78,7 @@ func newSeedCollector(repo string, work *plannerBudget) *seedCollector {
 
 func (c *seedCollector) add(entity semantic.Entity, typ, match string, priority int, expand bool) bool {
 	anchor := entitySourceAnchor(entity)
+	contextID := contextSymbolID(entity)
 	if _, exists := c.seeds[anchor]; !exists {
 		if c.work.seedsUsed >= c.work.maxSeeds {
 			c.work.seedExhausted = true
@@ -87,7 +88,7 @@ func (c *seedCollector) add(entity semantic.Entity, typ, match string, priority 
 		c.priorities[anchor] = priority
 		seedID := semantic.StableID("planner_seed", c.repo, anchor)
 		c.seedAnchors[seedID] = anchor
-		c.seeds[anchor] = &Seed{ID: seedID, Type: typ, SourceID: entity.ID, SourceIDs: []string{entity.ID}, SymbolID: entity.SymbolID, File: normalizePath(entity.File), Name: entity.Name, Match: match, Authority: entityAuthority(entity), Authorities: nonEmptyValues(entityAuthority(entity))}
+		c.seeds[anchor] = &Seed{ID: seedID, Type: typ, SourceID: entity.ID, SourceIDs: []string{entity.ID}, SymbolID: contextID, File: normalizePath(entity.File), Name: entity.Name, Match: match, Authority: entityAuthority(entity), Authorities: nonEmptyValues(entityAuthority(entity))}
 	} else {
 		seed := c.seeds[anchor]
 		seed.SourceIDs = appendUnique(seed.SourceIDs, entity.ID)
@@ -236,9 +237,10 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 
 	acc := make(map[string]*candidateAccumulator)
 	collector := newSeedCollector(request.Repo, work)
-	exactAnchorsByHint := map[string]map[string]bool{}
+	declarationAnchorsByHint := map[string]map[string]bool{}
 	exactTruncatedByHint := map[string]bool{}
 	exactSymbolAnchors := map[string]bool{}
+	semanticFamilies := map[string]bool{}
 	matchedHints := map[string]bool{}
 
 	if request.FocusSymbolID != "" {
@@ -252,11 +254,11 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 		exactSymbolAnchors[entitySourceAnchor(entity)] = true
 	}
 
-	for _, hint := range sortedUnique(intent.SymbolHints) {
+	for _, hint := range orderedLookupHints(intent) {
 		if err := contextErr(ctx); err != nil {
 			return Plan{}, err
 		}
-		if !work.allowLookup() || work.exactRows >= work.maxExactAnchors {
+		if !work.allowExactQuery() || work.exactRows >= work.maxExactAnchors {
 			work.exactExhausted = true
 			break
 		}
@@ -267,13 +269,14 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 		if searchErr != nil {
 			return Plan{}, searchErr
 		}
-		anchors := exactAnchorsByHint[hint]
+		anchors := declarationAnchorsByHint[hint]
 		if anchors == nil {
 			anchors = map[string]bool{}
-			exactAnchorsByHint[hint] = anchors
+			declarationAnchorsByHint[hint] = anchors
 		}
 		if len(symbols) > perQuery {
 			exactTruncatedByHint[hint] = true
+			result.Truncated = true
 			symbols = symbols[:perQuery]
 		}
 		for _, symbol := range symbols {
@@ -283,31 +286,34 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 			anchors[anchor] = true
 			exactSymbolAnchors[anchor] = true
 			matchedHints[hint] = true
-			collector.add(entity, "symbol", "exact_symbol_match", 10, true)
-			addSymbolCandidate(acc, request.Repo, symbol, []string{"exact_symbol_match"}, 0, work)
+			reason := exactMatchReason(intent, hint)
+			collector.add(entity, "symbol", reason, 10, true)
+			addSymbolCandidate(acc, request.Repo, symbol, []string{reason}, 0, work)
 		}
 	}
 
-	exactSemanticAnchors := map[string]bool{}
-	for _, hint := range sortedUnique(intent.SemanticHints) {
+	for _, hint := range orderedLookupHints(intent) {
 		if err := contextErr(ctx); err != nil {
 			return Plan{}, err
 		}
-		if !work.allowLookup() || work.semanticRows >= work.maxSemanticRows {
+		if !work.allowSemanticQuery() || work.semanticRows >= work.maxSemanticRows {
 			work.exactExhausted = true
 			break
 		}
 		work.semanticQueries++
 		remaining := work.maxSemanticRows - work.semanticRows
 		perQuery := minInt(DefaultMaxSemanticRows/2, remaining)
-		entities, truncated, searchErr := p.Store.SearchSemanticWithResourceTargetFrameworkOptions(repoID, hint, "", "", "", "", "", "", true, perQuery)
+		entities, truncated, searchErr := p.Store.SearchSemanticExact(repoID, hint, perQuery)
 		if searchErr != nil {
 			return Plan{}, searchErr
 		}
-		anchors := exactAnchorsByHint[hint]
+		if truncated {
+			result.Truncated = true
+		}
+		anchors := declarationAnchorsByHint[hint]
 		if anchors == nil {
 			anchors = map[string]bool{}
-			exactAnchorsByHint[hint] = anchors
+			declarationAnchorsByHint[hint] = anchors
 		}
 		semanticExactMatches := 0
 		for _, entity := range entities {
@@ -319,33 +325,44 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 			if entity.Analyzer == semantic.AnalyzerFiveMWorkspace || entity.Kind == framework.KindStatus {
 				continue
 			}
-			operation := metadataOperation(entity)
 			if fileHint != "" && normalizePath(entity.File) != fileHint {
 				continue
 			}
-			if entity.Name != hint && operation != hint {
-				continue
-			}
+			role := semanticSeedRole(entity)
 			anchor := entitySourceAnchor(entity)
-			anchors[anchor] = true
-			exactSemanticAnchors[anchor] = true
+			if role == roleDeclaration {
+				anchors[anchor] = true
+			}
+			if family := semanticFamilyKey(entity, hint); family != "" {
+				semanticFamilies[family] = true
+			}
 			matchedHints[hint] = true
 			semanticExactMatches++
+			if role == roleUsage {
+				if contextSymbolID(entity) != "" {
+					addEntityCandidate(acc, entity, []string{"usage_match"}, 1, work)
+				}
+				continue
+			}
+			if role == roleTopology || role == roleStatus {
+				continue
+			}
 			priority := 20
 			if entity.Kind == framework.KindOperation {
 				priority = 15
 				intent.ExpansionDepth = 2
 			}
-			collector.add(entity, "semantic_entity", semanticReason(entity, hint), priority, true)
-			addEntityCandidate(acc, entity, []string{semanticReason(entity, hint)}, 0, work)
+			reason := semanticReason(entity, hint, exactMatchReason(intent, hint) == "exact_symbol_match")
+			collector.add(entity, "semantic_entity", reason, priority, true)
+			addEntityCandidate(acc, entity, []string{reason}, 0, work)
 		}
-		if truncated && semanticExactMatches >= perQuery {
+		if truncated && semanticExactMatches >= perQuery && len(anchors) > 0 {
 			exactTruncatedByHint[hint] = true
 		}
 	}
 
-	for _, hint := range sortedKeys(exactAnchorsByHint) {
-		anchors := exactAnchorsByHint[hint]
+	for _, hint := range sortedKeys(declarationAnchorsByHint) {
+		anchors := declarationAnchorsByHint[hint]
 		count := len(anchors)
 		if exactTruncatedByHint[hint] {
 			count++
@@ -365,7 +382,7 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 		fallbackTerms = append(fallbackTerms, intent.WeakTerms...)
 	}
 	for _, hint := range sortedUnique(fallbackTerms) {
-		if matchedHints[hint] || !work.allowLookup() || work.fallbackMatches >= work.maxFallbackMatches {
+		if matchedHints[hint] || !work.allowFallbackQuery() || work.fallbackMatches >= work.maxFallbackMatches {
 			if work.fallbackMatches >= work.maxFallbackMatches {
 				work.fallbackExhausted = true
 			}
@@ -403,7 +420,7 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 	}
 
 	uniqueExactAnchors := map[string]bool{}
-	for _, anchors := range exactAnchorsByHint {
+	for _, anchors := range declarationAnchorsByHint {
 		for anchor := range anchors {
 			uniqueExactAnchors[anchor] = true
 		}
@@ -415,8 +432,11 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 			break
 		}
 	}
-	_ = exactSemanticAnchors
-	adjustTaskClass(&intent, len(uniqueExactAnchors), hasSymbolExact)
+	logicalExactCount := len(uniqueExactAnchors)
+	if logicalExactCount == 0 && len(semanticFamilies) > 0 {
+		logicalExactCount = 1
+	}
+	adjustTaskClass(&intent, logicalExactCount, hasSymbolExact)
 	result.TaskClass, result.TaskConfidence = intent.TaskClass, intent.Confidence
 	result.Seeds = collector.sortedSeeds()
 	for _, hint := range intent.Terms {
@@ -470,8 +490,8 @@ func (p *Planner) hydrateCandidates(ctx context.Context, repoID int64, acc map[s
 	}
 	ids := make([]string, 0)
 	for _, candidate := range acc {
-		if candidate.symbol == nil && candidate.entity != nil && candidate.entity.SymbolID != "" {
-			ids = append(ids, candidate.entity.SymbolID)
+		if candidate.symbol == nil && candidate.entity != nil && contextSymbolID(*candidate.entity) != "" {
+			ids = append(ids, contextSymbolID(*candidate.entity))
 		}
 	}
 	symbols, err := p.Store.GetSymbolsByIDs(repoID, ids)
@@ -482,7 +502,7 @@ func (p *Planner) hydrateCandidates(ctx context.Context, repoID int64, acc map[s
 		if candidate.symbol != nil || candidate.entity == nil {
 			continue
 		}
-		if symbol, ok := symbols[candidate.entity.SymbolID]; ok {
+		if symbol, ok := symbols[contextSymbolID(*candidate.entity)]; ok {
 			copySymbol := symbol
 			candidate.symbol = &copySymbol
 			candidate.file = normalizePath(symbol.File)
@@ -805,8 +825,8 @@ func addEntityCandidate(acc map[string]*candidateAccumulator, entity semantic.En
 
 func addEntityCandidateWithRelationship(acc map[string]*candidateAccumulator, entity semantic.Entity, reasons []string, distance int, relationshipID string, work *plannerBudget) {
 	key := "entity:" + entity.ID
-	if entity.SymbolID != "" {
-		key = "symbol:" + entity.SymbolID
+	if contextID := contextSymbolID(entity); contextID != "" {
+		key = "symbol:" + contextID
 	}
 	a := acc[key]
 	created := false
@@ -972,7 +992,7 @@ func candidateFromAccumulator(a *candidateAccumulator, focusFile, focusResource 
 		score -= 80
 	}
 	tier := "peripheral"
-	if hasReason(a, "explicit_focus", "exact_symbol_match", "exact_semantic_match", "framework_operation_match") {
+	if hasReason(a, "explicit_focus", "exact_symbol_match", "weak_exact_match", "exact_semantic_match", "framework_operation_match") {
 		tier = "primary"
 	} else if hasReason(a, "lexical_fallback", "broad_entry_point") {
 		tier = "peripheral"
@@ -1026,7 +1046,7 @@ func symbolID(a *candidateAccumulator) string {
 		return a.symbol.ID
 	}
 	if a.entity != nil {
-		return a.entity.SymbolID
+		return contextSymbolID(*a.entity)
 	}
 	return ""
 }
@@ -1035,11 +1055,33 @@ func genericEntityForSymbol(repo string, symbol parser.Symbol) semantic.Entity {
 	return semantic.Entity{ID: semantic.StableID("generic_symbol", repo, symbol.ID), Analyzer: semantic.AnalyzerGenericGraph, Repo: repo, File: symbol.File, SymbolID: symbol.ID, Kind: generic.KindCodeSymbol, Name: symbol.Name, Side: "unknown", Line: symbol.Line, EndLine: symbol.EndLine}
 }
 
-func semanticReason(entity semantic.Entity, hint string) string {
+func semanticReason(entity semantic.Entity, hint string, strong bool) string {
 	if entity.Kind == framework.KindOperation && (entity.Name == hint || metadataOperation(entity) == hint) {
 		return "framework_operation_match"
 	}
+	if !strong {
+		return "weak_exact_match"
+	}
 	return "exact_semantic_match"
+}
+
+func exactMatchReason(intent TaskIntent, hint string) string {
+	for _, value := range intent.HighSignalHints {
+		if value == hint {
+			return "exact_symbol_match"
+		}
+	}
+	return "weak_exact_match"
+}
+
+func orderedLookupHints(intent TaskIntent) []string {
+	result := make([]string, 0, len(intent.HighSignalHints)+len(intent.WeakTerms))
+	for _, group := range [][]string{intent.QuotedIdentifiers, intent.HighSignalHints, intent.WeakTerms} {
+		for _, hint := range sortedUnique(group) {
+			result = appendUnique(result, hint)
+		}
+	}
+	return result
 }
 
 func metadataOperation(entity semantic.Entity) string {
@@ -1130,6 +1172,8 @@ func reasonStrength(reason string) int {
 		return 1000
 	case "exact_symbol_match":
 		return 950
+	case "weak_exact_match":
+		return 720
 	case "exact_semantic_match":
 		return 940
 	case "framework_operation_match":
@@ -1142,6 +1186,8 @@ func reasonStrength(reason string) int {
 		return 780
 	case "direct_reference", "direct_import", "event_peer", "callback_peer", "direct_semantic":
 		return 760
+	case "usage_match":
+		return 700
 	case "same_resource":
 		return 650
 	case "exact_file_match":
@@ -1288,7 +1334,7 @@ func sourceAnchor(file, symbolID string, line, endLine int, kind, name string) s
 }
 
 func entitySourceAnchor(entity semantic.Entity) string {
-	return sourceAnchor(entity.File, entity.SymbolID, entity.Line, entity.EndLine, entity.Kind, entity.Name)
+	return sourceAnchor(entity.File, contextSymbolID(entity), entity.Line, entity.EndLine, entity.Kind, entity.Name)
 }
 
 func seedAnchorFromSeed(seed Seed) string {
@@ -1304,6 +1350,8 @@ func matchPriority(match string) int {
 		return 100
 	case "exact_symbol_match":
 		return 90
+	case "weak_exact_match":
+		return 70
 	case "framework_operation_match", "exact_semantic_match":
 		return 80
 	case "lexical_fallback":
@@ -1337,9 +1385,9 @@ func traceRootUnavailable(err error) bool {
 	return strings.Contains(message, "semantic entity") && (strings.Contains(message, "not found in analyzer") || strings.Contains(message, "belongs to analyzer"))
 }
 
-func (b *plannerBudget) allowLookup() bool {
-	return b.exactQueries+b.semanticQueries+b.fallbackQueries < 64
-}
+func (b *plannerBudget) allowExactQuery() bool    { return b.exactQueries < b.maxExactQueries }
+func (b *plannerBudget) allowSemanticQuery() bool { return b.semanticQueries < b.maxSemanticQueries }
+func (b *plannerBudget) allowFallbackQuery() bool { return b.fallbackQueries < b.maxFallbackQueries }
 
 func (b *plannerBudget) allowTrace() bool {
 	return b.traceQueries < b.maxTraceQueries

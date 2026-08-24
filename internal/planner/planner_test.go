@@ -236,6 +236,153 @@ func TestPlannerFiveMEventFlowPreservesSideAndResources(t *testing.T) {
 			t.Fatalf("event side was lost: %#v", candidate)
 		}
 	}
+	if !planHasReason(result, "event_peer") {
+		t.Fatalf("event semantic family did not traverse relationships: %#v", result)
+	}
+}
+
+func TestPlannerRealGenericAnalyzersTreatUsageAsCallerContext(t *testing.T) {
+	tests := []struct {
+		name, language, file, target string
+		source                       string
+	}{
+		{name: "go", language: "go", file: "main.go", target: "SaveUser", source: "package app\nfunc SaveUser() {}\nfunc HandlerA() { SaveUser() }\nfunc HandlerB() { SaveUser() }\n"},
+		{name: "typescript", language: "typescript", file: "main.ts", target: "saveUser", source: "export function saveUser() {}\nfunction handlerA() { saveUser() }\nfunction handlerB() { saveUser() }\nfunction handlerRef() { consume(saveUser) }\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := plannerStore(t, "local", "real-"+test.name)
+			defer store.Close()
+			repo := "local/real-" + test.name
+			symbols := persistGenericSources(t, store, repo, map[string]string{test.file: test.source}, map[string]string{test.file: test.language})
+			result, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "fix " + test.target})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.TaskClass != "localized_change" || len(result.Ambiguities) != 0 || len(result.Seeds) != 1 {
+				t.Fatalf("usage sites inflated declaration ambiguity: %#v", result)
+			}
+			for _, caller := range []string{"HandlerA", "HandlerB", "handlerA", "handlerB"} {
+				if symbol := symbolNamed(symbols, caller); symbol != nil && !planContainsSymbolReason(result, symbol.ID, "direct_caller") {
+					t.Fatalf("caller %s was not normalized to source_symbol_id: %#v", caller, result)
+				}
+			}
+			if referenceOwner := symbolNamed(symbols, "handlerRef"); referenceOwner != nil && !planContainsSymbolReason(result, referenceOwner.ID, "direct_reference") {
+				t.Fatalf("reference site inflated ambiguity or lost its source owner: %#v", result)
+			}
+		})
+	}
+}
+
+func TestPlannerExactSemanticQueryIgnoresSubstringCollisions(t *testing.T) {
+	store := plannerStore(t, "local", "semantic-exact")
+	defer store.Close()
+	repo := "local/semantic-exact"
+	target := plannerSymbol("z.lua", "handle", 1)
+	if err := replacePlannerIndex(store, "local", "semantic-exact", repo, []parser.Symbol{target}); err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entities := make([]semantic.Entity, 0, 82)
+	for i := 0; i < 80; i++ {
+		entities = append(entities, semantic.Entity{ID: fmt.Sprintf("substring-%03d", i), Analyzer: semantic.AnalyzerFiveM, Repo: repo, File: fmt.Sprintf("a-%03d.lua", i), Kind: fivem.KindEventHandler, Name: fmt.Sprintf("GetPlayerDebug%03d", i), Line: 1})
+	}
+	exact := semantic.Entity{ID: "exact-get-player", Analyzer: semantic.AnalyzerFiveM, Repo: repo, File: target.File, SymbolID: target.ID, Kind: fivem.KindEventHandler, Name: "GetPlayer", Line: 1}
+	operation := semantic.Entity{ID: "exact-operation", Analyzer: semantic.AnalyzerFramework, Repo: repo, File: target.File, SymbolID: target.ID, Kind: framework.KindOperation, Name: "operation", Line: 1, Metadata: map[string]any{"operation": "inventory_add_item"}}
+	entities = append(entities, exact)
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, semantic.Result{Entities: entities}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, semantic.Result{Entities: []semantic.Entity{operation}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range []string{"trace GetPlayer", "inventory_add_item"} {
+		result, planErr := New(store).Plan(context.Background(), Request{Repo: repo, Task: task})
+		if planErr != nil || candidateCount(result) != 1 || result.Primary[0].SymbolID != target.ID {
+			t.Fatalf("exact semantic lookup failed for %q: %#v %v", task, result, planErr)
+		}
+	}
+}
+
+func TestPlannerCallbackAndExportFamiliesExpand(t *testing.T) {
+	tests := []struct {
+		name, semanticName, relationship, reason string
+		fromKind, toKind                         string
+	}{
+		{name: "callback", semanticName: "avenlo:get", fromKind: fivem.KindCallbackCall, toKind: fivem.KindCallbackRegistration, relationship: "cross_resource_callback", reason: "callback_peer"},
+		{name: "export", semanticName: "GetPlayer", fromKind: fivem.KindExportCall, toKind: fivem.KindExportDefinition, relationship: "cross_resource_export", reason: "export_provider"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := plannerStore(t, "local", "family-"+test.name)
+			defer store.Close()
+			repo := "local/family-" + test.name
+			caller := plannerSymbol("caller.lua", "caller", 1)
+			provider := plannerSymbol("provider.lua", "provider", 1)
+			if err := replacePlannerIndex(store, "local", "family-"+test.name, repo, []parser.Symbol{caller, provider}); err != nil {
+				t.Fatal(err)
+			}
+			repoID, err := store.GetRepoID(repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			from := semantic.Entity{ID: test.name + "-from", Analyzer: semantic.AnalyzerFiveM, Repo: repo, File: caller.File, SymbolID: caller.ID, Kind: test.fromKind, Name: test.semanticName, Line: 1}
+			to := semantic.Entity{ID: test.name + "-to", Analyzer: semantic.AnalyzerFiveM, Repo: repo, File: provider.File, SymbolID: provider.ID, Kind: test.toKind, Name: test.semanticName, Line: 1}
+			if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, semantic.Result{Entities: []semantic.Entity{from, to}}); err != nil {
+				t.Fatal(err)
+			}
+			rel := plannerRelationship(repo, from, to, test.relationship)
+			rel.Analyzer = semantic.AnalyzerFiveMWorkspace
+			if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveMWorkspace, semantic.Result{Relationships: []semantic.Relationship{rel}}); err != nil {
+				t.Fatal(err)
+			}
+			result, planErr := New(store).Plan(context.Background(), Request{Repo: repo, Task: "trace " + test.semanticName})
+			if planErr != nil || len(result.Ambiguities) != 0 || !planHasReason(result, test.reason) {
+				t.Fatalf("semantic family was blocked: %#v %v", result, planErr)
+			}
+		})
+	}
+}
+
+func TestPlannerQueryBudgetsPrioritizeHighSignalAndReserveFallback(t *testing.T) {
+	store := plannerStore(t, "local", "query-priority")
+	defer store.Close()
+	repo := "local/query-priority"
+	target := plannerSymbol("target.go", "zTarget", 1)
+	if err := replacePlannerIndex(store, "local", "query-priority", repo, []parser.Symbol{target}); err != nil {
+		t.Fatal(err)
+	}
+	terms := make([]string, 0, 28)
+	for i := 0; i < 27; i++ {
+		terms = append(terms, "word"+string(rune('a'+i/26))+string(rune('a'+i%26)))
+	}
+	terms = append(terms, "zTarget")
+	result, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "review " + strings.Join(terms, " ") + " architecture", Debug: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !planContainsSymbolReason(result, target.ID, "exact_symbol_match") {
+		t.Fatalf("weak terms consumed the exact query budget before high signal: %#v", result)
+	}
+	if result.Debug == nil || result.Debug.FallbackQueries == 0 || result.Debug.ExactQueries > DefaultMaxExactQueries || result.Debug.SemanticQueries > DefaultMaxSemanticQueries || result.Debug.FallbackQueries > DefaultMaxFallbackQueries {
+		t.Fatalf("query budgets were not independently bounded/reserved: %#v", result.Debug)
+	}
+}
+
+func TestSemanticSeedRolesAndContextSymbolBridge(t *testing.T) {
+	usage := semantic.Entity{Analyzer: semantic.AnalyzerGenericGraph, Kind: generic.KindReferenceSite, Metadata: map[string]any{"source_symbol_id": "caller-id"}}
+	if semanticSeedRole(usage) != roleUsage || contextSymbolID(usage) != "caller-id" {
+		t.Fatalf("generic usage role/context bridge failed: %#v", usage)
+	}
+	if semanticSeedRole(semantic.Entity{Analyzer: semantic.AnalyzerGenericGraph, Kind: generic.KindCodeSymbol}) != roleDeclaration {
+		t.Fatal("generic code_symbol must remain a declaration")
+	}
+	if semanticSeedRole(semantic.Entity{Analyzer: semantic.AnalyzerFramework, Kind: framework.KindOperation}) != roleOperation {
+		t.Fatal("framework operations must be occurrence semantics")
+	}
 }
 
 func TestPlannerBoundsAndRepositoryIsolation(t *testing.T) {
@@ -315,7 +462,7 @@ func TestPlannerPreservesEvidenceAcrossAnalyzersAndAuthority(t *testing.T) {
 	if candidate.SymbolID != symbol.ID || candidate.Authority != "mixed" || len(candidate.Authorities) != 2 {
 		t.Fatalf("mixed authority or symbol bridge was lost: %#v", candidate)
 	}
-	if len(candidate.Frameworks) != 2 || !containsString(candidate.ReasonCodes, "exact_symbol_match") || !containsString(candidate.ReasonCodes, "exact_semantic_match") {
+	if len(candidate.Frameworks) != 2 || !containsString(candidate.ReasonCodes, "weak_exact_match") || !containsString(candidate.ReasonCodes, "framework_operation_match") {
 		t.Fatalf("distinct analyzer evidence was lost: %#v", candidate)
 	}
 }
@@ -498,6 +645,67 @@ func plannerStore(t *testing.T, owner, name string) *storage.IndexStore {
 		t.Fatal(err)
 	}
 	return store
+}
+
+func persistGenericSources(t *testing.T, store *storage.IndexStore, repo string, files map[string]string, languages map[string]string) []parser.Symbol {
+	t.Helper()
+	contents := make(map[string][]byte, len(files))
+	symbolsByFile := make(map[string][]parser.Symbol, len(files))
+	var symbols []parser.Symbol
+	hashes := make(map[string]string, len(files))
+	for file, source := range files {
+		contents[file] = []byte(source)
+		hashes[file] = "hash-" + file
+		parsed, err := parser.ParseFile(contents[file], file, languages[file])
+		if err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+		symbolsByFile[file] = parsed
+		symbols = append(symbols, parsed...)
+	}
+	parts := strings.SplitN(repo, "/", 2)
+	if err := store.ReplaceRepoIndex(parts[0], parts[1], "local", "", hashes, languages, symbols); err != nil {
+		t.Fatal(err)
+	}
+	result, err := generic.NewAnalyzer().AnalyzeRepository(context.Background(), semantic.RepositoryInput{Repo: repo, Files: contents, Languages: languages, Symbols: symbolsByFile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, result); err != nil {
+		t.Fatal(err)
+	}
+	return symbols
+}
+
+func symbolNamed(symbols []parser.Symbol, name string) *parser.Symbol {
+	for i := range symbols {
+		if symbols[i].Name == name {
+			return &symbols[i]
+		}
+	}
+	return nil
+}
+
+func planContainsSymbolReason(plan Plan, symbolID, reason string) bool {
+	for _, candidate := range append(append(append([]Candidate{}, plan.Primary...), plan.Supporting...), plan.Peripheral...) {
+		if candidate.SymbolID == symbolID && containsString(candidate.ReasonCodes, reason) {
+			return true
+		}
+	}
+	return false
+}
+
+func planHasReason(plan Plan, reason string) bool {
+	for _, candidate := range append(append(append([]Candidate{}, plan.Primary...), plan.Supporting...), plan.Peripheral...) {
+		if containsString(candidate.ReasonCodes, reason) {
+			return true
+		}
+	}
+	return false
 }
 
 func replacePlannerIndex(store *storage.IndexStore, owner, name, repo string, symbols []parser.Symbol) error {
