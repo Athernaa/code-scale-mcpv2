@@ -1187,6 +1187,19 @@ func (s *IndexStore) TraceSemantic(repoID int64, entityID, direction string, dep
 // TraceSemanticWithOptions traverses only indexed adjacency rows for the
 // current frontier. It never materializes the complete repository graph.
 func (s *IndexStore) TraceSemanticWithOptions(repoID int64, entityID, analyzer, direction string, relationshipKinds []string, depth, maxResults int) ([]semantic.TraceEdge, bool, error) {
+	return s.traceSemanticWithOptions(repoID, entityID, analyzer, direction, relationshipKinds, depth, maxResults, false)
+}
+
+// TraceSemanticRankedWithOptions is the planner-facing traversal variant. It
+// keeps the same bounded adjacency traversal as TraceSemanticWithOptions but
+// asks SQLite to place high-value relationship kinds before low-value
+// references/imports. This prevents a bounded result window from hiding a
+// relevant call merely because its stable ID sorts later.
+func (s *IndexStore) TraceSemanticRankedWithOptions(repoID int64, entityID, analyzer, direction string, relationshipKinds []string, depth, maxResults int) ([]semantic.TraceEdge, bool, error) {
+	return s.traceSemanticWithOptions(repoID, entityID, analyzer, direction, relationshipKinds, depth, maxResults, true)
+}
+
+func (s *IndexStore) traceSemanticWithOptions(repoID int64, entityID, analyzer, direction string, relationshipKinds []string, depth, maxResults int, ranked bool) ([]semantic.TraceEdge, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if depth <= 0 {
@@ -1227,7 +1240,7 @@ func (s *IndexStore) TraceSemanticWithOptions(repoID int64, entityID, analyzer, 
 		if current.depth >= depth {
 			continue
 		}
-		edges, err := s.querySemanticEdgesLocked(repoID, analyzer, direction, relationshipKinds, []string{current.id})
+		edges, err := s.querySemanticEdgesLocked(repoID, analyzer, direction, relationshipKinds, []string{current.id}, ranked)
 		if err != nil {
 			return nil, false, err
 		}
@@ -1282,7 +1295,7 @@ func (s *IndexStore) TraceSemanticWithOptions(repoID int64, entityID, analyzer, 
 	return result, truncated, nil
 }
 
-func (s *IndexStore) querySemanticEdgesLocked(repoID int64, analyzer, direction string, kinds, frontier []string) ([]semantic.Relationship, error) {
+func (s *IndexStore) querySemanticEdgesLocked(repoID int64, analyzer, direction string, kinds, frontier []string, ranked bool) ([]semantic.Relationship, error) {
 	if len(frontier) == 0 {
 		return nil, nil
 	}
@@ -1311,7 +1324,16 @@ func (s *IndexStore) querySemanticEdgesLocked(repoID int64, analyzer, direction 
 			args = append(args, kind)
 		}
 	}
-	query += " ORDER BY id"
+	if ranked {
+		query += ` ORDER BY CASE
+			WHEN kind IN ('calls', 'framework_calls', 'framework_object_call', 'provided_by', 'cross_resource_event', 'cross_resource_callback', 'cross_resource_export') THEN 0
+			WHEN kind IN ('triggers', 'handles', 'registers', 'uses_export', 'defines') THEN 1
+			WHEN kind = 'references' THEN 2
+			WHEN kind = 'imports' THEN 3
+			ELSE 4 END, id`
+	} else {
+		query += " ORDER BY id"
+	}
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err

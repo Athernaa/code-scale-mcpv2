@@ -248,6 +248,7 @@ func TestPlannerRealGenericAnalyzersTreatUsageAsCallerContext(t *testing.T) {
 	}{
 		{name: "go", language: "go", file: "main.go", target: "SaveUser", source: "package app\nfunc SaveUser() {}\nfunc HandlerA() { SaveUser() }\nfunc HandlerB() { SaveUser() }\n"},
 		{name: "typescript", language: "typescript", file: "main.ts", target: "saveUser", source: "export function saveUser() {}\nfunction handlerA() { saveUser() }\nfunction handlerB() { saveUser() }\nfunction handlerRef() { consume(saveUser) }\n"},
+		{name: "lua", language: "lua", file: "main.lua", target: "SaveUser", source: "function SaveUser() end\nfunction HandlerA() SaveUser() end\nfunction HandlerB() SaveUser() end\n"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -332,6 +333,38 @@ func TestPlannerTrueDeclarationTruncationRemainsAmbiguous(t *testing.T) {
 	}
 	if len(result.Ambiguities) == 0 || !result.Ambiguities[0].Truncated || !result.Truncated {
 		t.Fatalf("true declaration truncation was hidden: %#v", result)
+	}
+}
+
+func TestPlannerSemanticDeclarationTruncationIsRoleAware(t *testing.T) {
+	store := plannerStore(t, "local", "semantic-declaration-truncation")
+	defer store.Close()
+	repo := "local/semantic-declaration-truncation"
+	files := make(map[string]string, DefaultMaxExactAnchors+5)
+	languages := make(map[string]string, DefaultMaxExactAnchors+5)
+	entities := make([]semantic.Entity, 0, DefaultMaxExactAnchors+5)
+	for i := 0; i < DefaultMaxExactAnchors+5; i++ {
+		file := fmt.Sprintf("file-%03d.go", i)
+		files[file] = "hash-" + file
+		languages[file] = "go"
+		entities = append(entities, semantic.Entity{ID: fmt.Sprintf("code-symbol-%03d", i), Analyzer: semantic.AnalyzerGenericGraph, Repo: repo, File: file, Kind: generic.KindCodeSymbol, Name: "init", Line: 1, EndLine: 1})
+	}
+	if err := store.ReplaceRepoIndex("local", "semantic-declaration-truncation", "local", "", files, languages, nil); err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, semantic.Result{Entities: entities}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "find init"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Ambiguities) == 0 || !result.Ambiguities[0].Truncated || !result.Truncated {
+		t.Fatalf("semantic declaration truncation was not exposed truthfully: %#v", result)
 	}
 }
 
@@ -862,6 +895,178 @@ func TestPlannerFocusFileUsesBoundedIndexedExistence(t *testing.T) {
 	}
 }
 
+func TestRankPolicyEvidenceSaturatesAndPreservesAuthority(t *testing.T) {
+	policy := NewRankPolicy()
+	intent := TaskIntent{TaskClass: "localized_change", TraceDirection: "both"}
+
+	strong := newAccumulator("symbol:strong", "repo")
+	strong.symbol = &parser.Symbol{ID: "strong", File: "target.go", Name: "Target"}
+	strong.file = "target.go"
+	strong.distance = 0
+	budget := newPlannerBudget()
+	addEvidence(strong, Evidence{Kind: "symbol", SourceID: "strong", NoteCode: "exact_symbol_match", Role: string(roleDeclaration)}, budget)
+	strongScore := policy.ScoreAccumulator(strong, intent, "", "").Total
+
+	weak := newAccumulator("symbol:weak", "repo")
+	weak.symbol = &parser.Symbol{ID: "weak", File: "helper.go", Name: "Helper"}
+	weak.file = "helper.go"
+	weak.distance = 1
+	for i := 0; i < 100; i++ {
+		addEvidence(weak, Evidence{Kind: "semantic", SourceID: fmt.Sprintf("reference-%03d", i), RelationshipID: fmt.Sprintf("edge-%03d", i), Relationship: generic.RelationshipReferences, Depth: 1, NoteCode: "direct_reference", Role: string(roleUsage)}, budget)
+	}
+	weakScore := policy.ScoreAccumulator(weak, intent, "", "").Total
+	if strongScore <= weakScore {
+		t.Fatalf("weak evidence spam outranked the exact target: strong=%d weak=%d", strongScore, weakScore)
+	}
+
+	oneReference := newAccumulator("symbol:one-reference", "repo")
+	oneReference.symbol = weak.symbol
+	oneReference.file = weak.file
+	oneReference.distance = 1
+	addEvidence(oneReference, Evidence{Kind: "semantic", SourceID: "reference-one", RelationshipID: "edge-one", Relationship: generic.RelationshipReferences, Depth: 1, NoteCode: "direct_reference", Role: string(roleUsage)}, newPlannerBudget())
+	oneScore := policy.ScoreAccumulator(oneReference, intent, "", "").Total
+	if weakScore-oneScore > 1000 {
+		t.Fatalf("repeated identical evidence did not saturate: one=%d many=%d", oneScore, weakScore)
+	}
+
+	local := newAccumulator("entity:local", "repo")
+	local.symbol = strong.symbol
+	local.file = strong.file
+	local.distance = 1
+	addEvidence(local, Evidence{Kind: "semantic", SourceID: "local-call", RelationshipID: "local-edge", Relationship: framework.RelationshipFrameworkCalls, Depth: 1, Authority: framework.ProviderStatusLocalVerified, NoteCode: "framework_provider"}, newPlannerBudget())
+	external := newAccumulator("entity:external", "repo")
+	external.symbol = strong.symbol
+	external.file = strong.file
+	external.distance = 1
+	addEvidence(external, Evidence{Kind: "semantic", SourceID: "external-call", RelationshipID: "external-edge", Relationship: framework.RelationshipFrameworkCalls, Depth: 1, Authority: framework.ProviderStatusExternal, NoteCode: "framework_provider"}, newPlannerBudget())
+	if policy.ScoreAccumulator(local, intent, "", "").Total <= policy.ScoreAccumulator(external, intent, "", "").Total {
+		t.Fatal("local verified evidence did not outrank equivalent external evidence")
+	}
+}
+
+func TestRankPolicyDirectionDistanceAndFocus(t *testing.T) {
+	policy := NewRankPolicy()
+	base := func(id, reason string, depth int) *candidateAccumulator {
+		a := newAccumulator("symbol:"+id, "repo")
+		a.symbol = &parser.Symbol{ID: id, File: id + ".go", Name: id}
+		a.file = id + ".go"
+		a.distance = depth
+		addEvidence(a, Evidence{Kind: "semantic", SourceID: id, RelationshipID: "edge-" + id, Relationship: generic.RelationshipCalls, Depth: depth, NoteCode: reason}, newPlannerBudget())
+		return a
+	}
+	incoming := TaskIntent{TaskClass: "relationship_trace", TraceDirection: "incoming"}
+	outgoing := TaskIntent{TaskClass: "relationship_trace", TraceDirection: "outgoing"}
+	caller := base("caller", "direct_caller", 1)
+	callee := base("callee", "direct_callee", 1)
+	if policy.ScoreAccumulator(caller, incoming, "", "").Total <= policy.ScoreAccumulator(callee, incoming, "", "").Total {
+		t.Fatal("incoming trace did not prefer caller")
+	}
+	if policy.ScoreAccumulator(callee, outgoing, "", "").Total <= policy.ScoreAccumulator(caller, outgoing, "", "").Total {
+		t.Fatal("outgoing trace did not prefer callee")
+	}
+	twoHop := base("two-hop", "direct_callee", 2)
+	if policy.ScoreAccumulator(callee, outgoing, "", "").Total <= policy.ScoreAccumulator(twoHop, outgoing, "", "").Total {
+		t.Fatal("distance-2 evidence outranked direct evidence")
+	}
+	focused := base("focused", "direct_reference", 1)
+	addEvidence(focused, Evidence{Kind: "focus", SourceID: "focused", NoteCode: "explicit_focus"}, newPlannerBudget())
+	if policy.ScoreAccumulator(focused, outgoing, "", "").Total <= policy.ScoreAccumulator(callee, outgoing, "", "").Total {
+		t.Fatal("explicit focus did not dominate inferred relationship context")
+	}
+}
+
+func TestPlannerRanksHighValueEdgeBeforeLateReferences(t *testing.T) {
+	store := plannerStore(t, "local", "ranked-edges")
+	defer store.Close()
+	repo := "local/ranked-edges"
+	target := plannerSymbol("target.go", "Target", 1)
+	helper := plannerSymbol("helper.go", "RelevantHelper", 1)
+	symbols := []parser.Symbol{target, helper}
+	entities := []semantic.Entity{plannerCodeSymbol(repo, target), plannerCodeSymbol(repo, helper)}
+	relationships := []semantic.Relationship{{ID: "zzzz-high-value-call", Analyzer: semantic.AnalyzerGenericGraph, Repo: repo, FromEntityID: entities[0].ID, ToEntityID: entities[1].ID, Kind: generic.RelationshipCalls, Name: helper.Name, File: target.File, Line: target.Line}}
+	for i := 0; i < 120; i++ {
+		ref := plannerSymbol(fmt.Sprintf("references/%03d.go", i), fmt.Sprintf("Reference%03d", i), 1)
+		symbols = append(symbols, ref)
+		refEntity := plannerCodeSymbol(repo, ref)
+		entities = append(entities, refEntity)
+		relationships = append(relationships, semantic.Relationship{ID: fmt.Sprintf("aaaa-reference-%03d", i), Analyzer: semantic.AnalyzerGenericGraph, Repo: repo, FromEntityID: entities[0].ID, ToEntityID: refEntity.ID, Kind: generic.RelationshipReferences, Name: ref.Name, File: target.File, Line: target.Line})
+	}
+	if err := replacePlannerIndex(store, "local", "ranked-edges", repo, symbols); err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, semantic.Result{Entities: entities, Relationships: relationships}); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "fix Target", Debug: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !planContainsSymbolReason(plan, helper.ID, "direct_callee") {
+		t.Fatalf("late high-value call was hidden by references: %#v", plan)
+	}
+}
+
+func TestPlannerRankingDebugIsBoundedAndDoesNotChangeResults(t *testing.T) {
+	store := plannerStore(t, "local", "rank-debug")
+	defer store.Close()
+	repo := "local/rank-debug"
+	target := plannerSymbol("target.go", "Target", 1)
+	caller := plannerSymbol("caller.go", "Caller", 1)
+	if err := replacePlannerIndex(store, "local", "rank-debug", repo, []parser.Symbol{target, caller}); err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetEntity, callerEntity := plannerCodeSymbol(repo, target), plannerCodeSymbol(repo, caller)
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, semantic.Result{Entities: []semantic.Entity{targetEntity, callerEntity}, Relationships: []semantic.Relationship{plannerRelationship(repo, callerEntity, targetEntity, generic.RelationshipCalls)}}); err != nil {
+		t.Fatal(err)
+	}
+	normal, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "fix Target", MaxCandidates: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	debug, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "fix Target", MaxCandidates: 1, Debug: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if debug.Debug == nil || debug.Debug.RankingPolicy != rankPolicyVersion || len(debug.Debug.RankedCandidates) != 1 {
+		t.Fatalf("ranking debug was missing or unbounded: %#v", debug.Debug)
+	}
+	if strings.Join(candidateIDs(normal), "\x00") != strings.Join(candidateIDs(debug), "\x00") || normal.Primary[0].Score != debug.Primary[0].Score {
+		t.Fatalf("debug changed ranking output: normal=%#v debug=%#v", normal, debug)
+	}
+}
+
+func TestBroadDiversityOnlyReordersWeakCandidates(t *testing.T) {
+	candidates := make([]Candidate, 0, 12)
+	strong := Candidate{ID: "strong", File: "one.go", Score: 9000, Tier: "supporting", ReasonCodes: []string{"direct_callee"}}
+	candidates = append(candidates, strong)
+	for i := 0; i < 11; i++ {
+		file := "same.go"
+		if i >= 4 {
+			file = fmt.Sprintf("other-%02d.go", i)
+		}
+		candidates = append(candidates, Candidate{ID: fmt.Sprintf("weak-%02d", i), File: file, Score: 500, Tier: "peripheral", ReasonCodes: []string{"lexical_fallback"}})
+	}
+	ordered := diversityOrder(candidates, 6)
+	if ordered[0].ID != strong.ID {
+		t.Fatalf("diversity demoted strong evidence: %#v", ordered)
+	}
+	files := map[string]bool{}
+	for _, candidate := range ordered {
+		files[candidate.File] = true
+	}
+	if len(files) < 3 {
+		t.Fatalf("broad weak candidates were not diversified: %#v", ordered)
+	}
+}
+
 func plannerStore(t *testing.T, owner, name string) *storage.IndexStore {
 	t.Helper()
 	store, err := storage.NewIndexStore(t.TempDir())
@@ -994,6 +1199,15 @@ func containsString(values []string, target string) bool {
 }
 func candidateCount(plan Plan) int {
 	return len(plan.Primary) + len(plan.Supporting) + len(plan.Peripheral)
+}
+
+func candidateIDs(plan Plan) []string {
+	all := append(append(append([]Candidate{}, plan.Primary...), plan.Supporting...), plan.Peripheral...)
+	ids := make([]string, 0, len(all))
+	for _, candidate := range all {
+		ids = append(ids, candidate.ID)
+	}
+	return ids
 }
 
 func candidateFileMissing(plan Plan, file string) bool {

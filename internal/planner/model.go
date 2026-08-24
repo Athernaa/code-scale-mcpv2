@@ -61,6 +61,11 @@ type Plan struct {
 	DegradedResources []string      `json:"degraded_framework_resources,omitempty"`
 	Truncated         bool          `json:"truncated"`
 	Debug             *DebugDetails `json:"debug,omitempty"`
+
+	// rankingDebug is populated only while finalizing a plan. It is deliberately
+	// not part of the normal DTO; the bounded public view is copied into Debug
+	// only when requested.
+	rankingDebug []RankingDebugCandidate
 }
 
 type Seed struct {
@@ -113,20 +118,42 @@ type Ambiguity struct {
 }
 
 type DebugDetails struct {
-	EvidenceCount             int `json:"evidence_count"`
-	CandidatesConsidered      int `json:"candidates_considered"`
-	SeedsConsidered           int `json:"seeds_considered"`
-	SeedBudgetUsed            int `json:"seed_budget_used"`
-	EvidenceBudgetUsed        int `json:"evidence_budget_used"`
-	GraphEdgesConsidered      int `json:"graph_edges_considered"`
-	TraceQueries              int `json:"trace_queries"`
-	ExactQueries              int `json:"exact_queries"`
-	SemanticQueries           int `json:"semantic_queries"`
-	FallbackQueries           int `json:"fallback_queries"`
-	ExactMatchesConsidered    int `json:"exact_matches_considered"`
-	SemanticMatchesConsidered int `json:"semantic_matches_considered"`
-	FallbackMatchesConsidered int `json:"fallback_matches_considered"`
-	FileLookups               int `json:"file_lookups"`
+	EvidenceCount             int                     `json:"evidence_count"`
+	CandidatesConsidered      int                     `json:"candidates_considered"`
+	SeedsConsidered           int                     `json:"seeds_considered"`
+	SeedBudgetUsed            int                     `json:"seed_budget_used"`
+	EvidenceBudgetUsed        int                     `json:"evidence_budget_used"`
+	GraphEdgesConsidered      int                     `json:"graph_edges_considered"`
+	TraceQueries              int                     `json:"trace_queries"`
+	ExactQueries              int                     `json:"exact_queries"`
+	SemanticQueries           int                     `json:"semantic_queries"`
+	FallbackQueries           int                     `json:"fallback_queries"`
+	ExactMatchesConsidered    int                     `json:"exact_matches_considered"`
+	SemanticMatchesConsidered int                     `json:"semantic_matches_considered"`
+	FallbackMatchesConsidered int                     `json:"fallback_matches_considered"`
+	FileLookups               int                     `json:"file_lookups"`
+	RankingPolicy             string                  `json:"ranking_policy,omitempty"`
+	RankedCandidates          []RankingDebugCandidate `json:"ranked_candidates,omitempty"`
+}
+
+// RankingDebugCandidate is intentionally compact and bounded. It exposes the
+// same deterministic components used by the policy without source content or
+// the complete internal evidence set.
+type RankingDebugCandidate struct {
+	ID                  string `json:"id"`
+	Score               int    `json:"score"`
+	Anchor              int    `json:"anchor"`
+	TaskAlignment       int    `json:"task_alignment"`
+	RelationshipQuality int    `json:"relationship_quality"`
+	AuthorityQuality    int    `json:"authority_quality"`
+	FocusRelevance      int    `json:"focus_relevance"`
+	Corroboration       int    `json:"corroboration"`
+	Locality            int    `json:"locality"`
+	DistancePenalty     int    `json:"distance_penalty"`
+	UncertaintyPenalty  int    `json:"uncertainty_penalty"`
+	FallbackPenalty     int    `json:"fallback_penalty"`
+	RedundancyPenalty   int    `json:"redundancy_penalty"`
+	Tier                string `json:"tier"`
 }
 
 type TaskIntent struct {
@@ -156,6 +183,10 @@ type Evidence struct {
 	Strength       int
 	Authority      string
 	NoteCode       string
+	Analyzer       string
+	Role           string
+	Framework      string
+	Dynamic        bool
 }
 
 type Planner struct {
@@ -199,11 +230,15 @@ type candidateAccumulator struct {
 }
 
 type plannerSeedEntity struct {
-	entity    semantic.Entity
-	anchor    string
-	priority  int
-	expand    bool
-	ambiguous bool
+	entity semantic.Entity
+	// alternates retain analyzer-specific entities for one source anchor. The
+	// planner exposes one logical seed/candidate, while expansion can still
+	// traverse the exact persisted graph endpoint for each analyzer.
+	alternates []semantic.Entity
+	anchor     string
+	priority   int
+	expand     bool
+	ambiguous  bool
 }
 
 type plannerBudget struct {

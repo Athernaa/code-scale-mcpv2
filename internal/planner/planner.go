@@ -113,14 +113,60 @@ func (c *seedCollector) add(entity semantic.Entity, typ, match string, priority 
 	if priority < c.priorities[anchor] {
 		c.priorities[anchor] = priority
 	}
-	if existing, ok := c.entities[entity.ID]; ok {
+	if existing, ok := c.entities[anchor]; ok {
 		existing.expand = existing.expand || expand
 		existing.priority = minInt(existing.priority, priority)
-		c.entities[entity.ID] = existing
+		if existing.entity.ID != entity.ID {
+			known := false
+			for _, alternate := range existing.alternates {
+				if alternate.ID == entity.ID {
+					known = true
+					break
+				}
+			}
+			if !known {
+				existing.alternates = append(existing.alternates, entity)
+				sort.Slice(existing.alternates, func(i, j int) bool {
+					return seedEntityLess(existing.alternates[i], existing.alternates[j])
+				})
+			}
+		}
+		if seedEntityLess(entity, existing.entity) {
+			if existing.entity.ID != entity.ID {
+				existing.alternates = append(existing.alternates, existing.entity)
+			}
+			existing.entity = entity
+			sort.Slice(existing.alternates, func(i, j int) bool {
+				return seedEntityLess(existing.alternates[i], existing.alternates[j])
+			})
+		}
+		c.entities[anchor] = existing
 	} else {
-		c.entities[entity.ID] = plannerSeedEntity{entity: entity, anchor: anchor, priority: priority, expand: expand}
+		c.entities[anchor] = plannerSeedEntity{entity: entity, anchor: anchor, priority: priority, expand: expand}
 	}
 	return true
+}
+
+func seedEntityLess(left, right semantic.Entity) bool {
+	leftSemantic := left.Analyzer != semantic.AnalyzerGenericGraph
+	rightSemantic := right.Analyzer != semantic.AnalyzerGenericGraph
+	if leftSemantic != rightSemantic {
+		return leftSemantic
+	}
+	if left.Analyzer != right.Analyzer {
+		return left.Analyzer < right.Analyzer
+	}
+	if left.ID != right.ID {
+		return left.ID < right.ID
+	}
+	return left.Kind < right.Kind
+}
+
+func (item plannerSeedEntity) roots() []semantic.Entity {
+	result := make([]semantic.Entity, 0, len(item.alternates)+1)
+	result = append(result, item.entity)
+	result = append(result, item.alternates...)
+	return result
 }
 
 func (c *seedCollector) markAmbiguous(anchor string) {
@@ -405,6 +451,19 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 		}
 		if truncated {
 			result.Truncated = true
+			// The general semantic window mixes declarations, usage rows, and
+			// flow endpoints. Only a declaration-scoped query may establish
+			// that declaration ambiguity itself was truncated.
+			if !declarationTruncatedByHint[hint] && work.allowSemanticQuery() {
+				work.semanticQueries++
+				_, declarationTruncated, declarationErr := p.Store.SearchSemanticExactByKinds(repoID, hint, []string{generic.KindCodeSymbol}, perQuery)
+				if declarationErr != nil {
+					return Plan{}, declarationErr
+				}
+				if declarationTruncated {
+					declarationTruncatedByHint[hint] = true
+				}
+			}
 		}
 		consumeSemanticEntities(entities)
 		if looksLikeOperation(hint) && work.semanticRows < work.maxSemanticRows {
@@ -519,6 +578,7 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 	}
 
 	seedEntities := collector.sortedEntities()
+	seedEntities = rankSeedEntities(NewRankPolicy(), seedEntities, acc, intent, request.FocusFile, request.FocusResource)
 	if (len(seedEntities) > 0 && intent.TaskClass != "exact_symbol") || request.IncludeImpact {
 		if err := p.expand(ctx, repoID, seedEntities, intent, request, acc, work, &result); err != nil {
 			return Plan{}, err
@@ -546,10 +606,15 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
-	result = finalize(result, acc, maxCandidates, request.FocusFile, request.FocusResource, files)
+	result = finalize(result, acc, maxCandidates, request.FocusFile, request.FocusResource, files, intent)
 	applyBudgetDiagnostics(&result, work)
 	if request.Debug {
-		result.Debug = &DebugDetails{EvidenceCount: evidenceCount(acc), CandidatesConsidered: len(acc), SeedsConsidered: len(result.Seeds), SeedBudgetUsed: work.seedsUsed, EvidenceBudgetUsed: work.evidenceUsed, GraphEdgesConsidered: work.graphEdges, TraceQueries: work.traceQueries, ExactQueries: work.exactQueries, SemanticQueries: work.semanticQueries, FallbackQueries: work.fallbackQueries, ExactMatchesConsidered: work.exactRows, SemanticMatchesConsidered: work.semanticRows, FallbackMatchesConsidered: work.fallbackMatches, FileLookups: work.fileLookups}
+		ranking := append([]RankingDebugCandidate(nil), result.rankingDebug...)
+		if len(ranking) > maxCandidates {
+			ranking = ranking[:maxCandidates]
+		}
+		result.Debug = &DebugDetails{EvidenceCount: evidenceCount(acc), CandidatesConsidered: len(acc), SeedsConsidered: len(result.Seeds), SeedBudgetUsed: work.seedsUsed, EvidenceBudgetUsed: work.evidenceUsed, GraphEdgesConsidered: work.graphEdges, TraceQueries: work.traceQueries, ExactQueries: work.exactQueries, SemanticQueries: work.semanticQueries, FallbackQueries: work.fallbackQueries, ExactMatchesConsidered: work.exactRows, SemanticMatchesConsidered: work.semanticRows, FallbackMatchesConsidered: work.fallbackMatches, FileLookups: work.fileLookups, RankingPolicy: NewRankPolicy().Version(), RankedCandidates: ranking}
+		result.rankingDebug = nil
 	}
 	if err := contextErr(ctx); err != nil {
 		return Plan{}, err
@@ -760,64 +825,68 @@ func (p *Planner) expand(ctx context.Context, repoID int64, seeds []plannerSeedE
 		if seedItem.ambiguous || !seedItem.expand {
 			continue
 		}
-		seed := seedItem.entity
-		if seed.Analyzer == semantic.AnalyzerFramework {
-			switch entityAuthority(seed) {
-			case framework.ProviderStatusExternal, framework.ProviderStatusLocalAmbiguous, framework.ProviderStatusLocalMissing:
-				continue
+		for _, seed := range seedItem.roots() {
+			if err := contextErr(ctx); err != nil {
+				return err
 			}
-		}
-		analyzers := []string{seed.Analyzer}
-		if seed.Analyzer == semantic.AnalyzerFiveM || seed.Analyzer == semantic.AnalyzerFramework {
-			analyzers = append(analyzers, semantic.AnalyzerFiveMWorkspace)
-		}
-		baseDirection := intent.TraceDirection
-		if baseDirection != "incoming" && baseDirection != "outgoing" && baseDirection != "both" {
-			baseDirection = "both"
-		}
-		directions := []struct {
-			value  string
-			impact bool
-		}{{value: baseDirection}}
-		if request.IncludeImpact && baseDirection != "incoming" && baseDirection != "both" {
-			directions = append(directions, struct {
+			if seed.Analyzer == semantic.AnalyzerFramework {
+				switch entityAuthority(seed) {
+				case framework.ProviderStatusExternal, framework.ProviderStatusLocalAmbiguous, framework.ProviderStatusLocalMissing:
+					continue
+				}
+			}
+			analyzers := []string{seed.Analyzer}
+			if seed.Analyzer == semantic.AnalyzerFiveM || seed.Analyzer == semantic.AnalyzerFramework {
+				analyzers = append(analyzers, semantic.AnalyzerFiveMWorkspace)
+			}
+			baseDirection := intent.TraceDirection
+			if baseDirection != "incoming" && baseDirection != "outgoing" && baseDirection != "both" {
+				baseDirection = "both"
+			}
+			directions := []struct {
 				value  string
 				impact bool
-			}{value: "incoming", impact: true})
-		}
-		for _, analyzer := range analyzers {
-			for _, direction := range directions {
-				if !work.allowTrace() {
-					work.traceExhausted = true
-					return nil
-				}
-				remaining := work.maxGraphEdges - work.graphEdges
-				if remaining <= 0 {
-					work.graphExhausted = true
-					return nil
-				}
-				work.traceQueries++
-				edges, truncated, err := p.Store.TraceSemanticWithOptions(repoID, seed.ID, analyzer, direction.value, nil, depth, minInt(remaining, 100))
-				if err != nil {
+			}{{value: baseDirection}}
+			if request.IncludeImpact && baseDirection != "incoming" && baseDirection != "both" {
+				directions = append(directions, struct {
+					value  string
+					impact bool
+				}{value: "incoming", impact: true})
+			}
+			for _, analyzer := range analyzers {
+				for _, direction := range directions {
+					if !work.allowTrace() {
+						work.traceExhausted = true
+						return nil
+					}
+					remaining := work.maxGraphEdges - work.graphEdges
+					if remaining <= 0 {
+						work.graphExhausted = true
+						return nil
+					}
+					work.traceQueries++
+					edges, truncated, err := p.Store.TraceSemanticRankedWithOptions(repoID, seed.ID, analyzer, direction.value, nil, depth, minInt(remaining, 100))
+					if err != nil {
+						if cancelErr := contextErr(ctx); cancelErr != nil {
+							return cancelErr
+						}
+						if traceRootUnavailable(err) {
+							continue
+						}
+						return err
+					}
 					if cancelErr := contextErr(ctx); cancelErr != nil {
 						return cancelErr
 					}
-					if traceRootUnavailable(err) {
-						continue
+					work.graphEdges += len(edges)
+					if truncated {
+						result.Truncated = true
 					}
-					return err
-				}
-				if cancelErr := contextErr(ctx); cancelErr != nil {
-					return cancelErr
-				}
-				work.graphEdges += len(edges)
-				if truncated {
-					result.Truncated = true
-				}
-				for _, edge := range edges {
-					addTraceEntity(acc, edge.From, seed, edge, direction.impact, work)
-					if edge.To != nil {
-						addTraceEntity(acc, *edge.To, seed, edge, direction.impact, work)
+					for _, edge := range edges {
+						addTraceEntity(acc, edge.From, seed, edge, direction.impact, work)
+						if edge.To != nil {
+							addTraceEntity(acc, *edge.To, seed, edge, direction.impact, work)
+						}
 					}
 				}
 			}
@@ -834,7 +903,7 @@ func addTraceEntity(acc map[string]*candidateAccumulator, entity semantic.Entity
 	if edge.Depth > 1 {
 		reasons = append(reasons, "impact_transitive")
 	}
-	addEntityCandidateWithRelationship(acc, entity, reasons, edge.Depth, edge.Relationship.ID, work)
+	addEntityCandidateWithRelationshipKind(acc, entity, reasons, edge.Depth, edge.Relationship.ID, edge.Kind, edge.Dynamic || entity.Dynamic, work)
 }
 
 func relationshipReason(edge semantic.TraceEdge, seed semantic.Entity) string {
@@ -874,7 +943,7 @@ func addSymbolCandidate(acc map[string]*candidateAccumulator, repo string, symbo
 	}
 	accepted := false
 	for _, reason := range reasons {
-		if addEvidence(a, Evidence{Kind: "symbol", SourceID: symbol.ID, Depth: distance, Strength: reasonStrength(reason), NoteCode: reason}, work) {
+		if addEvidence(a, Evidence{Kind: "symbol", SourceID: symbol.ID, Depth: distance, Strength: evidenceStrengthHint(reason), NoteCode: reason, Analyzer: semantic.AnalyzerGenericGraph, Role: string(roleDeclaration)}, work) {
 			accepted = true
 		}
 	}
@@ -893,10 +962,14 @@ func addSymbolCandidate(acc map[string]*candidateAccumulator, repo string, symbo
 }
 
 func addEntityCandidate(acc map[string]*candidateAccumulator, entity semantic.Entity, reasons []string, distance int, work *plannerBudget) {
-	addEntityCandidateWithRelationship(acc, entity, reasons, distance, "", work)
+	addEntityCandidateWithRelationshipKind(acc, entity, reasons, distance, "", entity.Kind, entity.Dynamic, work)
 }
 
 func addEntityCandidateWithRelationship(acc map[string]*candidateAccumulator, entity semantic.Entity, reasons []string, distance int, relationshipID string, work *plannerBudget) {
+	addEntityCandidateWithRelationshipKind(acc, entity, reasons, distance, relationshipID, entity.Kind, entity.Dynamic, work)
+}
+
+func addEntityCandidateWithRelationshipKind(acc map[string]*candidateAccumulator, entity semantic.Entity, reasons []string, distance int, relationshipID, relationshipKind string, dynamic bool, work *plannerBudget) {
 	key := "entity:" + entity.ID
 	if contextID := contextSymbolID(entity); contextID != "" {
 		key = "symbol:" + contextID
@@ -910,7 +983,7 @@ func addEntityCandidateWithRelationship(acc map[string]*candidateAccumulator, en
 	}
 	accepted := false
 	for _, reason := range reasons {
-		if addEvidence(a, Evidence{Kind: "semantic", SourceID: entity.ID, RelationshipID: relationshipID, Relationship: entity.Kind, Depth: distance, Strength: reasonStrength(reason), Authority: entityAuthority(entity), NoteCode: reason}, work) {
+		if addEvidence(a, Evidence{Kind: "semantic", SourceID: entity.ID, RelationshipID: relationshipID, Relationship: relationshipKind, Depth: distance, Strength: evidenceStrengthHint(reason), Authority: entityAuthority(entity), NoteCode: reason, Analyzer: entity.Analyzer, Role: string(semanticSeedRole(entity)), Framework: entity.Framework, Dynamic: dynamic || entity.Dynamic}, work) {
 			accepted = true
 		}
 	}
@@ -919,7 +992,7 @@ func addEntityCandidateWithRelationship(acc map[string]*candidateAccumulator, en
 		return
 	}
 	mergeEntityMetadata(a, entity)
-	if entity.File != "" && (a.file == "" || normalizePath(entity.File) < a.file) {
+	if entity.File != "" && candidateLocationLess(entity, a.file, a.line, a.endLine) {
 		a.file = normalizePath(entity.File)
 		a.line = entity.Line
 		a.endLine = entity.EndLine
@@ -937,6 +1010,20 @@ func addEntityCandidateWithRelationship(acc map[string]*candidateAccumulator, en
 	if distance < a.distance {
 		a.distance = distance
 	}
+}
+
+func candidateLocationLess(entity semantic.Entity, currentFile string, currentLine, currentEndLine int) bool {
+	file := normalizePath(entity.File)
+	if currentFile == "" {
+		return file != ""
+	}
+	if file != currentFile {
+		return file < currentFile
+	}
+	if entity.Line != currentLine {
+		return entity.Line < currentLine
+	}
+	return entity.EndLine < currentEndLine
 }
 
 func newAccumulator(key, repo string) *candidateAccumulator {
@@ -997,10 +1084,12 @@ func addFileCandidate(acc map[string]*candidateAccumulator, repo, file string, w
 	a.file, a.name, a.kind, a.distance = file, filepath.Base(filepath.FromSlash(file)), "file", 0
 }
 
-func finalize(result Plan, acc map[string]*candidateAccumulator, max int, focusFile, focusResource string, files map[string]bool) Plan {
+func finalize(result Plan, acc map[string]*candidateAccumulator, max int, focusFile, focusResource string, files map[string]bool, intent TaskIntent) Plan {
 	all := make([]Candidate, 0, len(acc))
+	breakdowns := make(map[string]ScoreBreakdown, len(acc))
+	policy := NewRankPolicy()
 	for _, item := range acc {
-		candidate := candidateFromAccumulator(item, focusFile, focusResource)
+		candidate, breakdown := candidateFromAccumulator(item, focusFile, focusResource, intent, policy)
 		if candidate.File == "" || !files[candidate.File] {
 			continue
 		}
@@ -1008,8 +1097,14 @@ func finalize(result Plan, acc map[string]*candidateAccumulator, max int, focusF
 			continue
 		}
 		all = append(all, candidate)
+		breakdowns[candidate.ID] = breakdown
 	}
 	sort.Slice(all, func(i, j int) bool {
+		leftFocused := candidateHasReason(all[i], "explicit_focus")
+		rightFocused := candidateHasReason(all[j], "explicit_focus")
+		if leftFocused != rightFocused {
+			return leftFocused
+		}
 		if tierRank(all[i].Tier) != tierRank(all[j].Tier) {
 			return tierRank(all[i].Tier) < tierRank(all[j].Tier)
 		}
@@ -1024,9 +1119,16 @@ func finalize(result Plan, acc map[string]*candidateAccumulator, max int, focusF
 		}
 		return all[i].ID < all[j].ID
 	})
+	if intent.TaskClass == "broad_unknown" {
+		all = diversityOrder(all, max)
+	}
 	if len(all) > max {
 		result.Truncated = true
 		all = all[:max]
+	}
+	result.rankingDebug = result.rankingDebug[:0]
+	for _, candidate := range all {
+		result.rankingDebug = append(result.rankingDebug, rankingDebugCandidate(candidate, breakdowns[candidate.ID]))
 	}
 	for _, candidate := range all {
 		switch candidate.Tier {
@@ -1049,32 +1151,10 @@ func finalize(result Plan, acc map[string]*candidateAccumulator, max int, focusF
 	return result
 }
 
-func candidateFromAccumulator(a *candidateAccumulator, focusFile, focusResource string) Candidate {
+func candidateFromAccumulator(a *candidateAccumulator, focusFile, focusResource string, intent TaskIntent, policy RankPolicy) (Candidate, ScoreBreakdown) {
 	authority := authorityLabel(sortedSet(a.authorities))
-	score := 100
-	for reason := range a.reasonCodes {
-		if value := reasonStrength(reason); value > score {
-			score = value
-		}
-	}
-	score += authorityAdjustmentForSet(a.authorities)
-	if a.distance > 1 {
-		score -= 120
-	}
-	if a.symbol == nil {
-		score -= 80
-	}
-	tier := "peripheral"
-	if hasReason(a, "explicit_focus", "exact_symbol_match", "weak_exact_match", "exact_semantic_match", "framework_operation_match") {
-		tier = "primary"
-	} else if hasReason(a, "lexical_fallback", "broad_entry_point") {
-		tier = "peripheral"
-	} else if (a.distance <= 1 || hasReason(a, "framework_provider", "export_provider")) && len(a.reasonCodes) > 0 {
-		tier = "supporting"
-	}
-	if a.distance == 0 && a.symbol != nil && tier == "peripheral" && !hasReason(a, "lexical_fallback", "broad_entry_point") {
-		tier = "primary"
-	}
+	breakdown := policy.ScoreAccumulator(a, intent, focusFile, focusResource)
+	tier := candidateTier(a, intent)
 	reasons := sortedSet(a.reasonCodes)
 	analyzers := sortedSet(a.analyzers)
 	frameworks := sortedSet(a.frameworks)
@@ -1082,7 +1162,7 @@ func candidateFromAccumulator(a *candidateAccumulator, focusFile, focusResource 
 	resourcePaths := sortedSet(a.resourcePaths)
 	targetResources := sortedSet(a.targetResources)
 	sides := sortedSet(a.sides)
-	return Candidate{ID: semantic.StableID("planner_candidate", a.repo, a.key), SymbolID: symbolID(a), File: a.file, Line: a.line, EndLine: a.endLine, Name: a.name, Kind: a.kind, Resource: singleValue(resources), ResourcePath: singleValue(resourcePaths), TargetResource: singleValue(targetResources), Framework: singleValue(frameworks), Frameworks: frameworks, Side: singleValue(sides), Sides: sides, Resources: resources, ResourcePaths: resourcePaths, TargetResources: targetResources, Analyzers: analyzers, Score: score, Tier: tier, ReasonCodes: reasons, Authority: authority, Authorities: sortedSet(a.authorities), Distance: maxInt(0, a.distance), EstimatedScope: maxInt(0, a.endLine-a.line+1)}
+	return Candidate{ID: semantic.StableID("planner_candidate", a.repo, a.key), SymbolID: symbolID(a), File: a.file, Line: a.line, EndLine: a.endLine, Name: a.name, Kind: a.kind, Resource: singleValue(resources), ResourcePath: singleValue(resourcePaths), TargetResource: singleValue(targetResources), Framework: singleValue(frameworks), Frameworks: frameworks, Side: singleValue(sides), Sides: sides, Resources: resources, ResourcePaths: resourcePaths, TargetResources: targetResources, Analyzers: analyzers, Score: breakdown.Total, Tier: tier, ReasonCodes: reasons, Authority: authority, Authorities: sortedSet(a.authorities), Distance: maxInt(0, a.distance), EstimatedScope: maxInt(0, a.endLine-a.line+1)}, breakdown
 }
 
 func applyFocusEvidence(acc map[string]*candidateAccumulator, focusFile, focusResource string, work *plannerBudget) {
@@ -1230,23 +1310,7 @@ func authorityLabel(values []string) string {
 	return ""
 }
 
-func authorityAdjustmentForSet(values map[string]bool) int {
-	if values[framework.ProviderStatusLocalVerified] {
-		return 90
-	}
-	if values[framework.ProviderStatusLocalAmbiguous] {
-		return -160
-	}
-	if values[framework.ProviderStatusLocalMissing] {
-		return -130
-	}
-	if values[framework.ProviderStatusExternal] {
-		return -100
-	}
-	return 0
-}
-
-func reasonStrength(reason string) int {
+func evidenceStrengthHint(reason string) int {
 	switch reason {
 	case "explicit_focus":
 		return 1000
