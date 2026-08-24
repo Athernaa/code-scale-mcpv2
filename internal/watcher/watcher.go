@@ -11,10 +11,11 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/syphon1c/code-scale-mcp/internal/parser"
-	"github.com/syphon1c/code-scale-mcp/internal/security"
-	"github.com/syphon1c/code-scale-mcp/internal/storage"
-	"github.com/syphon1c/code-scale-mcp/internal/summarizer"
+	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
+	"github.com/Athernaa/code-scale-mcpv2/internal/repository"
+	"github.com/Athernaa/code-scale-mcpv2/internal/security"
+	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
+	"github.com/Athernaa/code-scale-mcpv2/internal/summarizer"
 )
 
 const debounceInterval = 500 * time.Millisecond
@@ -48,6 +49,12 @@ func (m *Manager) Watch(absPath string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	localID, err := repository.Local(absPath)
+	if err != nil {
+		return err
+	}
+	absPath = localID.CanonicalPath
+
 	if _, exists := m.watches[absPath]; exists {
 		return nil // Already watching
 	}
@@ -57,26 +64,15 @@ func (m *Manager) Watch(absPath string) error {
 		return err
 	}
 
-	// Add all subdirectories recursively
-	err = filepath.WalkDir(absPath, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			if security.ShouldSkipDir(d.Name()) && path != absPath {
-				return filepath.SkipDir
-			}
-			return w.Add(path)
-		}
-		return nil
-	})
+	// Add all subdirectories recursively. The same helper is used when a
+	// directory appears later so nested directories are never missed.
+	err = addDirectoryRecursive(w, absPath, absPath)
 	if err != nil {
 		_ = w.Close()
 		return err
 	}
 
-	folderName := filepath.Base(absPath)
-	repo := "local/" + folderName
+	repo := localID.Repo
 
 	fw := &FolderWatch{
 		Path:      absPath,
@@ -97,8 +93,50 @@ func (m *Manager) Watch(absPath string) error {
 	return nil
 }
 
+// addDirectoryRecursive registers path and all eligible descendants. Symlink
+// directories are skipped to avoid loops and escapes outside the watched root.
+func addDirectoryRecursive(w *fsnotify.Watcher, root, path string) error {
+	if !security.ValidatePath(root, path) || security.IsSymlinkEscape(root, path) {
+		return fmt.Errorf("directory is outside watched root: %s", path)
+	}
+
+	var firstErr error
+	err := filepath.WalkDir(path, func(current string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			log.Printf("watcher: cannot inspect %s: %v", current, walkErr)
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		if current != root && security.ShouldSkipDir(d.Name()) {
+			return filepath.SkipDir
+		}
+		if !security.ValidatePath(root, current) {
+			return filepath.SkipDir
+		}
+		if err := w.Add(current); err != nil {
+			log.Printf("watcher: failed to watch %s: %v", current, err)
+			if current == path && firstErr == nil {
+				firstErr = err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return firstErr
+}
+
 // Unwatch stops watching a folder.
 func (m *Manager) Unwatch(absPath string) error {
+	if canonical, err := repository.CanonicalPath(absPath); err == nil {
+		absPath = canonical
+	}
 	m.mu.Lock()
 	fw, exists := m.watches[absPath]
 	if !exists {
@@ -152,6 +190,12 @@ func (m *Manager) RestoreWatches() error {
 			_ = m.store.DeleteWatch(sw.Path)
 			continue
 		}
+		localID, identityErr := repository.Local(sw.Path)
+		if identityErr != nil || localID.Repo != sw.Repo {
+			log.Printf("watcher: removing stale watch for %s (repository identity changed)", sw.Path)
+			_ = m.store.DeleteWatch(sw.Path)
+			continue
+		}
 
 		if err := m.Watch(sw.Path); err != nil {
 			log.Printf("watcher: failed to restore watch for %s: %v", sw.Path, err)
@@ -198,11 +242,13 @@ func (m *Manager) watchLoop(fw *FolderWatch) {
 				continue
 			}
 
-			// If a new directory was created, watch it
-			if event.Op&fsnotify.Create != 0 {
+			// If a new directory was created or moved in, watch it recursively.
+			if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
 				if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
-					if !security.ShouldSkipDir(filepath.Base(event.Name)) {
-						_ = fw.watcher.Add(event.Name)
+					if !security.ShouldSkipDir(filepath.Base(event.Name)) && security.ValidatePath(fw.Path, event.Name) && !security.IsSymlinkEscape(fw.Path, event.Name) {
+						if err := addDirectoryRecursive(fw.watcher, fw.Path, event.Name); err != nil {
+							log.Printf("watcher: failed to add directory %s: %v", event.Name, err)
+						}
 					}
 					continue
 				}
@@ -259,8 +305,13 @@ func (m *Manager) watchLoop(fw *FolderWatch) {
 
 // reindexFiles re-parses and updates the index for changed files.
 func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
-	owner := "local"
-	repoName := filepath.Base(fw.Path)
+	localID, err := repository.Local(fw.Path)
+	if err != nil {
+		log.Printf("watcher: cannot resolve repository identity for %s: %v", fw.Path, err)
+		return
+	}
+	owner := localID.Owner
+	repoName := localID.Name
 
 	for _, fullPath := range paths {
 		relPath, err := filepath.Rel(fw.Path, fullPath)
@@ -307,16 +358,13 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 		h := sha256.Sum256(content)
 		hash := hex.EncodeToString(h[:])
 
-		fileHashes := map[string]string{relPath: hash}
-		fileLangs := map[string]string{relPath: lang}
-
 		// Save content file
 		if err := m.store.SaveContentFile(owner, repoName, relPath, content); err != nil {
 			log.Printf("watcher: failed to save content for %s: %v", relPath, err)
 		}
 
-		// Save index (incremental)
-		err = m.store.SaveIndex(owner, repoName, "local", "", fileHashes, fileLangs, symbols)
+		// Save only this file's index; a full replacement would erase unrelated files.
+		err = m.store.UpsertFileIndex(owner, repoName, "local", "", relPath, hash, lang, symbols, localID.CanonicalPath)
 		if err != nil {
 			log.Printf("watcher: save error for %s: %v", relPath, err)
 			continue

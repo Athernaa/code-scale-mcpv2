@@ -12,10 +12,10 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/syphon1c/code-scale-mcp/internal/parser"
-	"github.com/syphon1c/code-scale-mcp/internal/ratelimit"
-	"github.com/syphon1c/code-scale-mcp/internal/storage"
-	"github.com/syphon1c/code-scale-mcp/internal/tools"
+	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
+	"github.com/Athernaa/code-scale-mcpv2/internal/ratelimit"
+	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
+	"github.com/Athernaa/code-scale-mcpv2/internal/tools"
 )
 
 // ---------------------------------------------------------------------------
@@ -114,8 +114,8 @@ func indexDir(t *testing.T, store *storage.IndexStore, owner, name, absDir strin
 		t.Fatalf("WalkDir(%s): %v", absDir, err)
 	}
 
-	if err := store.SaveIndex(owner, name, "local", "", fileHashes, fileLangs, allSymbols); err != nil {
-		t.Fatalf("SaveIndex(%s/%s): %v", owner, name, err)
+	if err := store.ReplaceRepoIndex(owner, name, "local", "", fileHashes, fileLangs, allSymbols); err != nil {
+		t.Fatalf("ReplaceRepoIndex(%s/%s): %v", owner, name, err)
 	}
 	t.Logf("indexed %s/%s: %d files, %d symbols", owner, name, len(fileHashes), len(allSymbols))
 }

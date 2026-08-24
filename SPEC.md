@@ -289,7 +289,7 @@ CREATE TABLE token_savings (
 
 Indexes on `name`, `kind`, `language`, `file_path`, `repo_id` for common query patterns.
 
-Raw source files stored on filesystem at `~/.code-index/{owner}-{name}/{file_path}` for O(1) byte-offset retrieval.
+Raw source files are stored on the filesystem at `~/.code-index/{owner}-{name}-{identity-digest}/{file_path}` for O(1) byte-offset retrieval. The digest is derived from the unambiguous repository identity.
 
 ---
 

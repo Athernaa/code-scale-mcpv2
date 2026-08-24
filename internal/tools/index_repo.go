@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/syphon1c/code-scale-mcp/internal/github"
-	"github.com/syphon1c/code-scale-mcp/internal/parser"
-	"github.com/syphon1c/code-scale-mcp/internal/security"
-	"github.com/syphon1c/code-scale-mcp/internal/summarizer"
+	"github.com/Athernaa/code-scale-mcpv2/internal/github"
+	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
+	"github.com/Athernaa/code-scale-mcpv2/internal/security"
+	"github.com/Athernaa/code-scale-mcpv2/internal/summarizer"
 )
 
 type IndexRepoArgs struct {
@@ -124,7 +124,7 @@ func IndexRepoHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, In
 		summarizer.SummarizeSymbols(allSymbols, args.UseAISummaries)
 
 		// Save index
-		err = deps.Store.SaveIndex(owner, repoName, "github", "", fileHashes, fileLangs, allSymbols)
+		err = deps.Store.ReplaceRepoIndex(owner, repoName, "github", "", fileHashes, fileLangs, allSymbols)
 		if err != nil {
 			r, _ := errorResult("save index: " + err.Error())
 			return r, nil, nil

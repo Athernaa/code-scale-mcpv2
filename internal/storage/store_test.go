@@ -3,8 +3,31 @@ package storage
 import (
 	"testing"
 
-	"github.com/syphon1c/code-scale-mcp/internal/parser"
+	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
 )
+
+func testSymbol(file, name string) parser.Symbol {
+	return parser.Symbol{
+		ID:            file + "::" + name + "#function",
+		File:          file,
+		Name:          name,
+		QualifiedName: name,
+		Kind:          "function",
+		Language:      "lua",
+		Signature:     "function " + name + "()",
+		Decorators:    []string{},
+		Keywords:      []string{},
+	}
+}
+
+func ftsContains(t *testing.T, store *IndexStore, query string) bool {
+	t.Helper()
+	var count int
+	if err := store.DB().QueryRow("SELECT COUNT(*) FROM symbols_fts WHERE symbols_fts MATCH ?", query).Scan(&count); err != nil {
+		t.Fatalf("FTS query %q: %v", query, err)
+	}
+	return count > 0
+}
 
 func newTestStore(t *testing.T) *IndexStore {
 	t.Helper()
@@ -171,6 +194,113 @@ func TestDetectChanges(t *testing.T) {
 	}
 	if len(deleted) != 1 || deleted[0] != "c.py" {
 		t.Errorf("expected [c.py] deleted, got %v", deleted)
+	}
+}
+
+func TestReplaceRepoIndexReplacesAllRepositoryData(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.ReplaceRepoIndex("test", "replace", "local", "", map[string]string{
+		"old.lua": "old",
+		"keep.lua": "keep",
+	}, map[string]string{
+		"old.lua": "lua",
+		"keep.lua": "lua",
+	}, []parser.Symbol{testSymbol("old.lua", "oldFunction"), testSymbol("keep.lua", "keepFunction")}); err != nil {
+		t.Fatalf("initial ReplaceRepoIndex: %v", err)
+	}
+
+	if err := store.ReplaceRepoIndex("test", "replace", "local", "", map[string]string{
+		"new.lua": "new",
+	}, map[string]string{"new.lua": "lua"}, []parser.Symbol{testSymbol("new.lua", "newFunction")}); err != nil {
+		t.Fatalf("replacement ReplaceRepoIndex: %v", err)
+	}
+
+	repoID, err := store.GetRepoID("test/replace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := store.GetFiles(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].Path != "new.lua" {
+		t.Fatalf("expected only new.lua after replacement, got %#v", files)
+	}
+}
+
+func TestIncrementalFileUpdatesPreserveUnrelatedDataAndFTS(t *testing.T) {
+	store := newTestStore(t)
+	files := map[string]string{"client.lua": "client-v1", "server.lua": "server-v1"}
+	langs := map[string]string{"client.lua": "lua", "server.lua": "lua"}
+	initial := []parser.Symbol{testSymbol("client.lua", "clientFunction"), testSymbol("server.lua", "serverFunction")}
+	if err := store.ReplaceRepoIndex("local", "game", "local", "", files, langs, initial); err != nil {
+		t.Fatalf("initial index: %v", err)
+	}
+	repoID, err := store.GetRepoID("local/game")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	repos, err := store.ListRepos()
+	if err != nil || len(repos) != 1 || repos[0].FileCount != 2 {
+		t.Fatalf("expected two indexed files, repos=%#v err=%v", repos, err)
+	}
+	if _, err := store.GetSymbolByID(repoID, "client.lua::clientFunction#function"); err != nil {
+		t.Fatalf("clientFunction missing: %v", err)
+	}
+	if _, err := store.GetSymbolByID(repoID, "server.lua::serverFunction#function"); err != nil {
+		t.Fatalf("serverFunction missing: %v", err)
+	}
+
+	updated := testSymbol("client.lua", "newClientFunction")
+	if err := store.UpsertFileIndex("local", "game", "local", "", "client.lua", "client-v2", "lua", []parser.Symbol{updated}); err != nil {
+		t.Fatalf("incremental update: %v", err)
+	}
+
+	repos, err = store.ListRepos()
+	if err != nil || len(repos) != 1 || repos[0].FileCount != 2 {
+		t.Fatalf("expected two files after incremental update, repos=%#v err=%v", repos, err)
+	}
+	if _, err := store.GetSymbolByID(repoID, updated.ID); err != nil {
+		t.Fatalf("new client symbol missing: %v", err)
+	}
+	if _, err := store.GetSymbolByID(repoID, "server.lua::serverFunction#function"); err != nil {
+		t.Fatalf("unrelated server symbol was lost: %v", err)
+	}
+	if _, err := store.GetSymbolByID(repoID, "client.lua::clientFunction#function"); err == nil {
+		t.Fatal("old client symbol still exists")
+	}
+	if !ftsContains(t, store, "newClientFunction") || ftsContains(t, store, "clientFunction") {
+		t.Fatal("FTS did not reflect the incremental symbol replacement")
+	}
+
+	if err := store.DeleteFileFromIndex("local", "game", "client.lua"); err != nil {
+		t.Fatalf("delete client file: %v", err)
+	}
+	files, err := store.GetFiles(repoID)
+	if err != nil || len(files) != 1 || files[0].Path != "server.lua" {
+		t.Fatalf("server file did not survive deletion, files=%#v err=%v", files, err)
+	}
+	if _, err := store.GetSymbolByID(repoID, "server.lua::serverFunction#function"); err != nil {
+		t.Fatalf("server symbol did not survive deletion: %v", err)
+	}
+	if ftsContains(t, store, "newClientFunction") {
+		t.Fatal("deleted client symbol is still in FTS")
+	}
+}
+
+func TestUpsertFileIndexAddsNewFile(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.ReplaceRepoIndex("local", "new-file", "local", "", map[string]string{"one.lua": "one"}, map[string]string{"one.lua": "lua"}, []parser.Symbol{testSymbol("one.lua", "oneFunction")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertFileIndex("local", "new-file", "local", "", "two.lua", "two", "lua", []parser.Symbol{testSymbol("two.lua", "twoFunction")}); err != nil {
+		t.Fatal(err)
+	}
+	repoID, _ := store.GetRepoID("local/new-file")
+	files, err := store.GetFiles(repoID)
+	if err != nil || len(files) != 2 {
+		t.Fatalf("expected two files after new-file upsert, files=%#v err=%v", files, err)
 	}
 }
 

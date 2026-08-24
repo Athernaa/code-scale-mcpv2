@@ -83,5 +83,27 @@ const MigrateV3SQL = `
 ALTER TABLE repos ADD COLUMN source_path TEXT DEFAULT '';
 `
 
+// MigrateV4SQL keeps the external-content FTS5 table synchronized with
+// symbols incrementally. The delete command must include the OLD indexed
+// column values, as required by FTS5 external-content tables.
+const MigrateV4SQL = `
+CREATE TRIGGER IF NOT EXISTS symbols_ai AFTER INSERT ON symbols BEGIN
+    INSERT INTO symbols_fts(rowid, name, qualified_name, signature, summary, docstring)
+    VALUES (new.id, new.name, new.qualified_name, new.signature, new.summary, new.docstring);
+END;
+
+CREATE TRIGGER IF NOT EXISTS symbols_ad AFTER DELETE ON symbols BEGIN
+    INSERT INTO symbols_fts(symbols_fts, rowid, name, qualified_name, signature, summary, docstring)
+    VALUES ('delete', old.id, old.name, old.qualified_name, old.signature, old.summary, old.docstring);
+END;
+
+CREATE TRIGGER IF NOT EXISTS symbols_au AFTER UPDATE ON symbols BEGIN
+    INSERT INTO symbols_fts(symbols_fts, rowid, name, qualified_name, signature, summary, docstring)
+    VALUES ('delete', old.id, old.name, old.qualified_name, old.signature, old.summary, old.docstring);
+    INSERT INTO symbols_fts(rowid, name, qualified_name, signature, summary, docstring)
+    VALUES (new.id, new.name, new.qualified_name, new.signature, new.summary, new.docstring);
+END;
+`
+
 // CurrentSchemaVersion is the current schema version.
-const CurrentSchemaVersion = 3
+const CurrentSchemaVersion = 4

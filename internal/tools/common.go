@@ -9,10 +9,10 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/syphon1c/code-scale-mcp/internal/ratelimit"
-	"github.com/syphon1c/code-scale-mcp/internal/storage"
-	"github.com/syphon1c/code-scale-mcp/internal/truncate"
-	"github.com/syphon1c/code-scale-mcp/internal/watcher"
+	"github.com/Athernaa/code-scale-mcpv2/internal/ratelimit"
+	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
+	"github.com/Athernaa/code-scale-mcpv2/internal/truncate"
+	"github.com/Athernaa/code-scale-mcpv2/internal/watcher"
 )
 
 // Meta contains response metadata.

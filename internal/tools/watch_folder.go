@@ -3,10 +3,10 @@ package tools
 import (
 	"context"
 	"os"
-	"path/filepath"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/syphon1c/code-scale-mcp/internal/security"
+	"github.com/Athernaa/code-scale-mcpv2/internal/repository"
+	"github.com/Athernaa/code-scale-mcpv2/internal/security"
 )
 
 type WatchFolderArgs struct {
@@ -28,11 +28,12 @@ func WatchFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 			return r, nil, nil
 		}
 
-		absPath, err := filepath.Abs(folderPath)
+		localID, err := repository.Local(folderPath)
 		if err != nil {
 			r, _ := errorResult("invalid path")
 			return r, nil, nil
 		}
+		absPath := localID.CanonicalPath
 
 		info, err := os.Stat(absPath)
 		if err != nil || !info.IsDir() {
@@ -83,11 +84,12 @@ func UnwatchFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest
 			return r, nil, nil
 		}
 
-		absPath, err := filepath.Abs(folderPath)
+		localID, err := repository.Local(folderPath)
 		if err != nil {
 			r, _ := errorResult("invalid path")
 			return r, nil, nil
 		}
+		absPath := localID.CanonicalPath
 
 		err = deps.Watcher.Unwatch(absPath)
 		if err != nil {

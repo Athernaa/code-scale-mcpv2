@@ -1,4 +1,4 @@
-module github.com/syphon1c/code-scale-mcp
+module github.com/Athernaa/code-scale-mcpv2
 
 go 1.24.0
 

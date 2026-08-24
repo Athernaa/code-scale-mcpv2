@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/syphon1c/code-scale-mcp/internal/storage"
+	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 )
 
 type GetRepoOutlineArgs struct {

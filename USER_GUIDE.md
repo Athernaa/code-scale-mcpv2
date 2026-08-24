@@ -5,8 +5,8 @@
 ### Build from source
 
 ```bash
-git clone https://github.com/syphon1c/code-scale-mcp
-cd code-scale-mcp
+git clone https://github.com/Athernaa/code-scale-mcpv2
+cd code-scale-mcpv2
 make build
 ```
 
@@ -123,8 +123,8 @@ get_file_outline: { "repo": "fastapi/fastapi", "file_path": "fastapi/main.py" }
 
 ```
 index_folder:     { "path": "/home/user/myproject" }
-get_repo_outline: { "repo": "local/myproject" }
-search_symbols:   { "repo": "local/myproject", "query": "main" }
+get_repo_outline: { "repo": "local/myproject-<12-char-path-hash>" }
+search_symbols:   { "repo": "local/myproject-<12-char-path-hash>", "query": "main" }
 ```
 
 ### Find and Read a Function

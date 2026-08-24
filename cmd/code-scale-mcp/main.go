@@ -11,8 +11,8 @@ import (
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/syphon1c/code-scale-mcp/internal/server"
-	"github.com/syphon1c/code-scale-mcp/internal/storage"
+	"github.com/Athernaa/code-scale-mcpv2/internal/server"
+	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 )
 
 var version = "dev"

@@ -71,20 +71,20 @@ code-scale-mcp is an MCP server that indexes codebases at the symbol level using
 ### From source
 
 ```bash
-go install github.com/syphon1c/code-scale-mcp/cmd/code-scale-mcp@latest
+go install github.com/Athernaa/code-scale-mcpv2/cmd/code-scale-mcp@latest
 ```
 
 ### Build from repo
 
 ```bash
-git clone https://github.com/syphon1c/code-scale-mcp
-cd code-scale-mcp
+git clone https://github.com/Athernaa/code-scale-mcpv2
+cd code-scale-mcpv2
 make build
 ```
 
 ### Pre-built binaries
 
-Download from [Releases](https://github.com/syphon1c/code-scale-mcp/releases) for your platform.
+Download from [Releases](https://github.com/Athernaa/code-scale-mcpv2/releases) for your platform.
 
 ## Getting Started (3 steps)
 

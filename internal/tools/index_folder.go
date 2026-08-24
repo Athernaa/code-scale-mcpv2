@@ -13,9 +13,10 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/syphon1c/code-scale-mcp/internal/parser"
-	"github.com/syphon1c/code-scale-mcp/internal/security"
-	"github.com/syphon1c/code-scale-mcp/internal/summarizer"
+	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
+	"github.com/Athernaa/code-scale-mcpv2/internal/repository"
+	"github.com/Athernaa/code-scale-mcpv2/internal/security"
+	"github.com/Athernaa/code-scale-mcpv2/internal/summarizer"
 )
 
 const DefaultMaxFiles = 10000
@@ -38,11 +39,12 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 			return r, nil, nil
 		}
 
-		absPath, err := filepath.Abs(folderPath)
+		localID, err := repository.Local(folderPath)
 		if err != nil {
 			r, _ := errorResult("invalid path")
 			return r, nil, nil
 		}
+		absPath := localID.CanonicalPath
 
 		info, err := os.Stat(absPath)
 		if err != nil || !info.IsDir() {
@@ -55,9 +57,8 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 			return r, nil, nil
 		}
 
-		folderName := filepath.Base(absPath)
-		owner := "local"
-		repoName := folderName
+		owner := localID.Owner
+		repoName := localID.Name
 
 		// Discover files
 		var sourceFiles []string
@@ -179,7 +180,7 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 		summarizer.SummarizeSymbols(allSymbols, args.UseAISummaries)
 
 		// Save index
-		err = deps.Store.SaveIndex(owner, repoName, "local", "", fileHashes, fileLangs, allSymbols, absPath)
+		err = deps.Store.ReplaceRepoIndex(owner, repoName, "local", "", fileHashes, fileLangs, allSymbols, absPath)
 		if err != nil {
 			r, _ := errorResult("save index: " + err.Error())
 			return r, nil, nil

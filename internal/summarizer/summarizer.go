@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/syphon1c/code-scale-mcp/internal/parser"
+	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
 )
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}

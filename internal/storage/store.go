@@ -11,10 +11,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/syphon1c/code-scale-mcp/internal/parser"
-	"github.com/syphon1c/code-scale-mcp/internal/search"
-	"github.com/syphon1c/code-scale-mcp/internal/security"
-	"github.com/syphon1c/code-scale-mcp/internal/snippet"
+	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
+	"github.com/Athernaa/code-scale-mcpv2/internal/repository"
+	"github.com/Athernaa/code-scale-mcpv2/internal/search"
+	"github.com/Athernaa/code-scale-mcpv2/internal/security"
+	"github.com/Athernaa/code-scale-mcpv2/internal/snippet"
 	_ "modernc.org/sqlite"
 )
 
@@ -86,6 +87,10 @@ func (s *IndexStore) BasePath() string {
 	return s.basePath
 }
 
+func (s *IndexStore) contentDir(owner, name string) (string, error) {
+	return repository.ContentDir(s.basePath, owner, name)
+}
+
 // migrate runs schema migrations.
 func (s *IndexStore) migrate() error {
 	_, err := s.db.Exec(SchemaSQL)
@@ -112,6 +117,25 @@ func (s *IndexStore) migrate() error {
 			if !strings.Contains(err.Error(), "duplicate column") {
 				return fmt.Errorf("migrate v3: %w", err)
 			}
+		}
+	}
+	if currentVersion < 4 {
+		tx, err := s.db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin migrate v4: %w", err)
+		}
+		if _, err := tx.Exec(MigrateV4SQL); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("migrate v4: %w", err)
+		}
+		// Bootstrap the external-content index once. Subsequent writes are
+		// synchronized by the triggers installed above.
+		if _, err := tx.Exec("INSERT INTO symbols_fts(symbols_fts) VALUES('rebuild')"); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("bootstrap FTS index: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migrate v4: %w", err)
 		}
 	}
 
@@ -161,8 +185,8 @@ func (s *IndexStore) ListSavedWatches() ([]SavedWatch, error) {
 	return watches, rows.Err()
 }
 
-// SaveIndex saves symbols for a repository. Replaces existing data for the same repo.
-func (s *IndexStore) SaveIndex(
+// ReplaceRepoIndex performs a destructive full replacement of a repository index.
+func (s *IndexStore) ReplaceRepoIndex(
 	owner, name string,
 	sourceType string,
 	gitHead string,
@@ -277,12 +301,137 @@ func (s *IndexStore) SaveIndex(
 		}
 	}
 
-	// Rebuild FTS index from all symbols (FTS5 content-sync tables require full rebuild)
-	if _, err := tx.Exec("INSERT INTO symbols_fts(symbols_fts) VALUES('rebuild')"); err != nil {
-		return fmt.Errorf("rebuild FTS index: %w", err)
+	return tx.Commit()
+}
+
+// SaveIndex is retained for compatibility. New code should use
+// ReplaceRepoIndex to make its destructive semantics explicit.
+func (s *IndexStore) SaveIndex(
+	owner, name string,
+	sourceType string,
+	gitHead string,
+	files map[string]string,
+	fileLanguages map[string]string,
+	symbols []parser.Symbol,
+	sourcePaths ...string,
+) error {
+	return s.ReplaceRepoIndex(owner, name, sourceType, gitHead, files, fileLanguages, symbols, sourcePaths...)
+}
+
+// UpsertFileIndex transactionally replaces one file and only that file's
+// symbols. Unrelated files and symbols in the repository are preserved.
+func (s *IndexStore) UpsertFileIndex(
+	owner, name string,
+	sourceType string,
+	gitHead string,
+	filePath string,
+	contentHash string,
+	language string,
+	symbols []parser.Symbol,
+	sourcePaths ...string,
+) error {
+	if !security.SafeRepoComponent(owner) || !security.SafeRepoComponent(name) {
+		return fmt.Errorf("invalid repository component: owner=%q name=%q", owner, name)
+	}
+	if filePath == "" || filepath.IsAbs(filePath) || filepath.Clean(filePath) == ".." || strings.HasPrefix(filepath.Clean(filePath), ".."+string(filepath.Separator)) {
+		return fmt.Errorf("invalid file path: %q", filePath)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	repo := owner + "/" + name
+	now := time.Now().UTC().Format(time.RFC3339)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var repoID int64
+	if err := tx.QueryRow("SELECT id FROM repos WHERE repo = ?", repo).Scan(&repoID); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("repository %q not indexed", repo)
+		}
+		return err
+	}
+	if len(sourcePaths) > 0 {
+		_, err = tx.Exec("UPDATE repos SET indexed_at = ?, git_head = ?, source_type = ?, source_path = ? WHERE id = ?", now, gitHead, sourceType, sourcePaths[0], repoID)
+	} else {
+		_, err = tx.Exec("UPDATE repos SET indexed_at = ?, git_head = ?, source_type = ? WHERE id = ?", now, gitHead, sourceType, repoID)
+	}
+	if err != nil {
+		return err
+	}
+
+	var fileID int64
+	err = tx.QueryRow("SELECT id FROM files WHERE repo_id = ? AND path = ?", repoID, filePath).Scan(&fileID)
+	if err == sql.ErrNoRows {
+		res, insertErr := tx.Exec("INSERT INTO files (repo_id, path, language, content_hash) VALUES (?, ?, ?, ?)", repoID, filePath, language, contentHash)
+		if insertErr != nil {
+			return fmt.Errorf("insert file %s: %w", filePath, insertErr)
+		}
+		fileID, err = res.LastInsertId()
+		if err != nil {
+			return fmt.Errorf("get file ID for %s: %w", filePath, err)
+		}
+	} else if err != nil {
+		return err
+	} else {
+		if _, err := tx.Exec("UPDATE files SET language = ?, content_hash = ? WHERE id = ?", language, contentHash, fileID); err != nil {
+			return fmt.Errorf("update file %s: %w", filePath, err)
+		}
+	}
+
+	if _, err := tx.Exec("DELETE FROM symbols WHERE repo_id = ? AND file_id = ?", repoID, fileID); err != nil {
+		return fmt.Errorf("delete symbols for %s: %w", filePath, err)
+	}
+	for _, sym := range symbols {
+		if sym.File != filePath {
+			return fmt.Errorf("symbol %q belongs to %q, expected %q", sym.ID, sym.File, filePath)
+		}
+	}
+	if err := insertSymbolsTx(tx, repoID, map[string]int64{filePath: fileID}, symbols); err != nil {
+		return err
 	}
 
 	return tx.Commit()
+}
+
+func insertSymbolsTx(tx *sql.Tx, repoID int64, fileIDMap map[string]int64, symbols []parser.Symbol) error {
+	symStmt, err := tx.Prepare(`INSERT INTO symbols
+		(repo_id, file_id, symbol_id, file_path, name, qualified_name, kind, language,
+		 signature, content_hash, docstring, summary, decorators, keywords, parent_id,
+		 line, end_line, byte_offset, byte_length)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = symStmt.Close() }()
+
+	for _, sym := range symbols {
+		fileID, ok := fileIDMap[sym.File]
+		if !ok {
+			return fmt.Errorf("no file row for symbol %s", sym.ID)
+		}
+		decorJSON, err := json.Marshal(sym.Decorators)
+		if err != nil {
+			return fmt.Errorf("marshal decorators for %s: %w", sym.ID, err)
+		}
+		kwJSON, err := json.Marshal(sym.Keywords)
+		if err != nil {
+			return fmt.Errorf("marshal keywords for %s: %w", sym.ID, err)
+		}
+		if _, err := symStmt.Exec(
+			repoID, fileID, sym.ID, sym.File, sym.Name, sym.QualifiedName,
+			sym.Kind, sym.Language, sym.Signature, sym.ContentHash,
+			sym.Docstring, sym.Summary, string(decorJSON), string(kwJSON),
+			sym.Parent, sym.Line, sym.EndLine, sym.ByteOffset, sym.ByteLength,
+		); err != nil {
+			return fmt.Errorf("insert symbol %s: %w", sym.ID, err)
+		}
+	}
+	return nil
 }
 
 // ListRepos returns all indexed repositories.
@@ -831,7 +980,10 @@ func (s *IndexStore) SearchText(repoID int64, query string, filePattern string, 
 		return nil, err
 	}
 
-	contentDir := filepath.Join(s.basePath, owner+"-"+name)
+	contentDir, err := s.contentDir(owner, name)
+	if err != nil {
+		return nil, err
+	}
 
 	// Get files for this repo (use locked version since we already hold RLock)
 	files, err := s.getFilesLocked(repoID)
@@ -927,7 +1079,10 @@ func (s *IndexStore) GetSymbolContent(repoID int64, symbolID string) (string, er
 		return "", err
 	}
 
-	repoDir := filepath.Join(s.basePath, owner+"-"+name)
+	repoDir, err := s.contentDir(owner, name)
+	if err != nil {
+		return "", err
+	}
 	contentPath := filepath.Join(repoDir, sym.File)
 
 	// Prevent path traversal
@@ -959,7 +1114,10 @@ func (s *IndexStore) GetFileContent(repoID int64, filePath string) ([]byte, erro
 		return nil, err
 	}
 
-	repoDir := filepath.Join(s.basePath, owner+"-"+name)
+	repoDir, err := s.contentDir(owner, name)
+	if err != nil {
+		return nil, err
+	}
 	contentPath := filepath.Join(repoDir, filePath)
 
 	// Prevent path traversal
@@ -978,7 +1136,10 @@ func (s *IndexStore) SaveContentFile(owner, name, filePath string, content []byt
 	if !security.SafeRepoComponent(owner) || !security.SafeRepoComponent(name) {
 		return fmt.Errorf("invalid repository component: owner=%q name=%q", owner, name)
 	}
-	repoDir := filepath.Join(s.basePath, owner+"-"+name)
+	repoDir, err := s.contentDir(owner, name)
+	if err != nil {
+		return err
+	}
 	fullPath := filepath.Join(repoDir, filePath)
 
 	// Prevent path traversal
@@ -1026,17 +1187,15 @@ func (s *IndexStore) DeleteFileFromIndex(owner, name, filePath string) error {
 	if _, err := tx.Exec("DELETE FROM files WHERE repo_id = ? AND path = ?", repoID, filePath); err != nil {
 		return fmt.Errorf("delete file %s: %w", filePath, err)
 	}
-	// Rebuild FTS index
-	if _, err := tx.Exec("INSERT INTO symbols_fts(symbols_fts) VALUES('rebuild')"); err != nil {
-		return fmt.Errorf("rebuild FTS index: %w", err)
-	}
-
 	if err := tx.Commit(); err != nil {
 		return err
 	}
 
 	// Remove content file (with path traversal check)
-	repoDir := filepath.Join(s.basePath, owner+"-"+name)
+	repoDir, err := s.contentDir(owner, name)
+	if err != nil {
+		return err
+	}
 	contentPath := filepath.Join(repoDir, filePath)
 	rel, relErr := filepath.Rel(filepath.Clean(repoDir), filepath.Clean(contentPath))
 	if relErr == nil && !strings.HasPrefix(rel, "..") {
@@ -1073,17 +1232,15 @@ func (s *IndexStore) DeleteIndex(repo string) error {
 	if _, err := tx.Exec("DELETE FROM repos WHERE id = ?", id); err != nil {
 		return fmt.Errorf("delete repo: %w", err)
 	}
-	// Rebuild FTS index from remaining symbols
-	if _, err := tx.Exec("INSERT INTO symbols_fts(symbols_fts) VALUES('rebuild')"); err != nil {
-		return fmt.Errorf("rebuild FTS index: %w", err)
-	}
-
 	if err := tx.Commit(); err != nil {
 		return err
 	}
 
 	// Remove content directory
-	contentDir := filepath.Join(s.basePath, owner+"-"+name)
+	contentDir, err := s.contentDir(owner, name)
+	if err != nil {
+		return err
+	}
 	_ = os.RemoveAll(contentDir)
 
 	return nil
@@ -1284,7 +1441,9 @@ func (s *IndexStore) CleanupStale() (removedRepos []string, removedDirs []string
 	validDirs := make(map[string]bool)
 
 	for _, r := range repos {
-		validDirs[r.owner+"-"+r.name] = true
+		if dir, dirErr := s.contentDir(r.owner, r.name); dirErr == nil {
+			validDirs[filepath.Base(dir)] = true
+		}
 
 		// Only check local repos with a recorded source path
 		if r.sourceType != "local" || r.sourcePath == "" {
@@ -1295,7 +1454,9 @@ func (s *IndexStore) CleanupStale() (removedRepos []string, removedDirs []string
 			// Source directory gone — clean up
 			if delErr := s.deleteRepoLocked(r.id, r.owner, r.name); delErr == nil {
 				removedRepos = append(removedRepos, r.repo)
-				delete(validDirs, r.owner+"-"+r.name)
+				if dir, dirErr := s.contentDir(r.owner, r.name); dirErr == nil {
+					delete(validDirs, filepath.Base(dir))
+				}
 			}
 		}
 	}
@@ -1342,15 +1503,14 @@ func (s *IndexStore) deleteRepoLocked(repoID int64, owner, name string) error {
 	if _, err := tx.Exec("DELETE FROM repos WHERE id = ?", repoID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec("INSERT INTO symbols_fts(symbols_fts) VALUES('rebuild')"); err != nil {
-		return err
-	}
-
 	if err := tx.Commit(); err != nil {
 		return err
 	}
 
-	contentDir := filepath.Join(s.basePath, owner+"-"+name)
+	contentDir, err := s.contentDir(owner, name)
+	if err != nil {
+		return err
+	}
 	_ = os.RemoveAll(contentDir)
 	return nil
 }

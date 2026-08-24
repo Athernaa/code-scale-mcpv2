@@ -2,10 +2,10 @@ package server
 
 import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/syphon1c/code-scale-mcp/internal/ratelimit"
-	"github.com/syphon1c/code-scale-mcp/internal/storage"
-	"github.com/syphon1c/code-scale-mcp/internal/tools"
-	"github.com/syphon1c/code-scale-mcp/internal/watcher"
+	"github.com/Athernaa/code-scale-mcpv2/internal/ratelimit"
+	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
+	"github.com/Athernaa/code-scale-mcpv2/internal/tools"
+	"github.com/Athernaa/code-scale-mcpv2/internal/watcher"
 )
 
 // Version is set at build time via ldflags.
@@ -28,7 +28,7 @@ func NewCodeScaleServer(store *storage.IndexStore) (*mcp.Server, *watcher.Manage
 		Throttle: ratelimit.NewThrottler(),
 	}
 
-	// Register all 14 tools
+	// Register all 15 tools.
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "index_repo",
 		Description: "Index a GitHub repository's source code for symbol-level retrieval.",
