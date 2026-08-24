@@ -218,14 +218,20 @@ func Save() {}
 func Run() { Save() }`,
 		"internal/store/store.go": `package store
 func Save() {}`,
+		"x/store/store.go": `package store
+func Save() {}`,
 		"main.go": `package main
 import (
   "fmt"
-  st "example.com/project/internal/store"
+  svc "example.com/project/internal/store"
+  external "example.com/projectx/store"
 )
-func Execute() { st.Save(); fmt.Println("x") }
-func shadowPackage() { store := something(); store.Save() }`,
-	}, map[string]string{"service/service.go": "go", "internal/store/store.go": "go", "main.go": "go"}, "example.com/project")
+func Execute() { svc.Save(); fmt.Println("x") }
+func shadowPackage() { svc := something(); svc.Save() }
+type Worker struct{}
+func (svc Worker) Run() { svc.Save() }
+func externalCall() { external.Save() }`,
+	}, map[string]string{"service/service.go": "go", "internal/store/store.go": "go", "x/store/store.go": "go", "main.go": "go"}, "example.com/project")
 	run, ok := symbolEntity(result, "service/service.go", "Run")
 	if !ok {
 		t.Fatal("Go Run symbol missing")
@@ -259,6 +265,21 @@ func shadowPackage() { store := something(); store.Save() }`,
 	}
 	if relationshipConnects(result, shadowPackage, storeSave, RelationshipCalls) {
 		t.Fatal("shadowed Go package binding incorrectly resolved")
+	}
+	workerRun, ok := symbolEntity(result, "main.go", "Run")
+	if !ok {
+		t.Fatal("Worker.Run symbol missing")
+	}
+	if relationshipConnects(result, workerRun, storeSave, RelationshipCalls) {
+		t.Fatal("Go method receiver incorrectly resolved to imported package")
+	}
+	externalCall, ok := symbolEntity(result, "main.go", "externalCall")
+	if !ok {
+		t.Fatal("externalCall symbol missing")
+	}
+	externalSave, ok := symbolEntity(result, "x/store/store.go", "Save")
+	if ok && relationshipConnects(result, externalCall, externalSave, RelationshipCalls) {
+		t.Fatal("module-path prefix collision incorrectly resolved as local")
 	}
 }
 
@@ -338,6 +359,90 @@ function run(service) { save(); service.save() }`,
 	}
 }
 
+func TestJavaScriptSingleArrowParametersAndMethodParametersShadowImports(t *testing.T) {
+	result := analyzeTestRepository(t, map[string]string{
+		"save.ts": `export function save() {}`,
+		"main.ts": `import { save } from "./save"
+const arrowCall = save => save()
+const arrowReference = save => register(save)
+class Service {
+  execute(save) { save(); register(save) }
+  valid() { save(); register(save) }
+}`,
+	}, map[string]string{"save.ts": "typescript", "main.ts": "typescript"}, "")
+	save, ok := symbolEntity(result, "save.ts", "save")
+	if !ok {
+		t.Fatal("save symbol missing")
+	}
+	for _, name := range []string{"arrowCall", "arrowReference", "execute"} {
+		symbol, ok := symbolEntity(result, "main.ts", name)
+		if !ok {
+			t.Fatalf("%s symbol missing", name)
+		}
+		if relationshipConnects(result, symbol, save, RelationshipCalls) || relationshipConnects(result, symbol, save, RelationshipReferences) {
+			t.Fatalf("%s incorrectly resolved a shadowed imported save", name)
+		}
+	}
+	valid, ok := symbolEntity(result, "main.ts", "valid")
+	if !ok {
+		t.Fatal("valid method symbol missing")
+	}
+	if !relationshipConnects(result, valid, save, RelationshipCalls) || !relationshipConnects(result, valid, save, RelationshipReferences) {
+		t.Fatal("unshadowed imported symbol in method did not resolve")
+	}
+}
+
+func TestJavaScriptVarUsesFunctionScope(t *testing.T) {
+	result := analyzeTestRepository(t, map[string]string{
+		"save.ts": `export function save() {}`,
+		"main.ts": `import { save } from "./save"
+function run() {
+  if (condition) { var save = factory() }
+  save()
+}`,
+	}, map[string]string{"save.ts": "typescript", "main.ts": "typescript"}, "")
+	run, ok := symbolEntity(result, "main.ts", "run")
+	if !ok {
+		t.Fatal("run symbol missing")
+	}
+	save, ok := symbolEntity(result, "save.ts", "save")
+	if !ok {
+		t.Fatal("save symbol missing")
+	}
+	if relationshipConnects(result, run, save, RelationshipCalls) {
+		t.Fatal("function-scoped var failed to shadow imported save")
+	}
+}
+
+func TestJavaScriptReferencesRequireLexicalTargetKinds(t *testing.T) {
+	result := analyzeTestRepository(t, map[string]string{
+		"main.tsx": `class Service { save() {} }
+class Foo { Card() {} }
+function save() {}
+function Page() { registerHandler(save); registerHandler(Service); return <Card /> }`,
+	}, map[string]string{"main.tsx": "tsx"}, "")
+	page, ok := symbolEntity(result, "main.tsx", "Page")
+	if !ok {
+		t.Fatal("Page symbol missing")
+	}
+	serviceMethod, ok := symbolEntityKind(result, "main.tsx", "save", "method")
+	if ok && relationshipConnects(result, page, serviceMethod, RelationshipReferences) {
+		t.Fatal("bare reference incorrectly resolved to a class method")
+	}
+	fooMethod, ok := symbolEntityKind(result, "main.tsx", "Card", "method")
+	if ok && relationshipConnects(result, page, fooMethod, RelationshipReferences) {
+		t.Fatal("JSX reference incorrectly resolved to an unrelated class method")
+	}
+	functionSave, ok := symbolEntityKind(result, "main.tsx", "save", "function")
+	if !ok || !relationshipConnects(result, page, functionSave, RelationshipReferences) {
+		t.Fatal("valid lexical function reference did not resolve")
+	}
+	serviceClass, ok := symbolEntityKind(result, "main.tsx", "Service", "class")
+	if !ok || !relationshipConnects(result, page, serviceClass, RelationshipReferences) {
+		t.Fatal("valid lexical class reference did not resolve")
+	}
+}
+
 func TestLuaLexicalShadowingAndAmbiguousRequireRemainUnresolved(t *testing.T) {
 	result := analyzeTestRepository(t, map[string]string{
 		"foo.lua":      `return { save = function() end }`,
@@ -383,7 +488,8 @@ func Save() {}
 func parameter(Save func()) { Save() }
 func local() { Save := func() {}; Save() }
 func method() { Save() }
-func unknown(service Service) { service.Save() }`,
+func unknown(service Service) { service.Save() }
+func receiver(st Service) { st.Save() }`,
 	}, map[string]string{"main.go": "go"}, "")
 	packageSave, ok := symbolEntityKind(result, "main.go", "Save", "function")
 	if !ok {

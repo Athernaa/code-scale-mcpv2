@@ -58,7 +58,7 @@ func ResolveRelationships(entities []semantic.Entity) []semantic.Relationship {
 			}
 		case KindReferenceSite:
 			target, ok := resolveSiteTarget(entity, idx)
-			if !ok {
+			if !ok || !referenceTarget(target, entity) {
 				continue
 			}
 			from, ok := sourceEntity(entity, idx)
@@ -226,7 +226,33 @@ func resolveSiteTarget(site semantic.Entity, idx graphIndexes) (semantic.Entity,
 		}
 		return exactlyOne(candidates)
 	}
-	return exactlyOne(idx.symbolsByFileName[path+"\x00"+name])
+	return exactlyOne(filterLexicalCandidates(idx.symbolsByFileName[path+"\x00"+name], meta))
+}
+
+func filterLexicalCandidates(candidates []semantic.Entity, metadata map[string]any) []semantic.Entity {
+	bindingKind, _ := metadata["binding_kind"].(string)
+	if bindingKind == "" || bindingKind == "import" {
+		return candidates
+	}
+	filtered := make([]semantic.Entity, 0, len(candidates))
+	for _, candidate := range candidates {
+		kind, _ := candidate.Metadata["symbol_kind"].(string)
+		switch bindingKind {
+		case "function":
+			if kind == "function" {
+				filtered = append(filtered, candidate)
+			}
+		case "class":
+			if kind == "class" {
+				filtered = append(filtered, candidate)
+			}
+		case "variable":
+			if kind != "method" {
+				filtered = append(filtered, candidate)
+			}
+		}
+	}
+	return filtered
 }
 
 func callableTarget(target semantic.Entity, site semantic.Entity) bool {
@@ -270,13 +296,16 @@ func uniqueExportTarget(files []semantic.Entity, name string, idx graphIndexes) 
 
 func resolveGoPackageFiles(module string, idx graphIndexes) []semantic.Entity {
 	module = strings.Trim(module, "\"")
-	if idx.modulePath != "" && !strings.HasPrefix(module, idx.modulePath) {
+	if idx.modulePath != "" && module != idx.modulePath && !strings.HasPrefix(module, idx.modulePath+"/") {
 		return nil
 	}
 	suffix := module
 	if idx.modulePath != "" {
 		suffix = strings.TrimPrefix(module, idx.modulePath)
 		suffix = strings.TrimPrefix(suffix, "/")
+		if suffix == "" {
+			suffix = "."
+		}
 	}
 	var result []semantic.Entity
 	for path, file := range idx.files {
@@ -289,6 +318,33 @@ func resolveGoPackageFiles(module string, idx graphIndexes) []semantic.Entity {
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].File < result[j].File })
 	return result
+}
+
+func referenceTarget(target semantic.Entity, site semantic.Entity) bool {
+	kind, _ := target.Metadata["symbol_kind"].(string)
+	if kind == "method" {
+		return false
+	}
+	bindingFound, hasBinding := site.Metadata["binding_found"].(bool)
+	if !hasBinding || !bindingFound {
+		// Generated facts normally carry binding_found. The fallback keeps
+		// manually constructed legacy facts conservative by rejecting methods
+		// while allowing ordinary indexed declarations.
+		return kind == "function" || kind == "class" || kind == "constant" || kind == "type"
+	}
+	bindingKind, _ := site.Metadata["binding_kind"].(string)
+	switch bindingKind {
+	case "function":
+		return kind == "function"
+	case "class":
+		return kind == "class"
+	case "import":
+		return kind == "function" || kind == "class" || kind == "constant" || kind == "type"
+	case "variable":
+		return kind == "function" || kind == "class" || kind == "constant" || kind == "type"
+	default:
+		return false
+	}
 }
 
 func resolveJSModule(importer, module string, files map[string]semantic.Entity) []semantic.Entity {

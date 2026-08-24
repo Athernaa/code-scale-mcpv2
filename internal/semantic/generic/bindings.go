@@ -74,6 +74,12 @@ func (f *fileFacts) annotateBinding(node *sitter.Node, name string, metadata map
 		return
 	}
 	kind, shadowed := f.bindings.nearest(node, name)
+	if kind == "" {
+		metadata["binding_found"] = false
+		return
+	}
+	metadata["binding_found"] = true
+	metadata["binding_kind"] = kind
 	if !shadowed {
 		return
 	}
@@ -92,11 +98,18 @@ func (f *fileFacts) annotateReceiver(node *sitter.Node, receiver string, metadat
 	if f.bindings == nil {
 		return
 	}
-	if _, shadowed := f.bindings.nearest(node, receiver); shadowed {
+	if kind, shadowed := f.bindings.nearest(node, receiver); kind != "" {
+		metadata["receiver_binding_found"] = true
+		metadata["receiver_binding_kind"] = kind
+		if !shadowed {
+			return
+		}
 		if f.bindings.imports[receiver] {
 			metadata["receiver_import_shadowed"] = true
 		}
 		metadata["receiver_shadowed"] = true
+	} else {
+		metadata["receiver_binding_found"] = false
 	}
 }
 
@@ -113,6 +126,10 @@ func addPatternBindingsFromSource(bindings *lexicalBindings, pattern, scope *sit
 
 func addJavaScriptParameterBindings(bindings *lexicalBindings, parameters, scope *sitter.Node, source []byte) {
 	if parameters == nil || scope == nil {
+		return
+	}
+	if parameters.Type() == "identifier" {
+		bindings.add(nodeText(source, parameters), scope, "parameter")
 		return
 	}
 	for i := 0; i < int(parameters.NamedChildCount()); i++ {
@@ -159,7 +176,7 @@ func isScopeNode(node *sitter.Node, language string) bool {
 	switch language {
 	case "javascript", "typescript", "tsx":
 		switch node.Type() {
-		case "program", "statement_block", "function_declaration", "function_expression", "arrow_function", "class_body", "catch_clause":
+		case "program", "statement_block", "function_declaration", "function_expression", "arrow_function", "class_body", "catch_clause", "method_definition", "method_signature":
 			return true
 		}
 	case "lua":
@@ -198,7 +215,7 @@ func collectJavaScriptBindings(root *sitter.Node, source []byte) *lexicalBinding
 		case "function_declaration":
 			bindings.add(nodeText(source, node.ChildByFieldName("name")), nearestScope(node.Parent(), "javascript"), "function")
 			addJavaScriptParameterBindings(bindings, javascriptParameters(node), node, source)
-		case "function_expression", "arrow_function":
+		case "function_expression", "arrow_function", "method_definition", "method_signature":
 			if node.Type() == "function_expression" {
 				bindings.add(nodeText(source, node.ChildByFieldName("name")), node, "function")
 			}
@@ -206,7 +223,11 @@ func collectJavaScriptBindings(root *sitter.Node, source []byte) *lexicalBinding
 		case "class_declaration":
 			bindings.add(nodeText(source, node.ChildByFieldName("name")), nearestScope(node.Parent(), "javascript"), "class")
 		case "variable_declarator":
-			addPatternBindingsFromSource(bindings, node.ChildByFieldName("name"), nearestScope(node.Parent(), "javascript"), "variable", source)
+			scope := nearestScope(node.Parent(), "javascript")
+			if node.Parent() != nil && node.Parent().Type() == "variable_declaration" {
+				scope = nearestJavaScriptFunctionScope(node.Parent())
+			}
+			addPatternBindingsFromSource(bindings, node.ChildByFieldName("name"), scope, "variable", source)
 		case "catch_clause":
 			addPatternBindingsFromSource(bindings, node.ChildByFieldName("parameter"), node, "catch", source)
 		}
@@ -221,7 +242,20 @@ func javascriptParameters(node *sitter.Node) *sitter.Node {
 	if parameters := node.ChildByFieldName("parameters"); parameters != nil {
 		return parameters
 	}
-	return node.ChildByFieldName("parameter")
+	if parameter := node.ChildByFieldName("parameter"); parameter != nil {
+		return parameter
+	}
+	return nil
+}
+
+func nearestJavaScriptFunctionScope(node *sitter.Node) *sitter.Node {
+	for current := node; current != nil; current = current.Parent() {
+		switch current.Type() {
+		case "program", "function_declaration", "function_expression", "arrow_function":
+			return current
+		}
+	}
+	return nil
 }
 
 func collectLuaBindings(root *sitter.Node, source []byte) *lexicalBindings {
@@ -259,6 +293,7 @@ func collectGoBindings(root *sitter.Node, source []byte) *lexicalBindings {
 			bindings.add(nodeText(source, node.ChildByFieldName("name")), nearestScope(node.Parent(), "go"), "function")
 			addGoParameterBindings(bindings, node.ChildByFieldName("parameters"), node, source)
 		case "method_declaration":
+			addGoParameterBindings(bindings, node.ChildByFieldName("receiver"), node, source)
 			addGoParameterBindings(bindings, node.ChildByFieldName("parameters"), node, source)
 		case "short_var_declaration":
 			addPatternBindingsFromSource(bindings, node.ChildByFieldName("left"), nearestScope(node.Parent(), "go"), "variable", source)
