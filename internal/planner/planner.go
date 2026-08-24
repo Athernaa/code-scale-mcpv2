@@ -238,8 +238,9 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 	acc := make(map[string]*candidateAccumulator)
 	collector := newSeedCollector(request.Repo, work)
 	declarationAnchorsByHint := map[string]map[string]bool{}
-	exactTruncatedByHint := map[string]bool{}
+	declarationTruncatedByHint := map[string]bool{}
 	exactSymbolAnchors := map[string]bool{}
+	strongExactAnchors := map[string]bool{}
 	semanticFamilies := map[string]bool{}
 	matchedHints := map[string]bool{}
 
@@ -275,7 +276,7 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 			declarationAnchorsByHint[hint] = anchors
 		}
 		if len(symbols) > perQuery {
-			exactTruncatedByHint[hint] = true
+			declarationTruncatedByHint[hint] = true
 			result.Truncated = true
 			symbols = symbols[:perQuery]
 		}
@@ -287,8 +288,76 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 			exactSymbolAnchors[anchor] = true
 			matchedHints[hint] = true
 			reason := exactMatchReason(intent, hint)
+			if reason == "exact_symbol_match" {
+				strongExactAnchors[anchor] = true
+			}
 			collector.add(entity, "symbol", reason, 10, true)
 			addSymbolCandidate(acc, request.Repo, symbol, []string{reason}, 0, work)
+		}
+	}
+
+	processedSemanticIDs := map[string]bool{}
+	semanticExactMatches := map[string]int{}
+	currentSemanticHint := ""
+	processSemanticEntity := func(entity semantic.Entity, hint string) {
+		if entity.ID != "" && processedSemanticIDs[entity.ID] {
+			return
+		}
+		if entity.ID != "" {
+			processedSemanticIDs[entity.ID] = true
+		}
+		if entity.Analyzer == semantic.AnalyzerFiveMWorkspace || entity.Kind == framework.KindStatus {
+			return
+		}
+		if fileHint != "" && normalizePath(entity.File) != fileHint {
+			return
+		}
+		role := semanticSeedRole(entity)
+		anchor := entitySourceAnchor(entity)
+		if role == roleDeclaration {
+			anchors := declarationAnchorsByHint[hint]
+			if anchors == nil {
+				anchors = map[string]bool{}
+				declarationAnchorsByHint[hint] = anchors
+			}
+			anchors[anchor] = true
+		}
+		if family := semanticFamilyKey(entity, hint); family != "" {
+			semanticFamilies[family] = true
+		}
+		matchedHints[hint] = true
+		semanticExactMatches[hint]++
+		if role == roleUsage {
+			contextID := contextSymbolID(entity)
+			_, hasExistingContextCandidate := acc["symbol:"+contextID]
+			if (shouldMaterializeUsage(intent, request) || hasExistingContextCandidate) && contextID != "" {
+				addEntityCandidate(acc, entity, []string{"usage_match"}, 1, work)
+			}
+			return
+		}
+		if role == roleTopology || role == roleStatus {
+			return
+		}
+		priority := 20
+		if entity.Kind == framework.KindOperation {
+			priority = 15
+			intent.ExpansionDepth = 2
+		}
+		reason := semanticReason(entity, hint, exactMatchReason(intent, hint) == "exact_symbol_match")
+		if reason == "exact_semantic_match" || reason == "framework_operation_match" {
+			strongExactAnchors[anchor] = true
+		}
+		collector.add(entity, "semantic_entity", reason, priority, true)
+		addEntityCandidate(acc, entity, []string{reason}, 0, work)
+	}
+	consumeSemanticEntities := func(entities []semantic.Entity) {
+		for _, entity := range entities {
+			if work.semanticRows >= work.maxSemanticRows {
+				work.exactExhausted = true
+				return
+			}
+			work.semanticRows++
+			processSemanticEntity(entity, currentSemanticHint)
 		}
 	}
 
@@ -297,6 +366,33 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 			return Plan{}, err
 		}
 		if !work.allowSemanticQuery() || work.semanticRows >= work.maxSemanticRows {
+			work.exactExhausted = true
+			break
+		}
+		currentSemanticHint = hint
+		work.semanticQueries++
+		providerEntities, providerTruncated, searchErr := p.Store.SearchSemanticExactByKinds(repoID, hint, []string{framework.KindAPIProvider}, minInt(DefaultMaxExactAnchors, work.maxSemanticRows-work.semanticRows))
+		if searchErr != nil {
+			return Plan{}, searchErr
+		}
+		providerVisible := fileHint == ""
+		if !providerVisible {
+			for _, entity := range providerEntities {
+				if normalizePath(entity.File) == fileHint {
+					providerVisible = true
+					break
+				}
+			}
+		}
+		if providerTruncated && providerVisible {
+			declarationTruncatedByHint[hint] = true
+			result.Truncated = true
+		}
+		consumeSemanticEntities(providerEntities)
+		if work.semanticRows >= work.maxSemanticRows {
+			break
+		}
+		if !work.allowSemanticQuery() {
 			work.exactExhausted = true
 			break
 		}
@@ -310,65 +406,35 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 		if truncated {
 			result.Truncated = true
 		}
-		anchors := declarationAnchorsByHint[hint]
-		if anchors == nil {
-			anchors = map[string]bool{}
-			declarationAnchorsByHint[hint] = anchors
-		}
-		semanticExactMatches := 0
-		for _, entity := range entities {
-			if work.semanticRows >= work.maxSemanticRows {
+		consumeSemanticEntities(entities)
+		if looksLikeOperation(hint) && work.semanticRows < work.maxSemanticRows {
+			if !work.allowSemanticQuery() {
 				work.exactExhausted = true
 				break
 			}
-			work.semanticRows++
-			if entity.Analyzer == semantic.AnalyzerFiveMWorkspace || entity.Kind == framework.KindStatus {
-				continue
+			work.semanticQueries++
+			operationEntities, operationTruncated, operationErr := p.Store.SearchSemanticOperationExact(repoID, hint, perQuery)
+			if operationErr != nil {
+				return Plan{}, operationErr
 			}
-			if fileHint != "" && normalizePath(entity.File) != fileHint {
-				continue
+			if operationTruncated {
+				result.Truncated = true
 			}
-			role := semanticSeedRole(entity)
-			anchor := entitySourceAnchor(entity)
-			if role == roleDeclaration {
-				anchors[anchor] = true
-			}
-			if family := semanticFamilyKey(entity, hint); family != "" {
-				semanticFamilies[family] = true
-			}
-			matchedHints[hint] = true
-			semanticExactMatches++
-			if role == roleUsage {
-				if contextSymbolID(entity) != "" {
-					addEntityCandidate(acc, entity, []string{"usage_match"}, 1, work)
-				}
-				continue
-			}
-			if role == roleTopology || role == roleStatus {
-				continue
-			}
-			priority := 20
-			if entity.Kind == framework.KindOperation {
-				priority = 15
-				intent.ExpansionDepth = 2
-			}
-			reason := semanticReason(entity, hint, exactMatchReason(intent, hint) == "exact_symbol_match")
-			collector.add(entity, "semantic_entity", reason, priority, true)
-			addEntityCandidate(acc, entity, []string{reason}, 0, work)
+			consumeSemanticEntities(operationEntities)
 		}
-		if truncated && semanticExactMatches >= perQuery && len(anchors) > 0 {
-			exactTruncatedByHint[hint] = true
+		if truncated && semanticExactMatches[hint] >= perQuery {
+			result.Truncated = true
 		}
 	}
 
 	for _, hint := range sortedKeys(declarationAnchorsByHint) {
 		anchors := declarationAnchorsByHint[hint]
 		count := len(anchors)
-		if exactTruncatedByHint[hint] {
+		if declarationTruncatedByHint[hint] {
 			count++
 		}
 		if count > 1 {
-			addAmbiguity(&result, Ambiguity{Kind: "source_anchor", Query: hint, CandidateCount: count, Truncated: exactTruncatedByHint[hint]})
+			addAmbiguity(&result, Ambiguity{Kind: "source_anchor", Query: hint, CandidateCount: count, Truncated: declarationTruncatedByHint[hint]})
 			for anchor := range anchors {
 				collector.markAmbiguous(anchor)
 			}
@@ -432,11 +498,18 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 			break
 		}
 	}
+	strongExact := false
+	for anchor := range strongExactAnchors {
+		if uniqueExactAnchors[anchor] {
+			strongExact = true
+			break
+		}
+	}
 	logicalExactCount := len(uniqueExactAnchors)
 	if logicalExactCount == 0 && len(semanticFamilies) > 0 {
 		logicalExactCount = 1
 	}
-	adjustTaskClass(&intent, logicalExactCount, hasSymbolExact)
+	adjustTaskClass(&intent, logicalExactCount, hasSymbolExact, strongExact)
 	result.TaskClass, result.TaskConfidence = intent.TaskClass, intent.Confidence
 	result.Seeds = collector.sortedSeeds()
 	for _, hint := range intent.Terms {
@@ -1063,6 +1136,13 @@ func semanticReason(entity semantic.Entity, hint string, strong bool) string {
 		return "weak_exact_match"
 	}
 	return "exact_semantic_match"
+}
+
+func shouldMaterializeUsage(intent TaskIntent, request Request) bool {
+	if request.IncludeImpact {
+		return true
+	}
+	return intent.TaskClass == "relationship_trace" || intent.TaskClass == "cross_resource"
 }
 
 func exactMatchReason(intent TaskIntent, hint string) string {

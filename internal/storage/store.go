@@ -1109,10 +1109,28 @@ func (s *IndexStore) SearchSemanticWithResourceTargetFrameworkOptions(repoID int
 	return result, truncated, nil
 }
 
-// SearchSemanticExact returns semantic entities whose name or normalized
-// operation is exactly query. It is intentionally separate from the
-// substring-oriented search surface used by interactive semantic search.
+// SearchSemanticExact returns semantic entities whose name is exactly query.
+// Normalized operation metadata has a separate query path so ordinary exact
+// name lookups can use the existing (repo_id, name) index without forcing a
+// JSON expression into every query.
 func (s *IndexStore) SearchSemanticExact(repoID int64, query string, maxResults int) ([]semantic.Entity, bool, error) {
+	return s.searchSemanticExact(repoID, query, "name", nil, maxResults)
+}
+
+// SearchSemanticOperationExact returns entities whose normalized operation is
+// exactly query. Callers should use this only for operation-shaped hints.
+func (s *IndexStore) SearchSemanticOperationExact(repoID int64, query string, maxResults int) ([]semantic.Entity, bool, error) {
+	return s.searchSemanticExact(repoID, query, "operation", nil, maxResults)
+}
+
+// SearchSemanticExactByKinds returns exact-name semantic entities restricted
+// to the supplied kinds. It is used for declaration-scoped ambiguity checks so
+// mixed usage/flow rows cannot make a declaration subset appear truncated.
+func (s *IndexStore) SearchSemanticExactByKinds(repoID int64, query string, kinds []string, maxResults int) ([]semantic.Entity, bool, error) {
+	return s.searchSemanticExact(repoID, query, "name", kinds, maxResults)
+}
+
+func (s *IndexStore) searchSemanticExact(repoID int64, query, field string, kinds []string, maxResults int) ([]semantic.Entity, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if maxResults <= 0 {
@@ -1122,10 +1140,23 @@ func (s *IndexStore) SearchSemanticExact(repoID int64, query string, maxResults 
 		maxResults = 200
 	}
 	repoName := repoNameLocked(s.db, repoID)
-	rows, err := s.db.Query(`SELECT id, analyzer, file_path, symbol_id, kind, name, framework, side, line, end_line, dynamic, metadata
-		FROM semantic_entities
-		WHERE repo_id = ? AND (name = ? OR json_extract(metadata, '$.operation') = ?)
-		ORDER BY file_path, line, id LIMIT ?`, repoID, query, query, maxResults+1)
+	where := "name = ?"
+	if field == "operation" {
+		where = "json_extract(metadata, '$.operation') = ?"
+	}
+	queryText := `SELECT id, analyzer, file_path, symbol_id, kind, name, framework, side, line, end_line, dynamic, metadata
+		FROM semantic_entities WHERE repo_id = ? AND ` + where
+	args := []any{repoID, query}
+	if len(kinds) > 0 {
+		placeholders := strings.TrimRight(strings.Repeat("?,", len(kinds)), ",")
+		queryText += " AND kind IN (" + placeholders + ")"
+		for _, kind := range kinds {
+			args = append(args, kind)
+		}
+	}
+	queryText += " ORDER BY file_path, line, id LIMIT ?"
+	args = append(args, maxResults+1)
+	rows, err := s.db.Query(queryText, args...)
 	if err != nil {
 		return nil, false, err
 	}

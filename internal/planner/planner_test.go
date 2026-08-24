@@ -274,6 +274,230 @@ func TestPlannerRealGenericAnalyzersTreatUsageAsCallerContext(t *testing.T) {
 	}
 }
 
+func TestPlannerHighVolumeUsageTruncationDoesNotCreateDeclarationAmbiguity(t *testing.T) {
+	store := plannerStore(t, "local", "high-volume-usage")
+	defer store.Close()
+	repo := "local/high-volume-usage"
+	var source strings.Builder
+	source.WriteString("package app\nfunc SaveUser() {}\n")
+	for i := 0; i < 90; i++ {
+		source.WriteString(fmt.Sprintf("func Handler%03d() { SaveUser() }\n", i))
+	}
+	persistGenericSources(t, store, repo, map[string]string{"main.go": source.String()}, map[string]string{"main.go": "go"})
+	result, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "fix SaveUser", Debug: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TaskClass != "localized_change" || len(result.Ambiguities) != 0 || !planContainsName(result, "SaveUser") || result.Debug == nil || result.Debug.SemanticMatchesConsidered == 0 {
+		t.Fatalf("usage truncation became declaration ambiguity: %#v", result)
+	}
+	if candidateCount(result) <= 1 || !result.Truncated {
+		t.Fatalf("bounded caller context was not preserved truthfully: %#v", result)
+	}
+}
+
+func TestPlannerHighVolumeReferenceTruncationDoesNotCreateDeclarationAmbiguity(t *testing.T) {
+	store := plannerStore(t, "local", "high-volume-reference")
+	defer store.Close()
+	repo := "local/high-volume-reference"
+	var source strings.Builder
+	source.WriteString("package app\nfunc SaveUser() {}\nfunc consume(value any) {}\n")
+	for i := 0; i < 90; i++ {
+		source.WriteString(fmt.Sprintf("func Reference%03d() { consume(SaveUser) }\n", i))
+	}
+	persistGenericSources(t, store, repo, map[string]string{"main.go": source.String()}, map[string]string{"main.go": "go"})
+	result, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "fix SaveUser", Debug: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TaskClass != "localized_change" || len(result.Ambiguities) != 0 || !planContainsName(result, "SaveUser") {
+		t.Fatalf("reference truncation became declaration ambiguity: %#v", result)
+	}
+}
+
+func TestPlannerTrueDeclarationTruncationRemainsAmbiguous(t *testing.T) {
+	store := plannerStore(t, "local", "declaration-truncation")
+	defer store.Close()
+	repo := "local/declaration-truncation"
+	symbols := make([]parser.Symbol, 0, DefaultMaxExactAnchors+5)
+	for i := 0; i < DefaultMaxExactAnchors+5; i++ {
+		symbols = append(symbols, plannerSymbol(fmt.Sprintf("file-%03d.go", i), "init", 1))
+	}
+	if err := replacePlannerIndex(store, "local", "declaration-truncation", repo, symbols); err != nil {
+		t.Fatal(err)
+	}
+	result, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "find init"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Ambiguities) == 0 || !result.Ambiguities[0].Truncated || !result.Truncated {
+		t.Fatalf("true declaration truncation was hidden: %#v", result)
+	}
+}
+
+func TestPlannerRealFindAndFixDirectionForGoAndTypeScript(t *testing.T) {
+	tests := []struct {
+		name, language, file, target string
+	}{
+		{name: "go", language: "go", file: "main.go", target: "SaveUser"},
+		{name: "typescript", language: "typescript", file: "main.ts", target: "saveUser"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := plannerStore(t, "local", "direction-"+test.name)
+			defer store.Close()
+			repo := "local/direction-" + test.name
+			var source strings.Builder
+			if test.language == "go" {
+				source.WriteString("package app\nfunc SaveUser() {}\n")
+			} else {
+				source.WriteString("export function saveUser() {}\n")
+			}
+			for i := 0; i < 20; i++ {
+				if test.language == "go" {
+					source.WriteString(fmt.Sprintf("func Handler%02d() { SaveUser() }\n", i))
+				} else {
+					source.WriteString(fmt.Sprintf("function handler%02d() { saveUser() }\n", i))
+				}
+			}
+			symbols := persistGenericSources(t, store, repo, map[string]string{test.file: source.String()}, map[string]string{test.file: test.language})
+			find, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "find " + test.target})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if find.TaskClass != "exact_symbol" || candidateCount(find) != 1 || len(find.Ambiguities) != 0 {
+				t.Fatalf("find task expanded usage context: %#v", find)
+			}
+			fix, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "fix " + test.target})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fix.TaskClass != "localized_change" || candidateCount(fix) <= 1 || len(fix.Ambiguities) != 0 {
+				t.Fatalf("fix task did not expand safe callers: %#v", fix)
+			}
+			if symbol := symbolNamed(symbols, test.target); symbol == nil || !planContainsSymbolReason(fix, symbol.ID, "direct_caller") {
+				t.Fatalf("direct caller evidence missing: %#v", fix)
+			}
+		})
+	}
+}
+
+func TestPlannerWeakAndStrongExactIntent(t *testing.T) {
+	store := plannerStore(t, "local", "intent-strength")
+	defer store.Close()
+	repo := "local/intent-strength"
+	save := plannerSymbol("save.go", "save", 1)
+	if err := replacePlannerIndex(store, "local", "intent-strength", repo, []parser.Symbol{save}); err != nil {
+		t.Fatal(err)
+	}
+	weak, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "save is broken"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if weak.TaskClass == "exact_symbol" && weak.TaskConfidence == "high" {
+		t.Fatalf("plain prose received strong exact intent: %#v", weak)
+	}
+	quoted, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "fix `save`"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if quoted.TaskClass != "localized_change" || len(quoted.Seeds) != 1 || quoted.Seeds[0].Match != "exact_symbol_match" {
+		t.Fatalf("quoted lowercase identifier lost strong evidence: %#v", quoted)
+	}
+	bare, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "SaveUser"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bare.TaskClass != "broad_unknown" || bare.TaskConfidence != "low" {
+		t.Fatalf("nonexistent strong identifier was misclassified: %#v", bare)
+	}
+	fix, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "fix save"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fix.TaskClass != "localized_change" || fix.TaskConfidence != "medium" {
+		t.Fatalf("change intent was downgraded unnecessarily: %#v", fix)
+	}
+}
+
+func TestPlannerFiveMNUICallbackAndCommandRoles(t *testing.T) {
+	store := plannerStore(t, "local", "fivem-flow-roles")
+	defer store.Close()
+	repo := "local/fivem-flow-roles"
+	manifest := "fx_version 'cerulean'\nclient_script 'client.lua'\n"
+	source := "RegisterNUICallback('purchaseItem', function(data, cb) cb({}) end)\nRegisterCommand('admincar', function() end, false)\n"
+	files := map[string]string{"fxmanifest.lua": manifest, "client.lua": source}
+	languages := map[string]string{"fxmanifest.lua": "lua", "client.lua": "lua"}
+	contents := make(map[string][]byte, len(files))
+	symbolsByFile := make(map[string][]parser.Symbol, len(files))
+	var symbols []parser.Symbol
+	hashes := make(map[string]string, len(files))
+	for file, content := range files {
+		contents[file] = []byte(content)
+		hashes[file] = "hash-" + file
+		parsed, parseErr := parser.ParseFile(contents[file], file, "lua")
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		symbolsByFile[file] = parsed
+		symbols = append(symbols, parsed...)
+	}
+	if err := store.ReplaceRepoIndex("local", "fivem-flow-roles", "local", "", hashes, languages, symbols); err != nil {
+		t.Fatal(err)
+	}
+	result, err := fivem.NewAnalyzer().AnalyzeRepository(context.Background(), semantic.RepositoryInput{Repo: repo, Resource: "flow_roles", Files: contents, Languages: languages, Symbols: symbolsByFile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, result); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct{ task, name, kind string }{{"trace purchaseItem", "purchaseItem", fivem.KindNUICallback}, {"find admincar", "admincar", fivem.KindCommandRegistration}} {
+		plan, planErr := New(store).Plan(context.Background(), Request{Repo: repo, Task: test.task})
+		if planErr != nil || candidateCount(plan) == 0 || !planContainsSemanticKind(plan, test.name, test.kind) {
+			t.Fatalf("%s role did not produce a source candidate: %#v %v", test.kind, plan, planErr)
+		}
+	}
+}
+
+func TestPlannerFiveMSemanticFamiliesAreMechanismSpecific(t *testing.T) {
+	store := plannerStore(t, "local", "fivem-family-mechanisms")
+	defer store.Close()
+	repo := "local/fivem-family-mechanisms"
+	first := plannerSymbol("first.lua", "first", 1)
+	second := plannerSymbol("second.lua", "second", 1)
+	third := plannerSymbol("third.lua", "third", 1)
+	if err := replacePlannerIndex(store, "local", "fivem-family-mechanisms", repo, []parser.Symbol{first, second, third}); err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entities := []semantic.Entity{
+		{ID: "event-get-player", Analyzer: semantic.AnalyzerFiveM, Repo: repo, File: first.File, SymbolID: first.ID, Kind: fivem.KindEventHandler, Name: "GetPlayer", Side: "server", Line: 1},
+		{ID: "export-get-player", Analyzer: semantic.AnalyzerFiveM, Repo: repo, File: second.File, SymbolID: second.ID, Kind: fivem.KindExportDefinition, Name: "GetPlayer", Side: "server", Line: 1},
+		{ID: "callback-get-player", Analyzer: semantic.AnalyzerFiveM, Repo: repo, File: third.File, SymbolID: third.ID, Kind: fivem.KindCallbackRegistration, Name: "GetPlayer", Side: "server", Line: 1},
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, semantic.Result{Entities: entities}); err != nil {
+		t.Fatal(err)
+	}
+	if semanticFamilyKey(entities[0], "GetPlayer") == semanticFamilyKey(entities[1], "GetPlayer") || semanticFamilyKey(entities[0], "GetPlayer") == semanticFamilyKey(entities[2], "GetPlayer") || semanticFamilyKey(entities[1], "GetPlayer") == semanticFamilyKey(entities[2], "GetPlayer") {
+		t.Fatal("different FiveM mechanisms were merged into one semantic family")
+	}
+	plan, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "trace GetPlayer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Ambiguities) != 0 || candidateCount(plan) != 3 {
+		t.Fatalf("legitimate flow-family multiplicity was treated as declaration ambiguity: %#v", plan)
+	}
+}
+
 func TestPlannerExactSemanticQueryIgnoresSubstringCollisions(t *testing.T) {
 	store := plannerStore(t, "local", "semantic-exact")
 	defer store.Close()
@@ -702,6 +926,24 @@ func planContainsSymbolReason(plan Plan, symbolID, reason string) bool {
 func planHasReason(plan Plan, reason string) bool {
 	for _, candidate := range append(append(append([]Candidate{}, plan.Primary...), plan.Supporting...), plan.Peripheral...) {
 		if containsString(candidate.ReasonCodes, reason) {
+			return true
+		}
+	}
+	return false
+}
+
+func planContainsName(plan Plan, name string) bool {
+	for _, candidate := range append(append(append([]Candidate{}, plan.Primary...), plan.Supporting...), plan.Peripheral...) {
+		if candidate.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func planContainsSemanticKind(plan Plan, name, kind string) bool {
+	for _, candidate := range append(append(append([]Candidate{}, plan.Primary...), plan.Supporting...), plan.Peripheral...) {
+		if candidate.Name == name && candidate.Kind == kind {
 			return true
 		}
 	}

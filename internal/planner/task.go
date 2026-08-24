@@ -92,7 +92,7 @@ func interpretTask(task string) TaskIntent {
 	return intent
 }
 
-func adjustTaskClass(intent *TaskIntent, exactAnchors int, hasSymbolAnchor bool) {
+func adjustTaskClass(intent *TaskIntent, exactAnchors int, hasSymbolAnchor, strongExact bool) {
 	if intent.BroadIntent {
 		if exactAnchors > 0 {
 			intent.Confidence = "medium"
@@ -107,9 +107,19 @@ func adjustTaskClass(intent *TaskIntent, exactAnchors int, hasSymbolAnchor bool)
 		return
 	}
 	if exactAnchors == 1 && hasSymbolAnchor && intent.TaskClass == "broad_unknown" {
-		intent.TaskClass, intent.Confidence = "exact_symbol", "high"
+		if strongExact {
+			intent.TaskClass, intent.Confidence = "exact_symbol", "high"
+		} else {
+			intent.Confidence = "low"
+		}
 	} else if exactAnchors == 1 && !hasSymbolAnchor && intent.TaskClass == "broad_unknown" {
-		intent.TaskClass, intent.Confidence = "exact_semantic", "high"
+		if strongExact {
+			intent.TaskClass, intent.Confidence = "exact_semantic", "high"
+		} else {
+			intent.Confidence = "low"
+		}
+	} else if exactAnchors == 1 && intent.TaskClass == "exact_symbol" && strongExact {
+		intent.Confidence = "high"
 	} else if exactAnchors > 1 {
 		if intent.TaskClass != "relationship_trace" && intent.TaskClass != "cross_resource" {
 			intent.TaskClass, intent.Confidence = "broad_unknown", "low"

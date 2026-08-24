@@ -33,7 +33,8 @@ func semanticSeedRole(entity semantic.Entity) semanticRole {
 		switch entity.Kind {
 		case fivem.KindEventTrigger, fivem.KindEventHandler, fivem.KindEventRegistration,
 			fivem.KindCallbackCall, fivem.KindCallbackRegistration,
-			fivem.KindExportCall, fivem.KindExportDefinition:
+			fivem.KindExportCall, fivem.KindExportDefinition,
+			fivem.KindNUICallback, fivem.KindCommandRegistration:
 			return roleFlowEndpoint
 		}
 	case semantic.AnalyzerFramework:
@@ -66,8 +67,29 @@ func contextSymbolID(entity semantic.Entity) string {
 
 func semanticFamilyKey(entity semantic.Entity, hint string) string {
 	role := semanticSeedRole(entity)
-	if role != roleFlowEndpoint && role != roleOperation {
+	if role == roleOperation {
+		return string(role) + ":" + entity.Analyzer + ":operation:" + hint
+	}
+	if role != roleFlowEndpoint {
 		return ""
 	}
-	return string(role) + ":" + entity.Analyzer + ":" + hint
+	mechanism := fivemFamilyMechanism(entity)
+	return string(role) + ":" + entity.Analyzer + ":" + mechanism + ":" + hint
+}
+
+func fivemFamilyMechanism(entity semantic.Entity) string {
+	switch entity.Kind {
+	case fivem.KindEventTrigger, fivem.KindEventHandler, fivem.KindEventRegistration:
+		return "event"
+	case fivem.KindCallbackCall, fivem.KindCallbackRegistration:
+		return "callback"
+	case fivem.KindExportCall, fivem.KindExportDefinition:
+		return "export"
+	case fivem.KindNUICallback:
+		return "nui_callback"
+	case fivem.KindCommandRegistration:
+		return "command"
+	default:
+		return "flow"
+	}
 }
