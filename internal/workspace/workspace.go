@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/Athernaa/code-scale-mcpv2/internal/security"
 )
 
 const (
@@ -60,6 +62,17 @@ func DetectMode(root string) (string, error) {
 // Discover conservatively classifies a root and discovers manifest-bearing
 // resource directories. A resources directory alone is not sufficient.
 func Discover(root string) (Discovery, error) {
+	return discover(root, nil)
+}
+
+// DiscoverWithIgnore applies the same repository ignore policy used by source
+// indexing to manifest discovery, preventing a workspace overview from
+// claiming resources whose files were intentionally excluded.
+func DiscoverWithIgnore(root string, ignored func(path string, isDir bool) bool) (Discovery, error) {
+	return discover(root, ignored)
+}
+
+func discover(root string, ignored func(path string, isDir bool) bool) (Discovery, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
 		return Discovery{}, err
@@ -82,9 +95,15 @@ func Discover(root string) (Discovery, error) {
 			return nil
 		}
 		if entry.IsDir() {
+			if path != root && ignored != nil && ignored(path, true) {
+				return filepath.SkipDir
+			}
 			if path != root && shouldSkip(entry.Name()) {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if ignored != nil && ignored(path, false) {
 			return nil
 		}
 		name := strings.ToLower(entry.Name())
@@ -135,13 +154,13 @@ func Discover(root string) (Discovery, error) {
 		if c.Resource == "" {
 			continue
 		}
-		if c.Command == "ensure" || c.Command == "start" {
+		if c.Command == "ensure" || c.Command == "start" || c.Command == "restart" {
 			order++
 			c.Order = order
 		}
 		for _, i := range byName[c.Resource] {
 			switch c.Command {
-			case "ensure", "start":
+			case "ensure", "start", "restart":
 				d.Resources[i].EnabledState = "enabled"
 				if d.Resources[i].StartOrder == 0 {
 					d.Resources[i].StartOrder = order
@@ -168,8 +187,10 @@ func loadConfigs(root string) ([]ConfigFile, []ConfigCommand) {
 	visited := map[string]bool{}
 	var visit func(string)
 	visit = func(path string) {
-		abs, _ := filepath.Abs(path)
-		abs = filepath.Clean(abs)
+		abs, ok := safeConfigPath(root, path)
+		if !ok {
+			return
+		}
 		if visited[abs] {
 			return
 		}
@@ -197,7 +218,7 @@ func loadConfigs(root string) ([]ConfigFile, []ConfigCommand) {
 			arg := strings.Trim(fields[1], "\"'")
 			if cmd == "exec" {
 				if !strings.ContainsAny(arg, "$%{") {
-					visit(filepath.Join(filepath.Dir(abs), arg))
+					visit(filepath.Join(filepath.Dir(abs), filepath.FromSlash(arg)))
 				}
 				continue
 			}
@@ -212,6 +233,40 @@ func loadConfigs(root string) ([]ConfigFile, []ConfigCommand) {
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	return files, commands
+}
+
+// safeConfigPath keeps static exec processing inside the indexed workspace.
+// It validates both lexical containment and the resolved target so a cfg file
+// cannot escape through traversal or a symlink.
+func safeConfigPath(root, path string) (string, bool) {
+	abs, err := filepath.Abs(path)
+	if err != nil || !security.ValidatePath(root, abs) || security.IsSymlinkEscape(root, abs) {
+		return "", false
+	}
+	for current := filepath.Clean(abs); security.ValidatePath(root, current); current = filepath.Dir(current) {
+		if security.IsSymlinkEscape(root, current) {
+			return "", false
+		}
+		if filepath.Clean(current) == filepath.Clean(root) {
+			break
+		}
+	}
+	abs = filepath.Clean(abs)
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		// Some Windows filesystem providers do not resolve an otherwise
+		// ordinary file through EvalSymlinks. The lexical boundary and the
+		// leaf symlink check above still apply; retain the canonical absolute
+		// path when the file itself exists.
+		if _, statErr := os.Stat(abs); statErr != nil {
+			return "", false
+		}
+		resolved = abs
+	}
+	if !security.ValidatePath(root, resolved) {
+		return "", false
+	}
+	return filepath.Clean(resolved), true
 }
 
 func RelativeFile(root, path string) (string, bool) {

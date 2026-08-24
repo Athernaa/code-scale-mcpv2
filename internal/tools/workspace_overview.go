@@ -46,7 +46,7 @@ func WorkspaceOverviewHandler(deps *Deps) func(context.Context, *mcp.CallToolReq
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
 		}
-		result := map[string]any{"repo": args.Repo, "mode": w.Kind, "root": w.RootPath, "resource_count": len(resources), "config_files": len(configs)}
+		result := map[string]any{"repo": args.Repo, "mode": w.Kind, "root": w.RootPath, "resource_count": len(resources), "config_files": len(configs), "files_discovered_total": w.FilesDiscoveredTotal, "files_indexed": w.FilesIndexed, "index_truncated": w.IndexTruncated, "index_complete": !w.Incomplete, "incomplete": w.Incomplete, "resources_with_semantics": w.ResourcesWithSemantics, "resources_without_semantics": w.ResourcesWithoutSemantics}
 		result["relationship_count"] = len(relationships)
 		nameCounts := map[string]int{}
 		for _, resource := range resources {

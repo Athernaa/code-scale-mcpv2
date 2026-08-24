@@ -17,13 +17,22 @@ import (
 type Result struct {
 	Discovery                                     workspace.Discovery
 	FiveMCount, WorkspaceCount, RelationshipCount int
+	FilesIndexed                                  int
+	ResourcesWithSemantics                        int
+	ResourcesWithoutSemantics                     int
 }
 
 // Index builds per-resource FiveM facts and workspace-level cross-resource
 // facts without reparsing source. The caller supplies already indexed files
 // and parser symbols.
-func Index(ctx context.Context, store *storage.IndexStore, repoID int64, repo, root string, files map[string][]byte, languages map[string]string, symbols map[string][]parser.Symbol) (Result, error) {
-	d, err := workspace.Discover(root)
+func Index(ctx context.Context, store *storage.IndexStore, repoID int64, repo, root string, files map[string][]byte, languages map[string]string, symbols map[string][]parser.Symbol, discoveries ...workspace.Discovery) (Result, error) {
+	var d workspace.Discovery
+	var err error
+	if len(discoveries) > 0 {
+		d = discoveries[0]
+	} else {
+		d, err = workspace.Discover(root)
+	}
 	if err != nil {
 		return Result{}, err
 	}
@@ -32,6 +41,7 @@ func Index(ctx context.Context, store *storage.IndexStore, repoID int64, repo, r
 	}
 	combined := semantic.Result{}
 	manifestByResource := map[string]semantic.Entity{}
+	resourcesWithSemantics := 0
 	for _, r := range d.Resources {
 		localFiles := map[string][]byte{}
 		localLang := map[string]string{}
@@ -44,13 +54,13 @@ func Index(ctx context.Context, store *storage.IndexStore, repoID int64, repo, r
 				localSymbols[local] = symbols[path]
 			}
 		}
-		input := semantic.RepositoryInput{Repo: repo, Resource: r.Name, SourceType: "local", Files: localFiles, Languages: localLang, Symbols: localSymbols}
-		result, e := fivem.NewAnalyzer().AnalyzeRepository(ctx, input)
+		result, e := analyzeResource(ctx, repo, r, localFiles, localLang, localSymbols)
 		if e != nil {
 			_ = store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, semantic.Result{})
 			_ = store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveMWorkspace, semantic.Result{})
 			return Result{}, fmt.Errorf("resource %s: %w", r.Name, e)
 		}
+		resourcesWithSemantics++
 		idMap := map[string]string{}
 		for _, entity := range result.Entities {
 			old := entity.ID
@@ -60,15 +70,23 @@ func Index(ctx context.Context, store *storage.IndexStore, repoID int64, repo, r
 				entity.Metadata = map[string]any{}
 			}
 			entity.Metadata["source_resource"] = r.Name
-			if entity.Kind != fivem.KindExportCall || entity.Metadata["resource"] == nil {
-				entity.Metadata["resource"] = r.Name
+			entity.Metadata["source_resource_path"] = r.RelativePath
+			entity.Metadata["source_resource_id"] = semantic.StableID("workspace_resource", repo, r.RelativePath)
+			// `resource` is the owning resource in indexed workspace facts. Keep
+			// export targets separate so resource-scoped search and trace output
+			// cannot attribute a call to its callee's resource.
+			if entity.Kind == fivem.KindExportCall {
+				if target, ok := entity.Metadata["resource"].(string); ok && target != "" {
+					entity.Metadata["target_resource"] = target
+				}
 			}
+			entity.Metadata["resource"] = r.Name
 			entity.Metadata["resource_path"] = r.RelativePath
 			entity.ID = semantic.StableID("fivem", repo, r.RelativePath, entity.Kind, entity.Name, fmt.Sprint(entity.Line), fmt.Sprint(entity.EndLine), entity.Side)
 			idMap[old] = entity.ID
 			combined.Entities = append(combined.Entities, entity)
 			if entity.Kind == fivem.KindManifestResource {
-				manifestByResource[r.Name] = entity
+				manifestByResource[r.RelativePath] = entity
 			}
 		}
 		for _, rel := range result.Relationships {
@@ -98,10 +116,118 @@ func Index(ctx context.Context, store *storage.IndexStore, repoID int64, repo, r
 	for _, c := range d.ConfigFiles {
 		configs = append(configs, storage.WorkspaceConfigInfo{Path: c.Path, ContentHash: workspace.ContentHash(c.Content)})
 	}
-	if err := store.ReplaceWorkspaceState(repoID, root, d.Mode, resources, configs); err != nil {
+	if err := store.ReplaceWorkspaceState(repoID, root, d.Mode, resources, configs, storage.WorkspaceCompleteness{FilesDiscoveredTotal: len(files), FilesIndexed: len(files), ResourcesWithSemantics: resourcesWithSemantics, ResourcesWithoutSemantics: len(d.Resources) - resourcesWithSemantics}); err != nil {
 		return Result{}, err
 	}
-	return Result{Discovery: d, FiveMCount: len(combined.Entities), WorkspaceCount: len(workspaceResult.Entities), RelationshipCount: len(workspaceResult.Relationships)}, nil
+	return Result{Discovery: d, FiveMCount: len(combined.Entities), WorkspaceCount: len(workspaceResult.Entities), RelationshipCount: len(workspaceResult.Relationships), FilesIndexed: len(files), ResourcesWithSemantics: resourcesWithSemantics, ResourcesWithoutSemantics: len(d.Resources) - resourcesWithSemantics}, nil
+}
+
+func analyzeResource(ctx context.Context, repo string, r workspace.Resource, files map[string][]byte, languages map[string]string, symbols map[string][]parser.Symbol) (semantic.Result, error) {
+	return fivem.NewAnalyzer().AnalyzeRepository(ctx, semantic.RepositoryInput{Repo: repo, Resource: r.Name, SourceType: "local", Files: files, Languages: languages, Symbols: symbols})
+}
+
+func normalizeResourceResult(repo string, r workspace.Resource, result semantic.Result) semantic.Result {
+	normalized := semantic.Result{}
+	idMap := map[string]string{}
+	for _, entity := range result.Entities {
+		oldID := entity.ID
+		entity.File = joinPath(r.RelativePath, entity.File)
+		entity.Analyzer = semantic.AnalyzerFiveM
+		if entity.Metadata == nil {
+			entity.Metadata = map[string]any{}
+		}
+		entity.Metadata["source_resource"] = r.Name
+		entity.Metadata["source_resource_path"] = r.RelativePath
+		entity.Metadata["source_resource_id"] = semantic.StableID("workspace_resource", repo, r.RelativePath)
+		if entity.Kind == fivem.KindExportCall {
+			if target, ok := entity.Metadata["resource"].(string); ok && target != "" {
+				entity.Metadata["target_resource"] = target
+			}
+		}
+		entity.Metadata["resource"] = r.Name
+		entity.Metadata["resource_path"] = r.RelativePath
+		entity.ID = semantic.StableID("fivem", repo, r.RelativePath, entity.Kind, entity.Name, fmt.Sprint(entity.Line), fmt.Sprint(entity.EndLine), entity.Side)
+		idMap[oldID] = entity.ID
+		normalized.Entities = append(normalized.Entities, entity)
+	}
+	for _, relationship := range result.Relationships {
+		relationship.Analyzer = semantic.AnalyzerFiveM
+		relationship.FromEntityID = idMap[relationship.FromEntityID]
+		relationship.ToEntityID = idMap[relationship.ToEntityID]
+		relationship.ID = semantic.StableID("relationship", relationship.FromEntityID, relationship.ToEntityID, relationship.Kind)
+		relationship.File = joinPath(r.RelativePath, relationship.File)
+		normalized.Relationships = append(normalized.Relationships, relationship)
+	}
+	return normalized
+}
+
+// RefreshResource reparses only the changed resource's indexed files. It then
+// resolves workspace edges from persisted compact facts without re-running
+// the FiveM analyzer for unrelated resources.
+func RefreshResource(ctx context.Context, store *storage.IndexStore, repoID int64, repo, root, resourcePath string, files map[string][]byte, languages map[string]string, symbols map[string][]parser.Symbol, discoveries ...workspace.Discovery) (Result, error) {
+	var d workspace.Discovery
+	var err error
+	if len(discoveries) > 0 {
+		d = discoveries[0]
+	} else {
+		d, err = workspace.Discover(root)
+	}
+	if err != nil {
+		return Result{}, err
+	}
+	var resource workspace.Resource
+	found := false
+	for _, candidate := range d.Resources {
+		if workspace.NormalizePath(candidate.RelativePath) == workspace.NormalizePath(resourcePath) {
+			resource, found = candidate, true
+			break
+		}
+	}
+	if !found {
+		if err := store.ReplaceSemanticResourceForAnalyzer(repoID, semantic.AnalyzerFiveM, resourcePath, semantic.Result{}); err != nil {
+			return Result{}, err
+		}
+		return rebuildWorkspaceFacts(store, repoID, repo, d)
+	}
+	localFiles := map[string][]byte{}
+	localLanguages := map[string]string{}
+	localSymbols := map[string][]parser.Symbol{}
+	for path, data := range files {
+		if path == resource.RelativePath || strings.HasPrefix(path, resource.RelativePath+"/") {
+			local := strings.TrimPrefix(path, resource.RelativePath+"/")
+			localFiles[local] = data
+			localLanguages[local] = languages[path]
+			localSymbols[local] = symbols[path]
+		}
+	}
+	result, err := analyzeResource(ctx, repo, resource, localFiles, localLanguages, localSymbols)
+	if err != nil {
+		_ = store.ReplaceSemanticResourceForAnalyzer(repoID, semantic.AnalyzerFiveM, resource.RelativePath, semantic.Result{})
+		return Result{}, err
+	}
+	normalized := normalizeResourceResult(repo, resource, result)
+	if err := store.ReplaceSemanticResourceForAnalyzer(repoID, semantic.AnalyzerFiveM, resource.RelativePath, normalized); err != nil {
+		return Result{}, err
+	}
+	return rebuildWorkspaceFacts(store, repoID, repo, d)
+}
+
+func rebuildWorkspaceFacts(store *storage.IndexStore, repoID int64, repo string, d workspace.Discovery) (Result, error) {
+	entities, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM)
+	if err != nil {
+		return Result{}, err
+	}
+	manifests := map[string]semantic.Entity{}
+	for _, entity := range entities {
+		if entity.Kind == fivem.KindManifestResource {
+			manifests[sourceResourcePath(entity)] = entity
+		}
+	}
+	workspaceEntities, workspaceRelationships := resolveWorkspace(repo, d, entities, manifests)
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveMWorkspace, semantic.Result{Entities: workspaceEntities, Relationships: workspaceRelationships}); err != nil {
+		return Result{}, err
+	}
+	return Result{Discovery: d, FiveMCount: len(entities), WorkspaceCount: len(workspaceEntities), RelationshipCount: len(workspaceRelationships)}, nil
 }
 
 func joinPath(a, b string) string {
@@ -116,8 +242,8 @@ func resolveWorkspace(repo string, d workspace.Discovery, entities []semantic.En
 	rels := []semantic.Relationship{}
 	resourceByName := map[string][]semantic.Entity{}
 	for _, r := range d.Resources {
-		e := semantic.Entity{Analyzer: semantic.AnalyzerFiveMWorkspace, Repo: repo, File: r.ManifestPath, Kind: "workspace_resource", Name: r.Name, Side: "shared", Line: 1, Metadata: map[string]any{"resource": r.Name, "path": r.RelativePath, "enabled": r.EnabledState, "start_order": r.StartOrder}}
-		e.ID = semantic.StableID("workspace_resource", repo, r.RelativePath)
+		resourceID := semantic.StableID("workspace_resource", repo, r.RelativePath)
+		e := semantic.Entity{ID: resourceID, Analyzer: semantic.AnalyzerFiveMWorkspace, Repo: repo, File: r.ManifestPath, Kind: "workspace_resource", Name: r.Name, Side: "shared", Line: 1, Metadata: map[string]any{"resource": r.Name, "resource_id": resourceID, "path": r.RelativePath, "enabled": r.EnabledState, "start_order": r.StartOrder}}
 		result = append(result, e)
 		resourceByName[r.Name] = append(resourceByName[r.Name], e)
 	}
@@ -144,7 +270,7 @@ func resolveWorkspace(repo string, d workspace.Discovery, entities []semantic.En
 		if e.Kind != fivem.KindManifestDependency {
 			continue
 		}
-		r := sourceOf(e)
+		r := sourceResourcePath(e)
 		targets := resourceByName[e.Name]
 		if len(targets) == 1 {
 			if from, ok := manifests[r]; ok {
@@ -152,31 +278,52 @@ func resolveWorkspace(repo string, d workspace.Discovery, entities []semantic.En
 			}
 		}
 	}
+	registrations := map[string][]semantic.Entity{}
+	handlersByName := map[string][]semantic.Entity{}
+	exports := map[string][]semantic.Entity{}
+	callbacksByName := map[string][]semantic.Entity{}
+	for _, entity := range entities {
+		owner := sourceResourcePath(entity)
+		switch entity.Kind {
+		case fivem.KindEventRegistration:
+			registrations[owner+"\x00"+entity.Name] = append(registrations[owner+"\x00"+entity.Name], entity)
+		case fivem.KindEventHandler:
+			handlersByName[entity.Name] = append(handlersByName[entity.Name], entity)
+		case fivem.KindExportDefinition:
+			exports[owner+"\x00"+entity.Name] = append(exports[owner+"\x00"+entity.Name], entity)
+		case fivem.KindCallbackRegistration:
+			callbacksByName[entity.Name] = append(callbacksByName[entity.Name], entity)
+		}
+	}
 	for _, from := range entities {
 		if from.Dynamic {
 			continue
 		}
-		r := sourceOf(from)
+		r := sourceResourcePath(from)
 		switch from.Kind {
 		case fivem.KindEventTrigger:
 			targetSide := networkTarget(from)
 			if targetSide == "" {
 				continue
 			}
-			for _, to := range entities {
-				if to.Kind != fivem.KindEventHandler || to.Name != from.Name || to.Dynamic {
+			for _, to := range handlersByName[from.Name] {
+				tr := sourceResourcePath(to)
+				if tr == r || to.Dynamic || !sideOK(targetSide, to.Side) {
 					continue
 				}
-				tr := sourceOf(to)
-				if tr == r || !sideOK(targetSide, to.Side) {
-					continue
+				valid := false
+				for _, registration := range registrations[tr+"\x00"+to.Name] {
+					if !registration.Dynamic && sideOK(targetSide, registration.Side) {
+						valid = true
+						break
+					}
 				}
-				if hasRegistration(entities, to.Name, tr, targetSide) {
+				if valid {
 					rels = append(rels, workspaceRel(from, to, "cross_resource_event", from.Name))
 				}
 			}
 		case fivem.KindExportCall:
-			target, _ := from.Metadata["resource"].(string)
+			target, _ := from.Metadata["target_resource"].(string)
 			if target == "" {
 				continue
 			}
@@ -184,15 +331,14 @@ func resolveWorkspace(repo string, d workspace.Discovery, entities []semantic.En
 			if len(ts) != 1 {
 				continue
 			}
-			for _, to := range entities {
-				if to.Kind == fivem.KindExportDefinition && to.Name == from.Name && resourceOf(to) == target {
+			for _, targetResource := range ts {
+				for _, to := range exports[sourceResourcePathForWorkspaceEntity(targetResource)+"\x00"+from.Name] {
 					rels = append(rels, workspaceRel(from, to, "cross_resource_export", from.Name))
 				}
 			}
 		case fivem.KindCallbackCall:
-			for _, to := range entities {
-				tr := resourceOf(to)
-				if to.Kind == fivem.KindCallbackRegistration && to.Name == from.Name && tr != r && callbackOK(from.Side, to.Side) {
+			for _, to := range callbacksByName[from.Name] {
+				if sourceResourcePath(to) != r && callbackOK(from.Side, to.Side) {
 					rels = append(rels, workspaceRel(from, to, "cross_resource_callback", from.Name))
 				}
 			}
@@ -209,6 +355,25 @@ func sourceOf(e semantic.Entity) string {
 	}
 	return resourceOf(e)
 }
+func sourceResourcePath(e semantic.Entity) string {
+	if e.Metadata != nil {
+		if path, ok := e.Metadata["source_resource_path"].(string); ok && path != "" {
+			return workspace.NormalizePath(path)
+		}
+		if path, ok := e.Metadata["resource_path"].(string); ok && path != "" {
+			return workspace.NormalizePath(path)
+		}
+	}
+	return sourceOf(e)
+}
+func sourceResourcePathForWorkspaceEntity(e semantic.Entity) string {
+	if e.Metadata != nil {
+		if path, ok := e.Metadata["path"].(string); ok && path != "" {
+			return workspace.NormalizePath(path)
+		}
+	}
+	return sourceResourcePath(e)
+}
 func networkTarget(e semantic.Entity) string {
 	op, _ := e.Metadata["operation"].(string)
 	switch op {
@@ -220,14 +385,6 @@ func networkTarget(e semantic.Entity) string {
 	return ""
 }
 func sideOK(want, got string) bool { return got == want || got == "shared" }
-func hasRegistration(es []semantic.Entity, name, res, side string) bool {
-	for _, e := range es {
-		if e.Kind == fivem.KindEventRegistration && e.Name == name && resourceOf(e) == res && (e.Side == side || e.Side == "shared") {
-			return true
-		}
-	}
-	return false
-}
 func callbackOK(call, reg string) bool {
 	return (call == "client" && (reg == "server" || reg == "shared")) || (call == "server" && (reg == "client" || reg == "shared"))
 }

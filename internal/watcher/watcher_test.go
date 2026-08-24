@@ -14,6 +14,7 @@ import (
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/fivem"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/generic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
+	"github.com/Athernaa/code-scale-mcpv2/internal/workspace"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -411,5 +412,182 @@ func TestWatcherGenericGraphRefreshesRenamedImportTarget(t *testing.T) {
 	}
 	if !foundBar {
 		t.Fatal("updated import/call relationship was not indexed")
+	}
+}
+
+func TestWatcherIndexesPopulatedResourceDirectory(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "server-data")
+	resourceDir := filepath.Join(root, "resources", "[app]", "new_resource")
+	for rel, content := range map[string]string{
+		"server.cfg": "ensure new_resource\n",
+		"resources/[app]/new_resource/fxmanifest.lua": "fx_version 'cerulean'\nserver_script 'server.lua'\n",
+		"resources/[app]/new_resource/server.lua":     "RegisterNetEvent('populated:event')\n",
+	} {
+		full := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := storage.NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	id, err := repository.Local(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceRepoIndex(id.Owner, id.Name, "local", "", map[string]string{}, map[string]string{}, nil, id.CanonicalPath); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewManager(store)
+	mgr.reindexFiles(&FolderWatch{Path: id.CanonicalPath, Repo: id.Repo, stop: make(chan struct{})}, discoverSupportedFiles(root, resourceDir))
+	repoID, err := store.GetRepoID(id.Repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := store.GetFiles(repoID)
+	if err != nil || len(files) != 2 {
+		t.Fatalf("populated resource files were not indexed: files=%#v err=%v", files, err)
+	}
+	entities, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entities) == 0 {
+		t.Fatal("populated resource did not produce FiveM facts")
+	}
+}
+
+func TestWatcherWorkspaceManifestLifecycleAndCfgRefresh(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "server-data")
+	resourceDir := filepath.Join(root, "resources", "app", "resource_x")
+	if err := os.MkdirAll(resourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "server.cfg"), []byte("ensure resource_x\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sourcePath := filepath.Join(resourceDir, "client.lua")
+	if err := os.WriteFile(sourcePath, []byte("TriggerServerEvent('lifecycle:event')\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	id, err := repository.Local(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceRepoIndex(id.Owner, id.Name, "local", "", map[string]string{}, map[string]string{}, nil, id.CanonicalPath); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewManager(store)
+	watch := &FolderWatch{Path: id.CanonicalPath, Repo: id.Repo, stop: make(chan struct{})}
+	mgr.reindexFiles(watch, []string{sourcePath})
+	manifestPath := filepath.Join(resourceDir, "fxmanifest.lua")
+	if err := os.WriteFile(manifestPath, []byte("fx_version 'cerulean'\nclient_script 'client.lua'\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mgr.reindexFiles(watch, []string{manifestPath})
+	repoID, err := store.GetRepoID(id.Repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fiveM, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM)
+	if err != nil || len(fiveM) == 0 {
+		t.Fatalf("manifest addition did not activate resource semantics: %#v err=%v", fiveM, err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "server.cfg"), []byte("# ensure resource_x\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mgr.reindexFiles(watch, []string{filepath.Join(root, "server.cfg")})
+	resources, err := store.GetWorkspaceResources(repoID)
+	if err != nil || len(resources) != 1 || resources[0].EnabledState != "unknown" {
+		t.Fatalf("cfg refresh did not update enabled state: %#v err=%v", resources, err)
+	}
+	if err := os.Remove(manifestPath); err != nil {
+		t.Fatal(err)
+	}
+	mgr.reindexFiles(watch, []string{manifestPath})
+	fiveM, err = store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM)
+	if err != nil || len(fiveM) != 0 {
+		t.Fatalf("manifest removal left FiveM facts: %#v err=%v", fiveM, err)
+	}
+	if mode, _ := workspace.DetectMode(root); mode != workspace.KindFiveMWorkspace {
+		t.Fatalf("workspace mode should remain based on server.cfg: %q", mode)
+	}
+}
+
+func TestWatcherWorkspaceSourceEditPreservesUnrelatedResourceFacts(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "server-data")
+	resources := map[string]string{"resource_a": "a:event", "resource_b": "b:event"}
+	for name, event := range resources {
+		dir := filepath.Join(root, "resources", "group", name)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "fxmanifest.lua"), []byte("fx_version 'cerulean'\nserver_script 'server.lua'\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "server.lua"), []byte("RegisterNetEvent('"+event+"')\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "server.cfg"), []byte("ensure resource_a\nensure resource_b\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	id, err := repository.Local(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceRepoIndex(id.Owner, id.Name, "local", "", map[string]string{}, map[string]string{}, nil, id.CanonicalPath); err != nil {
+		t.Fatal(err)
+	}
+	watch := &FolderWatch{Path: id.CanonicalPath, Repo: id.Repo, stop: make(chan struct{})}
+	var initial []string
+	for name := range resources {
+		initial = append(initial, discoverSupportedFiles(root, filepath.Join(root, "resources", "group", name))...)
+	}
+	mgr := NewManager(store)
+	mgr.reindexFiles(watch, initial)
+	repoID, err := store.GetRepoID(id.Repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedPath := filepath.Join(root, "resources", "group", "resource_b", "server.lua")
+	if err := os.WriteFile(updatedPath, []byte("RegisterNetEvent('b:updated')\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mgr.reindexFiles(watch, []string{updatedPath})
+	entities, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var oldA, newB, oldB bool
+	for _, entity := range entities {
+		sourcePath, _ := entity.Metadata["source_resource_path"].(string)
+		if sourcePath == "resources/group/resource_a" && entity.Name == "a:event" {
+			oldA = true
+		}
+		if sourcePath == "resources/group/resource_b" && entity.Name == "b:updated" {
+			newB = true
+		}
+		if sourcePath == "resources/group/resource_b" && entity.Name == "b:event" {
+			oldB = true
+		}
+	}
+	if !oldA || !newB || oldB {
+		t.Fatalf("resource-scoped refresh was incorrect: oldA=%v newB=%v oldB=%v entities=%#v", oldA, newB, oldB, entities)
 	}
 }

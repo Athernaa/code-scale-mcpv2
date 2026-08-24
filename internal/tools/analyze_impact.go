@@ -74,8 +74,12 @@ func AnalyzeImpactHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest
 			}
 			item := impactItem{SymbolID: edge.From.SymbolID, EntityID: edge.From.ID, Relationship: edge.Kind, File: edge.From.File, Line: edge.From.Line, Depth: edge.Depth}
 			files[edge.From.File] = struct{}{}
-			if _, resource := semanticMetadata(edge.From); resource != "" {
-				resources[resource] = struct{}{}
+			_, resource, sourceResource, _, _, _ := semanticMetadata(edge.From)
+			if sourceResource == "" {
+				sourceResource = resource
+			}
+			if sourceResource != "" {
+				resources[sourceResource] = struct{}{}
 			}
 			if edge.Depth == 1 {
 				direct = append(direct, item)

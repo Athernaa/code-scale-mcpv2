@@ -172,6 +172,27 @@ func (s *IndexStore) migrate() error {
 			return fmt.Errorf("migrate v8: %w", err)
 		}
 	}
+	if currentVersion < 9 {
+		columns := map[string]string{
+			"files_discovered_total":      "INTEGER NOT NULL DEFAULT 0",
+			"files_indexed":               "INTEGER NOT NULL DEFAULT 0",
+			"index_truncated":             "INTEGER NOT NULL DEFAULT 0",
+			"incomplete":                  "INTEGER NOT NULL DEFAULT 0",
+			"resources_with_semantics":    "INTEGER NOT NULL DEFAULT 0",
+			"resources_without_semantics": "INTEGER NOT NULL DEFAULT 0",
+		}
+		for column, definition := range columns {
+			present, err := tableHasColumn(s.db, "workspaces", column)
+			if err != nil {
+				return fmt.Errorf("inspect v9 %s: %w", column, err)
+			}
+			if !present {
+				if _, err := s.db.Exec("ALTER TABLE workspaces ADD COLUMN " + column + " " + definition); err != nil {
+					return fmt.Errorf("migrate v9 %s: %w", column, err)
+				}
+			}
+		}
+	}
 
 	// Upsert schema version
 	_, err = s.db.Exec("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", CurrentSchemaVersion)
@@ -763,6 +784,33 @@ func (s *IndexStore) ReplaceSemanticFileForAnalyzer(repoID int64, analyzer, file
 	return tx.Commit()
 }
 
+// ReplaceSemanticResourceForAnalyzer replaces facts owned by one resource
+// path. It is intentionally narrower than repository replacement so a normal
+// workspace source edit cannot erase unrelated resources or analyzers.
+func (s *IndexStore) ReplaceSemanticResourceForAnalyzer(repoID int64, analyzer, resourcePath string, result semantic.Result) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	selector := `repo_id = ? AND analyzer = ? AND json_extract(metadata, '$.source_resource_path') = ?`
+	if _, err := tx.Exec(`DELETE FROM semantic_relationships WHERE repo_id=? AND analyzer=? AND (from_entity_id IN (SELECT id FROM semantic_entities WHERE `+selector+`) OR to_entity_id IN (SELECT id FROM semantic_entities WHERE `+selector+`))`, repoID, analyzer, repoID, analyzer, resourcePath, repoID, analyzer, resourcePath); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM semantic_entities WHERE `+selector, repoID, analyzer, resourcePath); err != nil {
+		return err
+	}
+	if err := insertSemanticEntitiesTx(tx, repoID, analyzer, result.Entities); err != nil {
+		return err
+	}
+	if err := insertSemanticRelationshipsTx(tx, repoID, analyzer, result.Relationships); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // ReplaceSemanticRelationships replaces only relationship edges, preserving
 // all entity records. It is used after an incremental file semantic update.
 func (s *IndexStore) ReplaceSemanticRelationships(repoID int64, relationships []semantic.Relationship) error {
@@ -896,10 +944,14 @@ func (s *IndexStore) SearchSemantic(repoID int64, query, kind, side string, maxR
 }
 
 func (s *IndexStore) SearchSemanticWithOptions(repoID int64, query, kind, side, analyzer string, includeInternal bool, maxResults int) ([]semantic.Entity, bool, error) {
-	return s.SearchSemanticWithResourceOptions(repoID, query, kind, side, analyzer, "", includeInternal, maxResults)
+	return s.SearchSemanticWithResourceTargetOptions(repoID, query, kind, side, analyzer, "", "", includeInternal, maxResults)
 }
 
 func (s *IndexStore) SearchSemanticWithResourceOptions(repoID int64, query, kind, side, analyzer, resource string, includeInternal bool, maxResults int) ([]semantic.Entity, bool, error) {
+	return s.SearchSemanticWithResourceTargetOptions(repoID, query, kind, side, analyzer, resource, "", includeInternal, maxResults)
+}
+
+func (s *IndexStore) SearchSemanticWithResourceTargetOptions(repoID int64, query, kind, side, analyzer, resource, targetResource string, includeInternal bool, maxResults int) ([]semantic.Entity, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if maxResults <= 0 {
@@ -934,6 +986,10 @@ func (s *IndexStore) SearchSemanticWithResourceOptions(repoID int64, query, kind
 	if resource != "" {
 		queryText += " AND json_extract(metadata, '$.resource') = ?"
 		args = append(args, resource)
+	}
+	if targetResource != "" {
+		queryText += " AND json_extract(metadata, '$.target_resource') = ?"
+		args = append(args, targetResource)
 	}
 	queryText += " ORDER BY file_path, line, id LIMIT ?"
 	args = append(args, maxResults+1)

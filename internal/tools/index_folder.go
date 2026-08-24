@@ -17,6 +17,7 @@ import (
 	"github.com/Athernaa/code-scale-mcpv2/internal/repository"
 	"github.com/Athernaa/code-scale-mcpv2/internal/security"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
+	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 	"github.com/Athernaa/code-scale-mcpv2/internal/summarizer"
 	"github.com/Athernaa/code-scale-mcpv2/internal/workspace"
 	workspaceindex "github.com/Athernaa/code-scale-mcpv2/internal/workspace/indexer"
@@ -77,6 +78,14 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 			r, _ := errorResult("derive resource name: " + err.Error())
 			return r, nil, nil
 		}
+		detectedMode, detectErr := workspace.DetectMode(absPath)
+		if detectErr != nil {
+			detectedMode = workspace.KindGeneric
+		}
+		workspaceDiscovery, workspaceDiscoveryErr := workspace.DiscoverWithIgnore(absPath, ignoreMatcher.Ignored)
+		if workspaceDiscoveryErr == nil && workspaceDiscovery.Mode == workspace.KindFiveMWorkspace {
+			detectedMode = workspace.KindFiveMWorkspace
+		}
 
 		// Discover files
 		var sourceFiles []string
@@ -126,9 +135,15 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 			return nil
 		})
 
-		// Limit files
-		if len(sourceFiles) > DefaultMaxFiles {
+		// A workspace must not silently lose later resources to the generic
+		// repository cap. Keep the cap for ordinary repositories, while
+		// workspace indexing remains explicit and complete unless a file-level
+		// security/read/parse failure is reported.
+		discoveredTotal := len(sourceFiles)
+		indexTruncated := false
+		if detectedMode != workspace.KindFiveMWorkspace && len(sourceFiles) > DefaultMaxFiles {
 			sourceFiles = prioritizeFiles(sourceFiles, DefaultMaxFiles)
+			indexTruncated = true
 		}
 
 		// Parse files concurrently
@@ -231,7 +246,7 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 			r, _ := errorResult("save index: " + err.Error())
 			return r, nil, nil
 		}
-		mode, modeErr := workspace.DetectMode(absPath)
+		mode, modeErr := detectedMode, detectErr
 		if modeErr != nil {
 			mode = workspace.KindGeneric
 			diagnostics = append(diagnostics, "workspace: "+modeErr.Error())
@@ -239,16 +254,22 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 		semanticCount := 0
 		workspaceCount := 0
 		workspaceRelationships := 0
+		semanticIncomplete := false
 		if mode == workspace.KindFiveMWorkspace {
 			repoID, repoIDErr := deps.Store.GetRepoID(owner + "/" + repoName)
 			var wr workspaceindex.Result
 			var semanticErr error
 			if repoIDErr == nil {
-				wr, semanticErr = workspaceindex.Index(ctx, deps.Store, repoID, owner+"/"+repoName, absPath, fileContents, fileLangs, symbolsByFile)
+				if workspaceDiscoveryErr == nil {
+					wr, semanticErr = workspaceindex.Index(ctx, deps.Store, repoID, owner+"/"+repoName, absPath, fileContents, fileLangs, symbolsByFile, workspaceDiscovery)
+				} else {
+					semanticErr = workspaceDiscoveryErr
+				}
 			} else {
 				semanticErr = repoIDErr
 			}
 			if semanticErr != nil {
+				semanticIncomplete = true
 				log.Printf("index_folder: workspace analysis failed: %v", semanticErr)
 				_ = deps.Store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, semantic.Result{})
 				_ = deps.Store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveMWorkspace, semantic.Result{})
@@ -258,10 +279,14 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 				semanticCount = wr.FiveMCount
 				workspaceCount = wr.WorkspaceCount
 				workspaceRelationships = wr.RelationshipCount
+				if err := deps.Store.UpdateWorkspaceCompleteness(repoID, storage.WorkspaceCompleteness{FilesDiscoveredTotal: discoveredTotal, FilesIndexed: len(fileHashes), IndexTruncated: indexTruncated, Incomplete: indexTruncated || skippedFiles > 0 || parseFailures > 0, ResourcesWithSemantics: wr.ResourcesWithSemantics, ResourcesWithoutSemantics: wr.ResourcesWithoutSemantics}); err != nil {
+					diagnostics = append(diagnostics, "workspace completeness: "+err.Error())
+				}
 			}
 		} else {
 			semanticCount, err = indexSemanticRepository(ctx, deps.Store, owner+"/"+repoName, resourceName, "local", fileContents, fileLangs, symbolsByFile)
 			if err != nil {
+				semanticIncomplete = true
 				log.Printf("index_folder: semantic analysis failed: %v", err)
 				diagnostics = append(diagnostics, "semantic: "+err.Error())
 			}
@@ -276,6 +301,7 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 		}
 		genericCount, genericErr := indexGenericRepository(ctx, deps.Store, owner+"/"+repoName, fileContents, fileLangs, symbolsByFile, modulePath)
 		if genericErr != nil {
+			semanticIncomplete = true
 			log.Printf("index_folder: generic graph analysis failed: %v", genericErr)
 			if len(diagnostics) < 3 {
 				diagnostics = append(diagnostics, "generic graph: "+genericErr.Error())
@@ -294,8 +320,13 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 			"repo":                    owner + "/" + repoName,
 			"folder_path":             absPath,
 			"indexed_at":              time.Now().UTC().Format(time.RFC3339),
-			"files_discovered":        len(sourceFiles),
+			"files_discovered":        discoveredTotal,
+			"files_discovered_total":  discoveredTotal,
 			"file_count":              len(fileHashes),
+			"files_indexed":           len(fileHashes),
+			"index_truncated":         indexTruncated,
+			"index_complete":          !indexTruncated && skippedFiles == 0 && parseFailures == 0 && !semanticIncomplete,
+			"incomplete":              indexTruncated || skippedFiles > 0 || parseFailures > 0 || semanticIncomplete,
 			"symbol_count":            len(allSymbols),
 			"languages":               langCounts,
 			"skipped_files":           skippedFiles,
@@ -315,7 +346,7 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 			result["resource"] = resourceName
 		}
 		if mode == workspace.KindFiveMWorkspace {
-			if d, e := workspace.Discover(absPath); e == nil {
+			if d, e := workspaceDiscovery, workspaceDiscoveryErr; e == nil {
 				enabled, disabled, unknown := 0, 0, 0
 				for _, r := range d.Resources {
 					switch r.EnabledState {

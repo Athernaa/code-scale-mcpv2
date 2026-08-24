@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
+	"github.com/Athernaa/code-scale-mcpv2/internal/pathfilter"
 	"github.com/Athernaa/code-scale-mcpv2/internal/repository"
 	"github.com/Athernaa/code-scale-mcpv2/internal/security"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
@@ -256,6 +257,14 @@ func (m *Manager) watchLoop(fw *FolderWatch) {
 						if err := addDirectoryRecursive(fw.watcher, fw.Path, event.Name); err != nil {
 							log.Printf("watcher: failed to add directory %s: %v", event.Name, err)
 						}
+						// A populated directory can arrive in one rename/create
+						// event. Watching it is not enough; enqueue its existing
+						// supported files for indexing as well.
+						if mode, _ := workspace.DetectMode(fw.Path); mode == workspace.KindFiveMWorkspace {
+							if paths := discoverSupportedFiles(fw.Path, event.Name); len(paths) > 0 {
+								m.reindexFiles(fw, paths)
+							}
+						}
 					}
 					continue
 				}
@@ -346,6 +355,12 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 	}
 	mode, _ := workspace.DetectMode(fw.Path)
 	workspaceDirty := false
+	workspaceTopologyDirty := false
+	workspaceResources := map[string]bool{}
+	workspaceDiscovery, _ := workspace.Discover(fw.Path)
+	if matcher, matcherErr := pathfilter.New(fw.Path, nil); matcherErr == nil {
+		workspaceDiscovery, _ = workspace.DiscoverWithIgnore(fw.Path, matcher.Ignored)
+	}
 
 	for _, fullPath := range paths {
 		relPath, err := filepath.Rel(fw.Path, fullPath)
@@ -365,11 +380,14 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 					log.Printf("watcher: cannot refresh semantic graph after removing %s: %v", relPath, repoErr)
 				} else if mode == workspace.KindFiveMWorkspace {
 					workspaceDirty = true
+					if isManifestPath(relPath) {
+						workspaceTopologyDirty = true
+					}
 					_ = m.store.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerGenericGraph, relPath, nil)
 					if graphErr := m.refreshGenericRelationships(owner + "/" + repoName); graphErr != nil {
 						log.Printf("watcher: failed to refresh generic relationships: %v", graphErr)
 					}
-				} else if relPath == "fxmanifest.lua" || relPath == "__resource.lua" {
+				} else if isManifestPath(relPath) {
 					_ = m.store.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerGenericGraph, relPath, nil)
 					if rebuildErr := m.rebuildSemanticRepository(repoID, owner+"/"+repoName, resourceName); rebuildErr != nil {
 						log.Printf("watcher: failed to clear FiveM semantics after removing %s: %v", relPath, rebuildErr)
@@ -393,6 +411,7 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 		}
 		if strings.EqualFold(filepath.Ext(relPath), ".cfg") {
 			workspaceDirty = true
+			workspaceTopologyDirty = true
 			continue
 		}
 
@@ -436,6 +455,11 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 
 		if mode == workspace.KindFiveMWorkspace {
 			workspaceDirty = true
+			if isManifestPath(relPath) {
+				workspaceTopologyDirty = true
+			} else if resource, ok := workspace.ResourceForPath(workspaceDiscovery.Resources, relPath); ok {
+				workspaceResources[resource.RelativePath] = true
+			}
 		} else if err := m.updateSemanticFile(owner+"/"+repoName, resourceName, relPath, lang, content, symbols); err != nil {
 			log.Printf("watcher: semantic update failed for %s: %v", relPath, err)
 		}
@@ -446,10 +470,85 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 		log.Printf("watcher: reindexed %s (%d symbols)", relPath, len(symbols))
 	}
 	if workspaceDirty {
-		if err := m.rebuildWorkspace(localID.CanonicalPath, owner+"/"+repoName); err != nil {
-			log.Printf("watcher: workspace refresh failed: %v", err)
+		if workspaceTopologyDirty {
+			if err := m.rebuildWorkspace(localID.CanonicalPath, owner+"/"+repoName); err != nil {
+				log.Printf("watcher: workspace refresh failed: %v", err)
+			}
+		} else {
+			for resourcePath := range workspaceResources {
+				if err := m.refreshWorkspaceResource(localID.CanonicalPath, owner+"/"+repoName, resourcePath); err != nil {
+					log.Printf("watcher: resource refresh failed for %s: %v", resourcePath, err)
+				}
+			}
 		}
 	}
+}
+
+func discoverSupportedFiles(root, directory string) []string {
+	var paths []string
+	_ = filepath.WalkDir(directory, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if entry.IsDir() {
+			if path != directory && security.ShouldSkipDir(entry.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 || security.ShouldSkipFile(entry.Name()) || security.ShouldExcludeFile(path, root, security.DefaultMaxFileSize) != "" {
+			return nil
+		}
+		if parser.DetectLanguage(entry.Name()) == "" {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr == nil && !strings.HasPrefix(rel, "..") {
+			paths = append(paths, filepath.Join(root, rel))
+		}
+		return nil
+	})
+	return paths
+}
+
+func isManifestPath(path string) bool {
+	name := strings.ToLower(filepath.Base(filepath.FromSlash(path)))
+	return name == "fxmanifest.lua" || name == "__resource.lua"
+}
+
+func (m *Manager) refreshWorkspaceResource(root, repo, resourcePath string) error {
+	repoID, err := m.store.GetRepoID(repo)
+	if err != nil {
+		return err
+	}
+	files, err := m.store.GetFiles(repoID)
+	if err != nil {
+		return err
+	}
+	contents := map[string][]byte{}
+	languages := map[string]string{}
+	symbols := map[string][]parser.Symbol{}
+	for _, file := range files {
+		if file.Path != resourcePath && !strings.HasPrefix(file.Path, resourcePath+"/") {
+			continue
+		}
+		content, contentErr := m.store.GetFileContent(repoID, file.Path)
+		if contentErr != nil {
+			continue
+		}
+		contents[file.Path] = content
+		languages[file.Path] = file.Language
+		symbols[file.Path], _ = m.store.GetSymbolsByFile(repoID, file.Path)
+	}
+	discovery, discoveryErr := workspace.Discover(root)
+	if matcher, matcherErr := pathfilter.New(root, nil); matcherErr == nil {
+		discovery, discoveryErr = workspace.DiscoverWithIgnore(root, matcher.Ignored)
+	}
+	if discoveryErr != nil {
+		return discoveryErr
+	}
+	_, err = workspaceindex.RefreshResource(context.Background(), m.store, repoID, repo, root, resourcePath, contents, languages, symbols, discovery)
+	return err
 }
 
 func (m *Manager) rebuildWorkspace(root, repo string) error {
@@ -473,7 +572,14 @@ func (m *Manager) rebuildWorkspace(root, repo string) error {
 		langs[f.Path] = f.Language
 		symbols[f.Path], _ = m.store.GetSymbolsByFile(repoID, f.Path)
 	}
-	_, err = workspaceindex.Index(context.Background(), m.store, repoID, repo, root, contents, langs, symbols)
+	discovery, discoveryErr := workspace.Discover(root)
+	if matcher, matcherErr := pathfilter.New(root, nil); matcherErr == nil {
+		discovery, discoveryErr = workspace.DiscoverWithIgnore(root, matcher.Ignored)
+	}
+	if discoveryErr != nil {
+		return discoveryErr
+	}
+	_, err = workspaceindex.Index(context.Background(), m.store, repoID, repo, root, contents, langs, symbols, discovery)
 	return err
 }
 

@@ -9,11 +9,17 @@ var ErrWorkspaceNotFound = sql.ErrNoRows
 
 // WorkspaceInfo is the persisted organization mode for a local repository.
 type WorkspaceInfo struct {
-	ID        int64  `json:"id"`
-	RepoID    int64  `json:"repo_id"`
-	RootPath  string `json:"root_path"`
-	Kind      string `json:"kind"`
-	IndexedAt string `json:"indexed_at"`
+	ID                        int64  `json:"id"`
+	RepoID                    int64  `json:"repo_id"`
+	RootPath                  string `json:"root_path"`
+	Kind                      string `json:"kind"`
+	IndexedAt                 string `json:"indexed_at"`
+	FilesDiscoveredTotal      int    `json:"files_discovered_total"`
+	FilesIndexed              int    `json:"files_indexed"`
+	IndexTruncated            bool   `json:"index_truncated"`
+	Incomplete                bool   `json:"incomplete"`
+	ResourcesWithSemantics    int    `json:"resources_with_semantics"`
+	ResourcesWithoutSemantics int    `json:"resources_without_semantics"`
 }
 
 type WorkspaceResourceInfo struct {
@@ -36,7 +42,7 @@ type WorkspaceConfigInfo struct {
 }
 
 // ReplaceWorkspaceState replaces only the workspace metadata owned by a repo.
-func (s *IndexStore) ReplaceWorkspaceState(repoID int64, rootPath, kind string, resources []WorkspaceResourceInfo, configs []WorkspaceConfigInfo) error {
+func (s *IndexStore) ReplaceWorkspaceState(repoID int64, rootPath, kind string, resources []WorkspaceResourceInfo, configs []WorkspaceConfigInfo, completeness ...WorkspaceCompleteness) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
@@ -47,7 +53,11 @@ func (s *IndexStore) ReplaceWorkspaceState(repoID int64, rootPath, kind string, 
 	if _, err = tx.Exec("DELETE FROM workspaces WHERE repo_id = ?", repoID); err != nil {
 		return err
 	}
-	res, err := tx.Exec("INSERT INTO workspaces(repo_id, root_path, kind, indexed_at) VALUES (?, ?, ?, ?)", repoID, rootPath, kind, time.Now().UTC().Format(time.RFC3339))
+	c := WorkspaceCompleteness{}
+	if len(completeness) > 0 {
+		c = completeness[0]
+	}
+	res, err := tx.Exec("INSERT INTO workspaces(repo_id, root_path, kind, indexed_at, files_discovered_total, files_indexed, index_truncated, incomplete, resources_with_semantics, resources_without_semantics) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", repoID, rootPath, kind, time.Now().UTC().Format(time.RFC3339), c.FilesDiscoveredTotal, c.FilesIndexed, boolInt(c.IndexTruncated), boolInt(c.Incomplete), c.ResourcesWithSemantics, c.ResourcesWithoutSemantics)
 	if err != nil {
 		return err
 	}
@@ -80,6 +90,15 @@ func (s *IndexStore) ReplaceWorkspaceState(repoID int64, rootPath, kind string, 
 	return tx.Commit()
 }
 
+type WorkspaceCompleteness struct {
+	FilesDiscoveredTotal      int
+	FilesIndexed              int
+	IndexTruncated            bool
+	Incomplete                bool
+	ResourcesWithSemantics    int
+	ResourcesWithoutSemantics int
+}
+
 func (s *IndexStore) ClearWorkspaceState(repoID int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -87,11 +106,23 @@ func (s *IndexStore) ClearWorkspaceState(repoID int64) error {
 	return err
 }
 
+// UpdateWorkspaceCompleteness changes only coverage metadata after indexing
+// diagnostics are known; it does not rebuild resource or config rows.
+func (s *IndexStore) UpdateWorkspaceCompleteness(repoID int64, c WorkspaceCompleteness) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`UPDATE workspaces SET files_discovered_total=?, files_indexed=?, index_truncated=?, incomplete=?, resources_with_semantics=?, resources_without_semantics=?, indexed_at=? WHERE repo_id=?`, c.FilesDiscoveredTotal, c.FilesIndexed, boolInt(c.IndexTruncated), boolInt(c.Incomplete), c.ResourcesWithSemantics, c.ResourcesWithoutSemantics, time.Now().UTC().Format(time.RFC3339), repoID)
+	return err
+}
+
 func (s *IndexStore) GetWorkspace(repoID int64) (WorkspaceInfo, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var w WorkspaceInfo
-	err := s.db.QueryRow("SELECT id,repo_id,root_path,kind,indexed_at FROM workspaces WHERE repo_id = ?", repoID).Scan(&w.ID, &w.RepoID, &w.RootPath, &w.Kind, &w.IndexedAt)
+	var truncated, incomplete int
+	err := s.db.QueryRow("SELECT id,repo_id,root_path,kind,indexed_at,files_discovered_total,files_indexed,index_truncated,incomplete,resources_with_semantics,resources_without_semantics FROM workspaces WHERE repo_id = ?", repoID).Scan(&w.ID, &w.RepoID, &w.RootPath, &w.Kind, &w.IndexedAt, &w.FilesDiscoveredTotal, &w.FilesIndexed, &truncated, &incomplete, &w.ResourcesWithSemantics, &w.ResourcesWithoutSemantics)
+	w.IndexTruncated = truncated != 0
+	w.Incomplete = incomplete != 0
 	return w, err
 }
 

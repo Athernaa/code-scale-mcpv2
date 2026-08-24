@@ -214,7 +214,13 @@ CREATE TABLE IF NOT EXISTS workspaces (
     repo_id INTEGER NOT NULL UNIQUE REFERENCES repos(id) ON DELETE CASCADE,
     root_path TEXT NOT NULL,
     kind TEXT NOT NULL,
-    indexed_at TEXT NOT NULL
+    indexed_at TEXT NOT NULL,
+    files_discovered_total INTEGER NOT NULL DEFAULT 0,
+    files_indexed INTEGER NOT NULL DEFAULT 0,
+    index_truncated INTEGER NOT NULL DEFAULT 0,
+    incomplete INTEGER NOT NULL DEFAULT 0,
+    resources_with_semantics INTEGER NOT NULL DEFAULT 0,
+    resources_without_semantics INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS workspace_resources (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -242,4 +248,4 @@ CREATE INDEX IF NOT EXISTS idx_workspace_configs_workspace ON workspace_configs(
 `
 
 // CurrentSchemaVersion is the current schema version.
-const CurrentSchemaVersion = 8
+const CurrentSchemaVersion = 9

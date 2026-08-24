@@ -72,3 +72,79 @@ func TestDuplicateResourceNamesRemainAmbiguous(t *testing.T) {
 		t.Fatalf("duplicates not reported: %#v", d.DuplicateNames)
 	}
 }
+
+func TestConfigExecRejectsTraversalOutsideWorkspace(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.cfg")
+	if err := os.WriteFile(outside, []byte("ensure escaped\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "server.cfg"), []byte("exec ../../../outside.cfg\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	resourceDir := filepath.Join(root, "resources", "app")
+	if err := os.MkdirAll(resourceDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(resourceDir, "fxmanifest.lua"), []byte("fx_version 'cerulean'"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	d, err := Discover(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.ConfigFiles) != 1 || len(d.Commands) != 0 {
+		t.Fatalf("outside exec escaped workspace: configs=%#v commands=%#v", d.ConfigFiles, d.Commands)
+	}
+}
+
+func TestConfigExecRejectsSymlinkOutsideWorkspace(t *testing.T) {
+	root := t.TempDir()
+	outsideDir := t.TempDir()
+	outside := filepath.Join(outsideDir, "outside.cfg")
+	if err := os.WriteFile(outside, []byte("ensure escaped\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "linked.cfg")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	resourceDir := filepath.Join(root, "resources", "app")
+	if err := os.MkdirAll(resourceDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(resourceDir, "fxmanifest.lua"), []byte("fx_version 'cerulean'"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "server.cfg"), []byte("exec linked.cfg\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	d, err := Discover(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.ConfigFiles) != 1 || len(d.Commands) != 0 {
+		t.Fatalf("symlink exec escaped workspace: configs=%#v commands=%#v", d.ConfigFiles, d.Commands)
+	}
+}
+
+func TestConfigStartStateUsesFinalStateAndFirstStartOrder(t *testing.T) {
+	root := t.TempDir()
+	resource := filepath.Join(root, "resources", "app")
+	if err := os.MkdirAll(resource, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(resource, "fxmanifest.lua"), []byte("fx_version 'cerulean'"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "server.cfg"), []byte("ensure app\nstop app\nensure app\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	d, err := Discover(root)
+	if err != nil || len(d.Resources) != 1 {
+		t.Fatalf("discovery failed: %#v err=%v", d, err)
+	}
+	if d.Resources[0].EnabledState != "enabled" || d.Resources[0].StartOrder != 1 {
+		t.Fatalf("unexpected final state/order: %#v", d.Resources[0])
+	}
+}

@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -72,6 +73,45 @@ func TestIndexFolderAppliesGitignoreAndExtraPatterns(t *testing.T) {
 	}
 	if response["files_discovered"] != float64(1) || response["file_count"] != float64(1) {
 		t.Fatalf("unexpected indexing diagnostics: %#v", response)
+	}
+}
+
+func TestIndexFolderWorkspaceCoverageDoesNotSilentlyApplyGenericFileCap(t *testing.T) {
+	root := t.TempDir()
+	resourceDir := filepath.Join(root, "resources", "[bulk]", "bulk_resource")
+	if err := os.MkdirAll(resourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "server.cfg"), []byte("ensure bulk_resource\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(resourceDir, "fxmanifest.lua"), []byte("fx_version 'cerulean'\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i <= DefaultMaxFiles; i++ {
+		path := filepath.Join(resourceDir, fmt.Sprintf("file_%05d.lua", i))
+		if err := os.WriteFile(path, []byte("local value = 1\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := storage.NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	result, _, err := IndexFolderHandler(&Deps{Store: store})(context.Background(), nil, IndexFolderArgs{Path: root})
+	if err != nil || result.IsError {
+		t.Fatalf("workspace indexing failed: result=%#v err=%v", result, err)
+	}
+	var response map[string]any
+	if err := json.Unmarshal([]byte(result.Content[0].(*mcp.TextContent).Text), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["mode"] != "fivem_workspace" || response["index_truncated"] != false || response["index_complete"] != true {
+		t.Fatalf("workspace coverage was not truthful: %#v", response)
+	}
+	if response["files_discovered_total"] != float64(DefaultMaxFiles+2) || response["files_indexed"] != float64(DefaultMaxFiles+2) || response["resources_discovered"] != float64(1) {
+		t.Fatalf("workspace coverage counts were incorrect: %#v", response)
 	}
 }
 

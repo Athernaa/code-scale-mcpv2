@@ -10,6 +10,7 @@ import (
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/generic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
+	"github.com/Athernaa/code-scale-mcpv2/internal/workspace"
 )
 
 func TestWorkspaceCrossResourceFactsAndIsolation(t *testing.T) {
@@ -143,5 +144,91 @@ func TestWorkspaceCrossResourceFactsAndIsolation(t *testing.T) {
 	}
 	if got, err := store.GetSemanticEntitiesForAnalyzer(id, semantic.AnalyzerGenericGraph); err != nil || len(got) == 0 {
 		t.Fatalf("workspace clear damaged generic graph: count=%d err=%v", len(got), err)
+	}
+}
+
+func TestDuplicateResourcePathsDoNotCrossResolveEventsOrExports(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"server.cfg":                             "ensure inventory\nensure caller\n",
+		"resources/[a]/inventory/fxmanifest.lua": "fx_version 'cerulean'\nserver_script 'server.lua'\n",
+		"resources/[a]/inventory/server.lua":     "RegisterNetEvent('duplicate:test')\nAddEventHandler('duplicate:test', function() end)\nexports('GetItem', function() end)\n",
+		"resources/[b]/inventory/fxmanifest.lua": "fx_version 'cerulean'\nserver_script 'server.lua'\n",
+		"resources/[b]/inventory/server.lua":     "AddEventHandler('duplicate:test', function() end)\nexports('GetItem', function() end)\n",
+		"resources/[app]/caller/fxmanifest.lua":  "fx_version 'cerulean'\nclient_script 'client.lua'\n",
+		"resources/[app]/caller/client.lua":      "TriggerServerEvent('duplicate:test')\nexports.inventory:GetItem()\n",
+	}
+	contents := map[string][]byte{}
+	languages := map[string]string{}
+	symbols := map[string][]parser.Symbol{}
+	hashes := map[string]string{}
+	var allSymbols []parser.Symbol
+	for path, text := range files {
+		full := filepath.Join(root, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(text), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if filepath.Ext(path) == ".cfg" {
+			continue
+		}
+		contents[path] = []byte(text)
+		languages[path] = "lua"
+		parsed, err := parser.ParseFile([]byte(text), path, "lua")
+		if err != nil {
+			t.Fatal(err)
+		}
+		symbols[path] = parsed
+		hashes[path] = workspace.ContentHash([]byte(text))
+		allSymbols = append(allSymbols, parsed...)
+	}
+	store, err := storage.NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	langs := map[string]string{}
+	for path := range hashes {
+		langs[path] = languages[path]
+	}
+	if err := store.ReplaceRepoIndex("local", "duplicate-workspace", "local", "", hashes, langs, allSymbols, root); err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID("local/duplicate-workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Index(context.Background(), store, repoID, "local/duplicate-workspace", root, contents, languages, symbols); err != nil {
+		t.Fatal(err)
+	}
+	rels, err := store.GetSemanticRelationshipsForAnalyzer(repoID, semantic.AnalyzerFiveMWorkspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entities, err := store.GetSemanticEntities(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]semantic.Entity{}
+	for _, entity := range entities {
+		byID[entity.ID] = entity
+	}
+	for _, rel := range rels {
+		if rel.Kind != "cross_resource_event" && rel.Kind != "cross_resource_export" {
+			continue
+		}
+		from, fromOK := byID[rel.FromEntityID]
+		to, toOK := byID[rel.ToEntityID]
+		if !fromOK || !toOK {
+			t.Fatalf("relationship endpoint lookup failed: %#v %#v", fromOK, toOK)
+		}
+		if from.Metadata["source_resource_path"] == "resources/[app]/caller" && to.Metadata["source_resource_path"] == "resources/[b]/inventory" {
+			t.Fatalf("duplicate resource produced unsafe cross-resource edge: %#v", rel)
+		}
+		if rel.Kind == "cross_resource_export" {
+			t.Fatalf("duplicate export target should remain unresolved: %#v", rel)
+		}
 	}
 }

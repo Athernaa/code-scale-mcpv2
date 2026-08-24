@@ -19,16 +19,20 @@ type TraceRelationshipsArgs struct {
 }
 
 type semanticEndpoint struct {
-	ID        string `json:"id"`
-	Kind      string `json:"kind"`
-	Name      string `json:"name"`
-	Operation string `json:"operation,omitempty"`
-	Resource  string `json:"resource,omitempty"`
-	Side      string `json:"side,omitempty"`
-	File      string `json:"file"`
-	Line      int    `json:"line"`
-	SymbolID  string `json:"symbol_id,omitempty"`
-	Dynamic   bool   `json:"dynamic,omitempty"`
+	ID                 string `json:"id"`
+	Kind               string `json:"kind"`
+	Name               string `json:"name"`
+	Operation          string `json:"operation,omitempty"`
+	Resource           string `json:"resource,omitempty"`
+	SourceResource     string `json:"source_resource,omitempty"`
+	SourceResourcePath string `json:"source_resource_path,omitempty"`
+	ResourceID         string `json:"resource_id,omitempty"`
+	TargetResource     string `json:"target_resource,omitempty"`
+	Side               string `json:"side,omitempty"`
+	File               string `json:"file"`
+	Line               int    `json:"line"`
+	SymbolID           string `json:"symbol_id,omitempty"`
+	Dynamic            bool   `json:"dynamic,omitempty"`
 }
 
 type relationshipTraceResult struct {
@@ -110,8 +114,8 @@ func TraceRelationshipsHandler(deps *Deps) func(context.Context, *mcp.CallToolRe
 }
 
 func endpoint(entity semantic.Entity) semanticEndpoint {
-	operation, resource := semanticMetadata(entity)
-	return semanticEndpoint{ID: entity.ID, Kind: entity.Kind, Name: entity.Name, Operation: operation, Resource: resource, Side: entity.Side, File: entity.File, Line: entity.Line, SymbolID: entity.SymbolID, Dynamic: entity.Dynamic}
+	operation, resource, sourceResource, sourceResourcePath, resourceID, targetResource := semanticMetadata(entity)
+	return semanticEndpoint{ID: entity.ID, Kind: entity.Kind, Name: entity.Name, Operation: operation, Resource: resource, SourceResource: sourceResource, SourceResourcePath: sourceResourcePath, ResourceID: resourceID, TargetResource: targetResource, Side: entity.Side, File: entity.File, Line: entity.Line, SymbolID: entity.SymbolID, Dynamic: entity.Dynamic}
 }
 
 func normalizedDirection(direction string) string {
