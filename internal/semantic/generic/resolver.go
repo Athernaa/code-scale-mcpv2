@@ -296,16 +296,17 @@ func uniqueExportTarget(files []semantic.Entity, name string, idx graphIndexes) 
 
 func resolveGoPackageFiles(module string, idx graphIndexes) []semantic.Entity {
 	module = strings.Trim(module, "\"")
-	if idx.modulePath != "" && module != idx.modulePath && !strings.HasPrefix(module, idx.modulePath+"/") {
+	if idx.modulePath == "" {
+		return nil
+	}
+	if module != idx.modulePath && !strings.HasPrefix(module, idx.modulePath+"/") {
 		return nil
 	}
 	suffix := module
-	if idx.modulePath != "" {
-		suffix = strings.TrimPrefix(module, idx.modulePath)
-		suffix = strings.TrimPrefix(suffix, "/")
-		if suffix == "" {
-			suffix = "."
-		}
+	suffix = strings.TrimPrefix(module, idx.modulePath)
+	suffix = strings.TrimPrefix(suffix, "/")
+	if suffix == "" {
+		suffix = "."
 	}
 	var result []semantic.Entity
 	for path, file := range idx.files {

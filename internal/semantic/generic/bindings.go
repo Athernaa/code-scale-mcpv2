@@ -251,7 +251,7 @@ func javascriptParameters(node *sitter.Node) *sitter.Node {
 func nearestJavaScriptFunctionScope(node *sitter.Node) *sitter.Node {
 	for current := node; current != nil; current = current.Parent() {
 		switch current.Type() {
-		case "program", "function_declaration", "function_expression", "arrow_function":
+		case "program", "function_declaration", "function_expression", "arrow_function", "method_definition", "method_signature":
 			return current
 		}
 	}

@@ -283,6 +283,42 @@ func externalCall() { external.Save() }`,
 	}
 }
 
+func TestGoImportsRequireModuleIdentity(t *testing.T) {
+	result := analyzeTestRepository(t, map[string]string{
+		"main.go": `package main
+import "fmt"
+func Run() { fmt.Println("hello") }
+func Save() {}
+func SamePackage() { Save() }`,
+		"fmt/print.go": `package fmt
+func Println() {}`,
+	}, map[string]string{"main.go": "go", "fmt/print.go": "go"}, "")
+	run, ok := symbolEntity(result, "main.go", "Run")
+	if !ok {
+		t.Fatal("Run symbol missing")
+	}
+	localPrintln, ok := symbolEntity(result, "fmt/print.go", "Println")
+	if !ok {
+		t.Fatal("local fmt.Println symbol missing")
+	}
+	if relationshipConnects(result, run, localPrintln, RelationshipCalls) {
+		t.Fatal("Go import resolved to a local directory without module identity")
+	}
+	for _, relationship := range relationshipsOf(result, RelationshipImports) {
+		if relationship.FromEntityID == run.ID || relationship.ToEntityID == localPrintln.ID {
+			t.Fatalf("Go import produced a local edge without module identity: %#v", relationship)
+		}
+	}
+	samePackage, ok := symbolEntity(result, "main.go", "SamePackage")
+	if !ok {
+		t.Fatal("SamePackage symbol missing")
+	}
+	save, ok := symbolEntity(result, "main.go", "Save")
+	if !ok || !relationshipConnects(result, samePackage, save, RelationshipCalls) {
+		t.Fatal("same-package Go call stopped resolving without module identity")
+	}
+}
+
 func TestJavaScriptLexicalBindingsShadowImportsAcrossCallsReferencesAndJSX(t *testing.T) {
 	result := analyzeTestRepository(t, map[string]string{
 		"save.ts":  `export function save() {}`,
