@@ -279,17 +279,8 @@ func (m *Manager) watchLoop(fw *FolderWatch) {
 			lang := parser.DetectLanguage(event.Name)
 			if lang == "" && !strings.EqualFold(filepath.Ext(event.Name), ".cfg") {
 				if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
-					if mode, _ := workspace.DetectMode(fw.Path); mode == workspace.KindFiveMWorkspace {
-						if local, identityErr := repository.Local(fw.Path); identityErr == nil {
-							if rel, relErr := filepath.Rel(fw.Path, event.Name); relErr == nil && rel != "." && !strings.HasPrefix(rel, "..") {
-								if err := m.store.DeleteFilesUnderPrefix(local.Owner, local.Name, filepath.ToSlash(rel)); err != nil {
-									log.Printf("watcher: directory removal cleanup failed: %v", err)
-								}
-							}
-						}
-						if err := m.rebuildWorkspace(fw.Path, fw.Repo); err != nil {
-							log.Printf("watcher: workspace removal refresh failed: %v", err)
-						}
+					if err := m.handleRemovedDirectory(fw.Path, fw.Repo, event.Name); err != nil {
+						log.Printf("watcher: directory removal refresh failed: %v", err)
 					}
 				}
 				continue
@@ -338,6 +329,43 @@ func (m *Manager) watchLoop(fw *FolderWatch) {
 	}
 }
 
+func (m *Manager) handleRemovedDirectory(root, repo, removedPath string) error {
+	local, err := repository.Local(root)
+	if err != nil {
+		return err
+	}
+	repoID, repoErr := m.store.GetRepoID(repo)
+	previousWorkspace := false
+	if repoErr == nil {
+		if previous, workspaceErr := m.store.GetWorkspace(repoID); workspaceErr == nil && previous.Kind == workspace.KindFiveMWorkspace {
+			previousWorkspace = true
+		}
+	}
+	currentMode, _ := workspace.DetectMode(root)
+	if matcher, matcherErr := pathfilter.New(root, nil); matcherErr == nil {
+		if currentDiscovery, discoveryErr := workspace.DiscoverWithIgnore(root, matcher.Ignored); discoveryErr == nil {
+			currentMode = currentDiscovery.Mode
+		}
+	}
+	if !previousWorkspace && currentMode != workspace.KindFiveMWorkspace {
+		return nil
+	}
+	rel, err := filepath.Rel(root, removedPath)
+	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("removed directory is outside workspace: %s", removedPath)
+	}
+	if err := m.store.DeleteFilesUnderPrefix(local.Owner, local.Name, filepath.ToSlash(rel)); err != nil {
+		return err
+	}
+	if repoErr != nil {
+		return repoErr
+	}
+	if currentMode == workspace.KindFiveMWorkspace {
+		return m.rebuildWorkspace(root, repo)
+	}
+	return m.clearWorkspaceMode(repoID)
+}
+
 // reindexFiles re-parses and updates the index for changed files.
 func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 	localID, err := repository.Local(fw.Path)
@@ -363,6 +391,47 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 		workspaceDiscovery, _ = workspace.DiscoverWithIgnore(fw.Path, matcher.Ignored)
 	}
 	mode := workspaceDiscovery.Mode
+	indexedRepoID, indexedRepoErr := m.store.GetRepoID(owner + "/" + repoName)
+	previousWorkspace := false
+	if indexedRepoErr == nil {
+		if previous, workspaceErr := m.store.GetWorkspace(indexedRepoID); workspaceErr == nil && previous.Kind == workspace.KindFiveMWorkspace {
+			previousWorkspace = true
+		}
+	}
+	workspaceActive := previousWorkspace || mode == workspace.KindFiveMWorkspace
+	workspaceModeTransitioned := previousWorkspace && mode != workspace.KindFiveMWorkspace
+	if workspaceModeTransitioned {
+		workspaceDirty = true
+		workspaceTopologyDirty = true
+	}
+	ignoreChanged := false
+	for _, path := range paths {
+		if strings.EqualFold(filepath.Base(path), ".gitignore") {
+			ignoreChanged = true
+			break
+		}
+	}
+	if ignoreChanged && matcher != nil && indexedRepoErr == nil {
+		if !previousWorkspace && mode == workspace.KindFiveMWorkspace {
+			workspaceDirty = true
+			workspaceTopologyDirty = true
+		}
+		indexed := map[string]bool{}
+		if indexedFiles, filesErr := m.store.GetFiles(indexedRepoID); filesErr == nil {
+			for _, file := range indexedFiles {
+				indexed[workspace.NormalizePath(file.Path)] = true
+				if matcher.Ignored(filepath.Join(fw.Path, filepath.FromSlash(file.Path)), false) {
+					paths = appendUniquePath(paths, filepath.Join(fw.Path, filepath.FromSlash(file.Path)))
+				}
+			}
+		}
+		for _, path := range discoverSupportedFiles(fw.Path, fw.Path, matcher) {
+			rel, relErr := filepath.Rel(fw.Path, path)
+			if relErr == nil && !indexed[workspace.NormalizePath(filepath.ToSlash(rel))] {
+				paths = appendUniquePath(paths, path)
+			}
+		}
+	}
 
 	for _, fullPath := range paths {
 		relPath, err := filepath.Rel(fw.Path, fullPath)
@@ -372,51 +441,57 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 		relPath = filepath.ToSlash(relPath)
 
 		// Check if file was deleted
-		if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+		_, statErr := os.Stat(fullPath)
+		ignoredIndexedFile := matcher != nil && matcher.Ignored(fullPath, false)
+		if os.IsNotExist(statErr) || ignoredIndexedFile {
 			log.Printf("watcher: file removed %s, cleaning index", relPath)
-			if err := m.store.DeleteFileFromIndex(owner, repoName, relPath); err != nil {
-				log.Printf("watcher: failed to remove %s from index: %v", relPath, err)
-			} else {
-				repoID, repoErr := m.store.GetRepoID(owner + "/" + repoName)
-				if repoErr != nil {
-					log.Printf("watcher: cannot refresh semantic graph after removing %s: %v", relPath, repoErr)
-				} else if mode == workspace.KindFiveMWorkspace {
-					workspaceDirty = true
-					workspaceSourceDirty = true
-					if isManifestPath(relPath) {
-						workspaceTopologyDirty = true
-					} else if resource, ok := workspace.ResourceForPath(workspaceDiscovery.Resources, relPath); ok {
-						workspaceResources[resource.RelativePath] = true
-					}
-					_ = m.store.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerGenericGraph, relPath, nil)
-					if graphErr := m.refreshGenericRelationships(owner + "/" + repoName); graphErr != nil {
-						log.Printf("watcher: failed to refresh generic relationships: %v", graphErr)
-					}
-				} else if isManifestPath(relPath) {
-					_ = m.store.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerGenericGraph, relPath, nil)
-					if rebuildErr := m.rebuildSemanticRepository(repoID, owner+"/"+repoName, resourceName); rebuildErr != nil {
-						log.Printf("watcher: failed to clear FiveM semantics after removing %s: %v", relPath, rebuildErr)
-					}
-				} else {
-					if graphErr := m.store.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerFiveM, relPath, nil); graphErr != nil {
-						log.Printf("watcher: failed to remove FiveM semantics for %s: %v", relPath, graphErr)
-					}
-					if graphErr := m.store.ReplaceSemanticFileForAnalyzer(repoID, semantic.AnalyzerGenericGraph, relPath, nil); graphErr != nil {
-						log.Printf("watcher: failed to remove generic graph facts for %s: %v", relPath, graphErr)
-					}
-					if graphErr := m.refreshSemanticRelationships(owner + "/" + repoName); graphErr != nil {
-						log.Printf("watcher: failed to refresh FiveM relationships: %v", graphErr)
-					}
-					if graphErr := m.refreshGenericRelationships(owner + "/" + repoName); graphErr != nil {
-						log.Printf("watcher: failed to refresh generic relationships: %v", graphErr)
-					}
+			deleteErr := m.store.DeleteFileFromIndex(owner, repoName, relPath)
+			if deleteErr != nil {
+				log.Printf("watcher: failed to remove %s from index: %v", relPath, deleteErr)
+			}
+			if indexedRepoErr != nil {
+				log.Printf("watcher: cannot refresh semantic graph after removing %s: %v", relPath, indexedRepoErr)
+			} else if workspaceActive {
+				workspaceDirty = true
+				workspaceSourceDirty = true
+				if isManifestPath(relPath) {
+					workspaceTopologyDirty = true
+				} else if resource, ok := workspace.ResourceForPath(workspaceDiscovery.Resources, relPath); ok {
+					workspaceResources[resource.RelativePath] = true
+				}
+				_ = m.store.ReplaceSemanticFileForAnalyzer(indexedRepoID, semantic.AnalyzerGenericGraph, relPath, nil)
+				if graphErr := m.refreshGenericRelationships(owner + "/" + repoName); graphErr != nil {
+					log.Printf("watcher: failed to refresh generic relationships: %v", graphErr)
+				}
+			} else if deleteErr == nil && isManifestPath(relPath) {
+				_ = m.store.ReplaceSemanticFileForAnalyzer(indexedRepoID, semantic.AnalyzerGenericGraph, relPath, nil)
+				if rebuildErr := m.rebuildSemanticRepository(indexedRepoID, owner+"/"+repoName, resourceName); rebuildErr != nil {
+					log.Printf("watcher: failed to clear FiveM semantics after removing %s: %v", relPath, rebuildErr)
+				}
+			} else if deleteErr == nil {
+				if graphErr := m.store.ReplaceSemanticFileForAnalyzer(indexedRepoID, semantic.AnalyzerFiveM, relPath, nil); graphErr != nil {
+					log.Printf("watcher: failed to remove FiveM semantics for %s: %v", relPath, graphErr)
+				}
+				if graphErr := m.store.ReplaceSemanticFileForAnalyzer(indexedRepoID, semantic.AnalyzerGenericGraph, relPath, nil); graphErr != nil {
+					log.Printf("watcher: failed to remove generic graph facts for %s: %v", relPath, graphErr)
+				}
+				if graphErr := m.refreshSemanticRelationships(owner + "/" + repoName); graphErr != nil {
+					log.Printf("watcher: failed to refresh FiveM relationships: %v", graphErr)
+				}
+				if graphErr := m.refreshGenericRelationships(owner + "/" + repoName); graphErr != nil {
+					log.Printf("watcher: failed to refresh generic relationships: %v", graphErr)
 				}
 			}
 			continue
 		}
 		if strings.EqualFold(filepath.Ext(relPath), ".cfg") {
-			workspaceDirty = true
-			workspaceConfigDirty = true
+			if workspaceActive {
+				workspaceDirty = true
+				workspaceConfigDirty = true
+			}
+			continue
+		}
+		if strings.EqualFold(filepath.Base(relPath), ".gitignore") {
 			continue
 		}
 		if matcher != nil && matcher.Ignored(fullPath, false) {
@@ -480,7 +555,11 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 	}
 	if workspaceDirty {
 		if workspaceTopologyDirty {
-			if err := m.rebuildWorkspace(localID.CanonicalPath, owner+"/"+repoName); err != nil {
+			if workspaceModeTransitioned {
+				if err := m.clearWorkspaceMode(indexedRepoID); err != nil {
+					log.Printf("watcher: workspace mode cleanup failed: %v", err)
+				}
+			} else if err := m.rebuildWorkspace(localID.CanonicalPath, owner+"/"+repoName); err != nil {
 				log.Printf("watcher: workspace refresh failed: %v", err)
 			}
 		} else {
@@ -503,6 +582,25 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 			}
 		}
 	}
+}
+
+func appendUniquePath(paths []string, path string) []string {
+	for _, existing := range paths {
+		if filepath.Clean(existing) == filepath.Clean(path) {
+			return paths
+		}
+	}
+	return append(paths, path)
+}
+
+func (m *Manager) clearWorkspaceMode(repoID int64) error {
+	if err := m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, semantic.Result{}); err != nil {
+		return err
+	}
+	if err := m.store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveMWorkspace, semantic.Result{}); err != nil {
+		return err
+	}
+	return m.store.ClearWorkspaceState(repoID)
 }
 
 func discoverSupportedFiles(root, directory string, matchers ...*pathfilter.Matcher) []string {
@@ -672,13 +770,16 @@ func (m *Manager) updateWorkspaceCoverage(root string, repoID int64) error {
 	}
 	previous, err := m.store.GetWorkspace(repoID)
 	if err != nil {
+		if storage.IsNotFound(err) {
+			return nil
+		}
 		return err
 	}
 	return m.store.UpdateWorkspaceCompleteness(repoID, storage.WorkspaceCompleteness{
 		FilesDiscoveredTotal:      len(discovered),
 		FilesIndexed:              len(indexed),
 		IndexTruncated:            previous.IndexTruncated,
-		Incomplete:                previous.Incomplete || !completeCoverage,
+		Incomplete:                previous.IndexTruncated || !completeCoverage || previous.ResourcesWithoutSemantics > 0,
 		ResourcesWithSemantics:    previous.ResourcesWithSemantics,
 		ResourcesWithoutSemantics: previous.ResourcesWithoutSemantics,
 	})

@@ -253,6 +253,256 @@ func indexWatcherFiles(t *testing.T, root string, paths map[string]string) (*sto
 	return store, id, repoID
 }
 
+func indexWatcherWorkspace(t *testing.T, root string, paths map[string]string) (*storage.IndexStore, repository.LocalIdentity, int64) {
+	t.Helper()
+	store, err := storage.NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := repository.Local(root)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	hashes := map[string]string{}
+	languages := map[string]string{}
+	contents := map[string][]byte{}
+	symbols := map[string][]parser.Symbol{}
+	var allSymbols []parser.Symbol
+	for rel, text := range paths {
+		full := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
+		data := []byte(text)
+		if err := os.WriteFile(full, data, 0600); err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
+		lang := parser.DetectLanguage(rel)
+		if lang == "" {
+			continue
+		}
+		parsed, err := parser.ParseFile(data, rel, lang)
+		if err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
+		contents[rel] = data
+		languages[rel] = lang
+		symbols[rel] = parsed
+		hashes[rel] = workspace.ContentHash(data)
+		allSymbols = append(allSymbols, parsed...)
+		if err := store.SaveContentFile(id.Owner, id.Name, rel, data); err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := store.ReplaceRepoIndex(id.Owner, id.Name, "local", "", hashes, languages, allSymbols, id.CanonicalPath); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID(id.Repo)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	matcher, err := pathfilter.New(root, nil)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	discovery, err := workspace.DiscoverWithIgnore(root, matcher.Ignored)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if _, err := workspaceindex.Index(context.Background(), store, repoID, id.Repo, root, contents, languages, symbols, discovery); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	genericResult, err := generic.NewAnalyzer().AnalyzeRepository(context.Background(), semantic.RepositoryInput{Repo: id.Repo, Files: contents, Languages: languages, Symbols: symbols})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, genericResult); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	return store, id, repoID
+}
+
+func TestWatcherWorkspaceToGenericAfterLastResourceDirectoryRemoval(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "server-data")
+	resourceDir := filepath.Join(root, "resources", "only_resource")
+	store, id, repoID := indexWatcherWorkspace(t, root, map[string]string{
+		"resources/only_resource/fxmanifest.lua": "fx_version 'cerulean'\nserver_script 'server.lua'\n",
+		"resources/only_resource/server.lua":     "RegisterNetEvent('transition:event')\n",
+	})
+	defer func() { _ = store.Close() }()
+	if err := os.RemoveAll(resourceDir); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewManager(store)
+	if err := mgr.handleRemovedDirectory(id.CanonicalPath, id.Repo, resourceDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetWorkspace(repoID); !storage.IsNotFound(err) {
+		t.Fatalf("workspace state survived last resource removal: err=%v", err)
+	}
+	for _, analyzer := range []string{semantic.AnalyzerFiveM, semantic.AnalyzerFiveMWorkspace} {
+		entities, err := store.GetSemanticEntitiesForAnalyzer(repoID, analyzer)
+		if err != nil || len(entities) != 0 {
+			t.Fatalf("%s facts survived workspace transition: %#v err=%v", analyzer, entities, err)
+		}
+	}
+	files, err := store.GetFiles(repoID)
+	if err != nil || len(files) != 0 {
+		t.Fatalf("deleted resource files survived transition: %#v err=%v", files, err)
+	}
+	if _, err := store.GetRepoID(id.Repo); err != nil {
+		t.Fatalf("repository was removed instead of transitioning to generic mode: %v", err)
+	}
+}
+
+func TestWatcherLastManifestRemovalTransitionsWorkspaceToGeneric(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "server-data")
+	resourceDir := filepath.Join(root, "resources", "only_resource")
+	store, id, repoID := indexWatcherWorkspace(t, root, map[string]string{
+		"resources/only_resource/fxmanifest.lua": "fx_version 'cerulean'\nserver_script 'server.lua'\n",
+		"resources/only_resource/server.lua":     "local function KeepGeneric() end\n",
+	})
+	defer func() { _ = store.Close() }()
+	manifest := filepath.Join(resourceDir, "fxmanifest.lua")
+	if err := os.Remove(manifest); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewManager(store)
+	mgr.reindexFiles(&FolderWatch{Path: id.CanonicalPath, Repo: id.Repo, stop: make(chan struct{})}, []string{manifest})
+	if _, err := store.GetWorkspace(repoID); !storage.IsNotFound(err) {
+		t.Fatalf("workspace state survived last manifest removal: err=%v", err)
+	}
+	fiveM, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM)
+	if err != nil || len(fiveM) != 0 {
+		t.Fatalf("FiveM facts survived last manifest removal: %#v err=%v", fiveM, err)
+	}
+	files, err := store.GetFiles(repoID)
+	if err != nil || len(files) != 1 || files[0].Path != "resources/only_resource/server.lua" {
+		t.Fatalf("generic source index was not preserved: %#v err=%v", files, err)
+	}
+	if genericFacts, genericErr := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerGenericGraph); genericErr != nil || len(genericFacts) == 0 {
+		t.Fatalf("generic facts were not preserved: %#v err=%v", genericFacts, genericErr)
+	}
+}
+
+func TestWatcherServerConfigOnlyWorkspaceTransitionsToGeneric(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "server-data")
+	store, id, repoID := indexWatcherWorkspace(t, root, map[string]string{"server.cfg": "ensure missing_resource\n"})
+	defer func() { _ = store.Close() }()
+	if _, err := store.GetWorkspace(repoID); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(root, "server.cfg")
+	if err := os.Remove(cfg); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewManager(store)
+	mgr.reindexFiles(&FolderWatch{Path: id.CanonicalPath, Repo: id.Repo, stop: make(chan struct{})}, []string{cfg})
+	if _, err := store.GetWorkspace(repoID); !storage.IsNotFound(err) {
+		t.Fatalf("server.cfg-only workspace state survived deletion: err=%v", err)
+	}
+	if _, err := store.GetRepoID(id.Repo); err != nil {
+		t.Fatalf("repository was removed after config-only transition: %v", err)
+	}
+}
+
+func TestWatcherCompletenessHealsAfterSuccessfulSourceIndex(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "server-data")
+	store, id, repoID := indexWatcherWorkspace(t, root, map[string]string{
+		"resources/app/resource_x/fxmanifest.lua": "fx_version 'cerulean'\nserver_script 'server.lua'\n",
+		"resources/app/resource_x/server.lua":     "RegisterNetEvent('heal:event')\n",
+	})
+	defer func() { _ = store.Close() }()
+	if err := store.UpdateWorkspaceCompleteness(repoID, storage.WorkspaceCompleteness{FilesDiscoveredTotal: 3, FilesIndexed: 2, Incomplete: true, ResourcesWithSemantics: 1}); err != nil {
+		t.Fatal(err)
+	}
+	newPath := filepath.Join(root, "resources", "app", "resource_x", "new.lua")
+	if err := os.WriteFile(newPath, []byte("RegisterNetEvent('healed')\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewManager(store)
+	mgr.reindexFiles(&FolderWatch{Path: id.CanonicalPath, Repo: id.Repo, stop: make(chan struct{})}, []string{newPath})
+	info, err := store.GetWorkspace(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.FilesDiscoveredTotal != 3 || info.FilesIndexed != 3 || info.Incomplete {
+		t.Fatalf("workspace completeness did not heal after source recovery: %#v", info)
+	}
+}
+
+func TestWatcherLiveGitignoreReconcilesExcludeAndUnignore(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "server-data")
+	extra := "resources/app/resource_x/extra.lua"
+	store, id, repoID := indexWatcherWorkspace(t, root, map[string]string{
+		".gitignore": "",
+		"resources/app/resource_x/fxmanifest.lua": "fx_version 'cerulean'\nserver_script 'server.lua'\n",
+		"resources/app/resource_x/server.lua":     "RegisterNetEvent('keep:event')\n",
+		extra:                                     "RegisterNetEvent('extra:event')\n",
+	})
+	defer func() { _ = store.Close() }()
+	ignorePath := filepath.Join(root, ".gitignore")
+	if err := os.WriteFile(ignorePath, []byte(extra+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewManager(store)
+	watch := &FolderWatch{Path: id.CanonicalPath, Repo: id.Repo, stop: make(chan struct{})}
+	mgr.reindexFiles(watch, []string{ignorePath})
+	files, err := store.GetFiles(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		if file.Path == extra {
+			t.Fatal("live .gitignore exclusion left an indexed file")
+		}
+	}
+	if err := os.WriteFile(ignorePath, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	mgr.reindexFiles(watch, []string{ignorePath})
+	files, err = store.GetFiles(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, file := range files {
+		if file.Path == extra {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("removing ignore rule did not reindex visible source: %#v", files)
+	}
+}
+
+func TestWatcherGenericCfgEditDoesNotCreateWorkspaceRefresh(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "generic")
+	store, id, repoID := indexWatcherFiles(t, root, map[string]string{"main.go": "package main\nfunc Main() {}\n"})
+	defer func() { _ = store.Close() }()
+	cfg := filepath.Join(root, "settings.cfg")
+	if err := os.WriteFile(cfg, []byte("set foo bar\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewManager(store)
+	mgr.reindexFiles(&FolderWatch{Path: id.CanonicalPath, Repo: id.Repo, stop: make(chan struct{})}, []string{cfg})
+	if _, err := store.GetWorkspace(repoID); !storage.IsNotFound(err) {
+		t.Fatalf("generic cfg edit created or refreshed workspace state: err=%v", err)
+	}
+}
+
 func TestWatcherManifestDeletionClearsFiveMSemanticsButKeepsGenericFiles(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "resource")
 	paths := map[string]string{

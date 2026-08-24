@@ -86,8 +86,10 @@ func discover(root string, ignored func(path string, isDir bool) bool) (Discover
 		}
 	}
 	if rootManifest != "" {
-		d.Mode = KindFiveMResource
-		return d, nil
+		if ignored == nil || !ignored(filepath.Join(root, rootManifest), false) {
+			d.Mode = KindFiveMResource
+			return d, nil
+		}
 	}
 	manifestEvidence := false
 	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {

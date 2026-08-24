@@ -20,6 +20,7 @@ type Result struct {
 	FilesIndexed                                  int
 	ResourcesWithSemantics                        int
 	ResourcesWithoutSemantics                     int
+	FailedResources                               []string
 }
 
 // analyzeResourceFn is a small seam for deterministic analyzer failure tests.
@@ -44,6 +45,7 @@ func Index(ctx context.Context, store *storage.IndexStore, repoID int64, repo, r
 	}
 	combined := semantic.Result{}
 	manifestByResource := map[string]semantic.Entity{}
+	failedResources := make([]string, 0, 3)
 	for _, r := range d.Resources {
 		localFiles := map[string][]byte{}
 		localLang := map[string]string{}
@@ -58,9 +60,10 @@ func Index(ctx context.Context, store *storage.IndexStore, repoID int64, repo, r
 		}
 		result, e := analyzeResourceFn(ctx, repo, r, localFiles, localLang, localSymbols)
 		if e != nil {
-			_ = store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, semantic.Result{})
-			_ = store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveMWorkspace, semantic.Result{})
-			return Result{}, fmt.Errorf("resource %s: %w", r.Name, e)
+			if len(failedResources) < 3 {
+				failedResources = append(failedResources, r.Name)
+			}
+			continue
 		}
 		idMap := map[string]string{}
 		for _, entity := range result.Entities {
@@ -121,7 +124,7 @@ func Index(ctx context.Context, store *storage.IndexStore, repoID int64, repo, r
 	if err := store.ReplaceWorkspaceState(repoID, root, d.Mode, resources, configs, storage.WorkspaceCompleteness{FilesDiscoveredTotal: len(files), FilesIndexed: len(files), Incomplete: resourcesWithoutSemantics > 0, ResourcesWithSemantics: resourcesWithSemantics, ResourcesWithoutSemantics: resourcesWithoutSemantics}); err != nil {
 		return Result{}, err
 	}
-	return Result{Discovery: d, FiveMCount: len(combined.Entities), WorkspaceCount: len(workspaceResult.Entities), RelationshipCount: len(workspaceResult.Relationships), FilesIndexed: len(files), ResourcesWithSemantics: resourcesWithSemantics, ResourcesWithoutSemantics: resourcesWithoutSemantics}, nil
+	return Result{Discovery: d, FiveMCount: len(combined.Entities), WorkspaceCount: len(workspaceResult.Entities), RelationshipCount: len(workspaceResult.Relationships), FilesIndexed: len(files), ResourcesWithSemantics: resourcesWithSemantics, ResourcesWithoutSemantics: resourcesWithoutSemantics, FailedResources: failedResources}, nil
 }
 
 func analyzeResource(ctx context.Context, repo string, r workspace.Resource, files map[string][]byte, languages map[string]string, symbols map[string][]parser.Symbol) (semantic.Result, error) {
@@ -264,7 +267,7 @@ func RefreshWorkspaceConfiguration(store *storage.IndexStore, repoID int64, repo
 		FilesDiscoveredTotal:      previous.FilesDiscoveredTotal,
 		FilesIndexed:              previous.FilesIndexed,
 		IndexTruncated:            previous.IndexTruncated,
-		Incomplete:                previous.Incomplete || result.ResourcesWithoutSemantics > 0,
+		Incomplete:                previous.IndexTruncated || previous.FilesDiscoveredTotal != previous.FilesIndexed || result.ResourcesWithoutSemantics > 0,
 		ResourcesWithSemantics:    result.ResourcesWithSemantics,
 		ResourcesWithoutSemantics: result.ResourcesWithoutSemantics,
 	}); err != nil {
@@ -315,7 +318,7 @@ func updateWorkspaceSemanticCoverage(store *storage.IndexStore, repoID int64, wi
 		FilesDiscoveredTotal:      previous.FilesDiscoveredTotal,
 		FilesIndexed:              previous.FilesIndexed,
 		IndexTruncated:            previous.IndexTruncated,
-		Incomplete:                previous.Incomplete || degraded || withoutSemantics > 0,
+		Incomplete:                previous.IndexTruncated || previous.FilesDiscoveredTotal != previous.FilesIndexed || degraded || withoutSemantics > 0,
 		ResourcesWithSemantics:    withSemantics,
 		ResourcesWithoutSemantics: withoutSemantics,
 	})

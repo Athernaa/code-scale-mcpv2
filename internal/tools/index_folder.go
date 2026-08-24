@@ -282,7 +282,11 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 				semanticCount = wr.FiveMCount
 				workspaceCount = wr.WorkspaceCount
 				workspaceRelationships = wr.RelationshipCount
-				if err := deps.Store.UpdateWorkspaceCompleteness(repoID, storage.WorkspaceCompleteness{FilesDiscoveredTotal: discoveredTotal, FilesIndexed: len(fileHashes), IndexTruncated: indexTruncated, Incomplete: indexTruncated || skippedFiles > 0 || parseFailures > 0 || wr.ResourcesWithoutSemantics > 0, ResourcesWithSemantics: wr.ResourcesWithSemantics, ResourcesWithoutSemantics: wr.ResourcesWithoutSemantics}); err != nil {
+				if len(wr.FailedResources) > 0 {
+					semanticIncomplete = true
+					diagnostics = append(diagnostics, "workspace resource analysis failed: "+strings.Join(wr.FailedResources, ", "))
+				}
+				if err := deps.Store.UpdateWorkspaceCompleteness(repoID, storage.WorkspaceCompleteness{FilesDiscoveredTotal: discoveredTotal, FilesIndexed: len(fileHashes), IndexTruncated: indexTruncated, Incomplete: semanticIncomplete || indexTruncated || skippedFiles > 0 || parseFailures > 0 || wr.ResourcesWithoutSemantics > 0, ResourcesWithSemantics: wr.ResourcesWithSemantics, ResourcesWithoutSemantics: wr.ResourcesWithoutSemantics}); err != nil {
 					diagnostics = append(diagnostics, "workspace completeness: "+err.Error())
 				}
 			}

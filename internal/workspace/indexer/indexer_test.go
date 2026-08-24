@@ -18,11 +18,13 @@ func setupWorkspaceRefreshFixture(t *testing.T) (*storage.IndexStore, string, in
 	t.Helper()
 	root := t.TempDir()
 	files := map[string]string{
-		"server.cfg":                            "ensure source_a\nensure target_b\n",
-		"resources/[a]/source_a/fxmanifest.lua": "fx_version 'cerulean'\nclient_script 'client.lua'\n",
-		"resources/[a]/source_a/client.lua":     "TriggerServerEvent('refresh:test')\n",
-		"resources/[b]/target_b/fxmanifest.lua": "fx_version 'cerulean'\nserver_script 'server.lua'\n",
-		"resources/[b]/target_b/server.lua":     "RegisterNetEvent('refresh:test')\nAddEventHandler('refresh:test', function() end)\n",
+		"server.cfg":                               "ensure source_a\nensure target_b\nensure unrelated_c\n",
+		"resources/[a]/source_a/fxmanifest.lua":    "fx_version 'cerulean'\nclient_script 'client.lua'\n",
+		"resources/[a]/source_a/client.lua":        "TriggerServerEvent('refresh:test')\n",
+		"resources/[b]/target_b/fxmanifest.lua":    "fx_version 'cerulean'\nserver_script 'server.lua'\n",
+		"resources/[b]/target_b/server.lua":        "RegisterNetEvent('refresh:test')\nAddEventHandler('refresh:test', function() end)\n",
+		"resources/[c]/unrelated_c/fxmanifest.lua": "fx_version 'cerulean'\nserver_script 'server.lua'\n",
+		"resources/[c]/unrelated_c/server.lua":     "RegisterNetEvent('unrelated:event')\n",
 	}
 	contents := map[string][]byte{}
 	languages := map[string]string{}
@@ -323,7 +325,7 @@ func TestRefreshResourceFailureClearsStaleWorkspaceEdgesAndPreservesUnrelatedFac
 	if err != nil {
 		t.Fatal(err)
 	}
-	var sourceTrigger bool
+	var sourceTrigger, unrelatedFacts bool
 	for _, entity := range remaining {
 		if entity.Name == "refresh:test" && entity.Kind == "event_trigger" && entity.Metadata["source_resource"] == "source_a" {
 			sourceTrigger = true
@@ -331,8 +333,11 @@ func TestRefreshResourceFailureClearsStaleWorkspaceEdgesAndPreservesUnrelatedFac
 		if entity.Metadata["source_resource"] == "target_b" {
 			t.Fatalf("failed resource retained FiveM facts: %#v", entity)
 		}
+		if entity.Metadata["source_resource"] == "unrelated_c" && entity.Name == "unrelated:event" {
+			unrelatedFacts = true
+		}
 	}
-	if !sourceTrigger {
+	if !sourceTrigger || !unrelatedFacts {
 		t.Fatal("unrelated source resource facts were removed")
 	}
 	workspaceRels, err := store.GetSemanticRelationshipsForAnalyzer(repoID, semantic.AnalyzerFiveMWorkspace)
@@ -350,6 +355,106 @@ func TestRefreshResourceFailureClearsStaleWorkspaceEdgesAndPreservesUnrelatedFac
 	}
 	if !info.Incomplete || info.ResourcesWithoutSemantics == 0 {
 		t.Fatalf("failed resource was not reflected in workspace completeness: %#v", info)
+	}
+}
+
+func TestIndexKeepsValidResourcesWhenOneResourceAnalyzerFails(t *testing.T) {
+	store, root, repoID, discovery, contents, languages, symbols := setupWorkspaceRefreshFixture(t)
+	defer func() { _ = store.Close() }()
+	original := analyzeResourceFn
+	analyzeResourceFn = func(ctx context.Context, repo string, resource workspace.Resource, files map[string][]byte, languages map[string]string, symbols map[string][]parser.Symbol) (semantic.Result, error) {
+		if resource.Name == "target_b" {
+			return semantic.Result{}, errors.New("synthetic topology failure")
+		}
+		return original(ctx, repo, resource, files, languages, symbols)
+	}
+	defer func() { analyzeResourceFn = original }()
+	result, err := Index(context.Background(), store, repoID, "local/refresh-workspace", root, contents, languages, symbols, discovery)
+	if err != nil {
+		t.Fatalf("partial workspace analysis should be persisted, not returned as a fatal error: %v", err)
+	}
+	if len(result.FailedResources) != 1 || result.FailedResources[0] != "target_b" {
+		t.Fatalf("failed resource diagnostics were not bounded/correct: %#v", result)
+	}
+	entities, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sourceOK, unrelatedOK bool
+	for _, entity := range entities {
+		if entity.Metadata["source_resource"] == "target_b" {
+			t.Fatalf("failed resource facts survived full rebuild: %#v", entity)
+		}
+		if entity.Metadata["source_resource"] == "source_a" && entity.Name == "refresh:test" {
+			sourceOK = true
+		}
+		if entity.Metadata["source_resource"] == "unrelated_c" && entity.Name == "unrelated:event" {
+			unrelatedOK = true
+		}
+	}
+	if !sourceOK || !unrelatedOK {
+		t.Fatalf("valid resource facts were lost during partial rebuild: source=%v unrelated=%v", sourceOK, unrelatedOK)
+	}
+	relationships, err := store.GetSemanticRelationshipsForAnalyzer(repoID, semantic.AnalyzerFiveMWorkspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, relationship := range relationships {
+		if relationship.Kind == "cross_resource_event" {
+			t.Fatalf("failed resource left a workspace relationship: %#v", relationship)
+		}
+	}
+	info, err := store.GetWorkspace(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Incomplete || info.ResourcesWithoutSemantics == 0 {
+		t.Fatalf("partial rebuild did not mark workspace incomplete: %#v", info)
+	}
+}
+
+func TestRefreshResourceFailureRecoversCoverageAndRelationships(t *testing.T) {
+	store, root, repoID, discovery, contents, languages, symbols := setupWorkspaceRefreshFixture(t)
+	defer func() { _ = store.Close() }()
+	original := analyzeResourceFn
+	failTarget := true
+	analyzeResourceFn = func(ctx context.Context, repo string, resource workspace.Resource, files map[string][]byte, languages map[string]string, symbols map[string][]parser.Symbol) (semantic.Result, error) {
+		if failTarget && resource.Name == "target_b" {
+			return semantic.Result{}, errors.New("temporary analyzer failure")
+		}
+		return original(ctx, repo, resource, files, languages, symbols)
+	}
+	if _, err := RefreshResource(context.Background(), store, repoID, "local/refresh-workspace", root, "resources/[b]/target_b", contents, languages, symbols, discovery); err == nil {
+		t.Fatal("expected temporary resource failure")
+	}
+	failedInfo, err := store.GetWorkspace(repoID)
+	if err != nil || !failedInfo.Incomplete {
+		t.Fatalf("failed refresh was not marked incomplete: %#v err=%v", failedInfo, err)
+	}
+	failTarget = false
+	if _, err := RefreshResource(context.Background(), store, repoID, "local/refresh-workspace", root, "resources/[b]/target_b", contents, languages, symbols, discovery); err != nil {
+		t.Fatal(err)
+	}
+	analyzeResourceFn = original
+	info, err := store.GetWorkspace(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Incomplete || info.ResourcesWithoutSemantics != 0 || info.ResourcesWithSemantics != 3 {
+		t.Fatalf("successful resource refresh did not heal coverage: %#v", info)
+	}
+	relationships, err := store.GetSemanticRelationshipsForAnalyzer(repoID, semantic.AnalyzerFiveMWorkspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundEvent := false
+	for _, relationship := range relationships {
+		if relationship.Kind == "cross_resource_event" && relationship.Name == "refresh:test" {
+			foundEvent = true
+		}
+	}
+	if !foundEvent {
+		t.Fatalf("relationship was not restored after resource recovery: %#v", relationships)
 	}
 }
 
