@@ -80,15 +80,16 @@ func (a *Analyzer) AnalyzeRepository(ctx context.Context, input semantic.Reposit
 		Side:      "shared",
 		Line:      1,
 		Metadata: map[string]any{
-			"fx_version":        manifest.FXVersion,
-			"game":              manifest.Game,
-			"ui_page":           manifest.UIPage,
-			"client_scripts":    append([]string(nil), manifest.ClientScripts...),
-			"server_scripts":    append([]string(nil), manifest.ServerScripts...),
-			"shared_scripts":    append([]string(nil), manifest.SharedScripts...),
-			"dependencies":      append([]string(nil), manifest.Dependencies...),
-			"resource":          resource,
-			"source_side_model": "manifest_globs",
+			"fx_version":         manifest.FXVersion,
+			"game":               manifest.Game,
+			"ui_page":            manifest.UIPage,
+			"client_scripts":     append([]string(nil), manifest.ClientScripts...),
+			"server_scripts":     append([]string(nil), manifest.ServerScripts...),
+			"shared_scripts":     append([]string(nil), manifest.SharedScripts...),
+			"dependencies":       append([]string(nil), manifest.Dependencies...),
+			"dependency_sources": manifest.DependencySources,
+			"resource":           resource,
+			"source_side_model":  "manifest_globs",
 		},
 	}
 	resourceEntity.ID = semantic.StableID("semantic", repo, manifestPath, KindManifestResource, resource)
@@ -108,7 +109,10 @@ func (a *Analyzer) AnalyzeRepository(ctx context.Context, input semantic.Reposit
 			Framework: FrameworkFiveM,
 			Side:      "shared",
 			Line:      manifest.DependencyLines[dependency],
-			Metadata:  map[string]any{"external": strings.HasPrefix(dependency, "@")},
+			Metadata: map[string]any{
+				"external": strings.HasPrefix(dependency, "@"),
+				"sources":  append([]string(nil), manifest.DependencySources[dependency]...),
+			},
 		}
 		entity.ID = semantic.StableID("semantic", repo, manifestPath, KindManifestDependency, dependency)
 		result.Entities = append(result.Entities, entity)
@@ -123,6 +127,24 @@ func (a *Analyzer) AnalyzeRepository(ctx context.Context, input semantic.Reposit
 			File:         manifestPath,
 			Line:         entity.Line,
 		})
+	}
+	for _, export := range manifest.Exports {
+		entity := semantic.Entity{
+			Repo:      repo,
+			File:      manifestPath,
+			Kind:      KindExportDefinition,
+			Name:      export.Name,
+			Framework: FrameworkFiveM,
+			Side:      export.Side,
+			Line:      export.Line,
+			Metadata: map[string]any{
+				"operation": "manifest_export",
+				"source":    "manifest_export",
+				"resource":  resource,
+			},
+		}
+		entity.ID = semantic.StableID("semantic", repo, manifestPath, KindExportDefinition, export.Side, export.Name)
+		result.Entities = append(result.Entities, entity)
 	}
 
 	paths := make([]string, 0, len(input.Files))

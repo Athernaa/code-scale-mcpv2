@@ -379,13 +379,22 @@ func TestSemanticStorageSearchReplaceTraceAndFileIsolation(t *testing.T) {
 	if err := store.ReplaceSemanticIndex(repoID, semantic.Result{Entities: []semantic.Entity{trigger, handler, unrelated}, Relationships: []semantic.Relationship{link}}); err != nil {
 		t.Fatal(err)
 	}
-	results, err := store.SearchSemantic(repoID, "create", "event_handler", "server", 20)
+	results, truncated, err := store.SearchSemantic(repoID, "create", "event_handler", "server", 20)
 	if err != nil || len(results) != 1 || results[0].ID != handler.ID {
 		t.Fatalf("semantic search filtering failed: %#v err=%v", results, err)
 	}
-	edges, err := store.TraceSemantic(repoID, trigger.ID, "outgoing", 2, 50)
+	if truncated {
+		t.Fatal("semantic search reported truncation without an extra row")
+	}
+	edges, truncated, err := store.TraceSemantic(repoID, trigger.ID, "outgoing", 2, 50)
 	if err != nil || len(edges) != 1 || edges[0].To == nil || edges[0].To.ID != handler.ID {
 		t.Fatalf("semantic trace failed: %#v err=%v", edges, err)
+	}
+	if truncated {
+		t.Fatal("semantic trace reported truncation without an extra edge")
+	}
+	if _, _, err := store.TraceSemantic(repoID, "missing", "outgoing", 2, 50); err == nil {
+		t.Fatal("missing semantic entity should return an error")
 	}
 
 	newTrigger := semantic.Entity{ID: "new-trigger", Repo: "local/semantic", File: "client.lua", Kind: "event_trigger", Name: "avenlo:updated", Framework: "fivem", Side: "client", Line: 1}

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
+	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/fivem"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -25,8 +27,8 @@ func semanticToolStore(t *testing.T) (*storage.IndexStore, int64) {
 		_ = store.Close()
 		t.Fatal(err)
 	}
-	trigger := semantic.Entity{ID: "tool-trigger", Repo: "local/semantic-tools", File: "client.lua", Kind: "event_trigger", Name: "avenlo:create", Framework: "fivem", Side: "client", Line: 4}
-	handler := semantic.Entity{ID: "tool-handler", Repo: "local/semantic-tools", File: "server.lua", Kind: "event_handler", Name: "avenlo:create", Framework: "fivem", Side: "server", Line: 9}
+	trigger := semantic.Entity{ID: "tool-trigger", Repo: "local/semantic-tools", File: "client.lua", SymbolID: "symbol-trigger", Kind: "event_trigger", Name: "avenlo:create", Framework: "fivem", Side: "client", Line: 4}
+	handler := semantic.Entity{ID: "tool-handler", Repo: "local/semantic-tools", File: "server.lua", SymbolID: "symbol-handler", Kind: "event_handler", Name: "avenlo:create", Framework: "fivem", Side: "server", Line: 9}
 	entities := []semantic.Entity{trigger, handler}
 	for i := 0; i < 10; i++ {
 		entities = append(entities, semantic.Entity{ID: "tool-command-" + string(rune('a'+i)), Repo: "local/semantic-tools", File: "server.lua", Kind: "command_registration", Name: "cmd", Framework: "fivem", Side: "server", Line: 20 + i})
@@ -66,6 +68,12 @@ func TestSemanticToolsFilterTraceAndBoundResults(t *testing.T) {
 	if !ok || len(searchItems) != 1 || searchItems[0].(map[string]any)["kind"] != "event_handler" {
 		t.Fatalf("semantic search returned unexpected result: %#v", search)
 	}
+	if searchItems[0].(map[string]any)["symbol_id"] != "symbol-handler" {
+		t.Fatalf("semantic search omitted symbol bridge: %#v", search)
+	}
+	if search["truncated"] != false {
+		t.Fatalf("exact-limit semantic search incorrectly reported truncation: %#v", search)
+	}
 
 	boundedResult, _, err := SearchSemanticsHandler(deps)(context.Background(), nil, SearchSemanticsArgs{Repo: "local/semantic-tools", Query: "cmd", MaxResults: 3})
 	if err != nil {
@@ -95,5 +103,54 @@ func TestSemanticToolsFilterTraceAndBoundResults(t *testing.T) {
 	incoming := decodeToolJSON(t, incomingResult)
 	if len(incoming["results"].([]any)) != 1 {
 		t.Fatalf("incoming trace did not resolve the caller: %#v", incoming)
+	}
+	invalidResult, _, err := TraceRelationshipsHandler(deps)(context.Background(), nil, TraceRelationshipsArgs{
+		Repo: "local/semantic-tools", EntityID: "missing", Direction: "outgoing",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !invalidResult.IsError {
+		t.Fatal("trace for an unknown entity should return an MCP error result")
+	}
+}
+
+func TestSemanticSearchPreservesAnalyzerSymbolBridge(t *testing.T) {
+	store, err := storage.NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	content := []byte("function setup()\n  TriggerEvent('avenlo:local')\nend\n")
+	symbols, err := parser.ParseFile(content, "client.lua", "lua")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := fivem.NewAnalyzer().AnalyzeFile(context.Background(), semantic.FileInput{
+		Repo: "local/bridge", File: "client.lua", Language: "lua", Side: "client", Content: content, Symbols: symbols,
+	})
+	if err != nil || len(result.Entities) != 1 || result.Entities[0].SymbolID == "" {
+		t.Fatalf("analyzer did not associate a symbol: %#v err=%v", result.Entities, err)
+	}
+	if err := store.ReplaceRepoIndex("local", "bridge", "local", "", map[string]string{"client.lua": "hash"}, map[string]string{"client.lua": "lua"}, symbols); err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID("local/bridge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticIndex(repoID, result); err != nil {
+		t.Fatal(err)
+	}
+	response, _, err := SearchSemanticsHandler(&Deps{Store: store})(context.Background(), nil, SearchSemanticsArgs{
+		Repo: "local/bridge", Query: "avenlo:local", MaxResults: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded := decodeToolJSON(t, response)
+	items := decoded["results"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["symbol_id"] != result.Entities[0].SymbolID {
+		t.Fatalf("semantic-to-symbol bridge was lost: %#v", decoded)
 	}
 }

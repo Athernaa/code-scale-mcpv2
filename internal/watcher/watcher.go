@@ -315,6 +315,11 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 	}
 	owner := localID.Owner
 	repoName := localID.Name
+	resourceName, err := repository.LocalResourceName(localID.CanonicalPath)
+	if err != nil {
+		log.Printf("watcher: cannot derive resource name for %s: %v", fw.Path, err)
+		return
+	}
 
 	for _, fullPath := range paths {
 		relPath, err := filepath.Rel(fw.Path, fullPath)
@@ -328,6 +333,13 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 			log.Printf("watcher: file removed %s, cleaning index", relPath)
 			if err := m.store.DeleteFileFromIndex(owner, repoName, relPath); err != nil {
 				log.Printf("watcher: failed to remove %s from index: %v", relPath, err)
+			} else if relPath == "fxmanifest.lua" || relPath == "__resource.lua" {
+				repoID, repoErr := m.store.GetRepoID(owner + "/" + repoName)
+				if repoErr == nil {
+					if rebuildErr := m.rebuildSemanticRepository(repoID, owner+"/"+repoName, resourceName); rebuildErr != nil {
+						log.Printf("watcher: failed to clear semantic resource after removing %s: %v", relPath, rebuildErr)
+					}
+				}
 			} else if err := m.refreshSemanticRelationships(owner + "/" + repoName); err != nil {
 				log.Printf("watcher: failed to refresh semantic relationships after removing %s: %v", relPath, err)
 			}
@@ -372,7 +384,7 @@ func (m *Manager) reindexFiles(fw *FolderWatch, paths []string) {
 			continue
 		}
 
-		if err := m.updateSemanticFile(owner+"/"+repoName, repoName, relPath, lang, content, symbols); err != nil {
+		if err := m.updateSemanticFile(owner+"/"+repoName, resourceName, relPath, lang, content, symbols); err != nil {
 			log.Printf("watcher: semantic update failed for %s: %v", relPath, err)
 		}
 
@@ -392,12 +404,17 @@ func (m *Manager) updateSemanticFile(repo, resource, filePath, language string, 
 	if err != nil {
 		return err
 	}
+	manifestFound := false
 	side := "unknown"
 	for _, entity := range entities {
 		if entity.Kind == fivem.KindManifestResource {
+			manifestFound = true
 			side = fivem.ClassifyPathFromEntity(entity, filePath)
 			break
 		}
+	}
+	if !manifestFound {
+		return m.store.ReplaceSemanticIndex(repoID, semantic.Result{})
 	}
 	result, err := fivem.NewAnalyzer().AnalyzeFile(context.Background(), semantic.FileInput{
 		Repo: repo, Resource: resource, File: filePath, Language: language,

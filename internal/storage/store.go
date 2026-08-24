@@ -745,6 +745,32 @@ func (s *IndexStore) GetSemanticEntities(repoID int64) ([]semantic.Entity, error
 	return s.getSemanticEntitiesLocked(repoID)
 }
 
+// GetSemanticRelationships returns all stored semantic edges for verification
+// and maintenance operations. Query tools should prefer TraceSemantic.
+func (s *IndexStore) GetSemanticRelationships(repoID int64) ([]semantic.Relationship, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	repoName := repoNameLocked(s.db, repoID)
+	rows, err := s.db.Query(`SELECT id, from_entity_id, to_entity_id, kind, name, dynamic, confidence, file_path, line
+		FROM semantic_relationships WHERE repo_id = ? ORDER BY id`, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var result []semantic.Relationship
+	for rows.Next() {
+		var relationship semantic.Relationship
+		var dynamic int
+		if err := rows.Scan(&relationship.ID, &relationship.FromEntityID, &relationship.ToEntityID, &relationship.Kind, &relationship.Name, &dynamic, &relationship.Confidence, &relationship.File, &relationship.Line); err != nil {
+			return nil, err
+		}
+		relationship.Repo = repoName
+		relationship.Dynamic = dynamic != 0
+		result = append(result, relationship)
+	}
+	return result, rows.Err()
+}
+
 func (s *IndexStore) getSemanticEntitiesLocked(repoID int64) ([]semantic.Entity, error) {
 	repoName := repoNameLocked(s.db, repoID)
 	rows, err := s.db.Query(`SELECT id, file_path, symbol_id, kind, name, framework, side, line, end_line, dynamic, metadata
@@ -775,7 +801,7 @@ func (s *IndexStore) getSemanticEntitiesLocked(repoID int64) ([]semantic.Entity,
 
 // SearchSemantic performs a compact indexed SQL search without reading source
 // files. Query, kind, and side are optional filters.
-func (s *IndexStore) SearchSemantic(repoID int64, query, kind, side string, maxResults int) ([]semantic.Entity, error) {
+func (s *IndexStore) SearchSemantic(repoID int64, query, kind, side string, maxResults int) ([]semantic.Entity, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if maxResults <= 0 {
@@ -789,26 +815,38 @@ func (s *IndexStore) SearchSemantic(repoID int64, query, kind, side string, maxR
 		FROM semantic_entities
 		WHERE repo_id = ? AND (? = '' OR lower(name) LIKE '%' || lower(?) || '%')
 		  AND (? = '' OR kind = ?) AND (? = '' OR side = ?)
-		ORDER BY file_path, line, id LIMIT ?`, repoID, query, query, kind, kind, side, side, maxResults)
+		ORDER BY file_path, line, id LIMIT ?`, repoID, query, query, kind, kind, side, side, maxResults+1)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer func() { _ = rows.Close() }()
 	var result []semantic.Entity
 	for rows.Next() {
 		entity, err := scanSemanticEntity(rows, repoName)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		result = append(result, entity)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	truncated := len(result) > maxResults
+	if truncated {
+		result = result[:maxResults]
+	}
+	return result, truncated, nil
 }
 
 // TraceSemantic traverses stored relationship edges without touching source
 // content. Unresolved edges are returned only when they originate from the
 // requested entity; they are never traversed as if they had a target.
-func (s *IndexStore) TraceSemantic(repoID int64, entityID, direction string, depth, maxResults int) ([]semantic.TraceEdge, error) {
+//
+// TODO: before multi-resource workspace support, replace this bounded in-memory
+// traversal with indexed adjacency queries on (repo_id, from_entity_id) and
+// (repo_id, to_entity_id). Keeping this debt explicit avoids hiding the
+// current scalability limit behind the MCP tool.
+func (s *IndexStore) TraceSemantic(repoID int64, entityID, direction string, depth, maxResults int) ([]semantic.TraceEdge, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if depth <= 0 {
@@ -823,9 +861,16 @@ func (s *IndexStore) TraceSemantic(repoID int64, entityID, direction string, dep
 	if maxResults > 200 {
 		maxResults = 200
 	}
+	var exists int
+	if err := s.db.QueryRow("SELECT 1 FROM semantic_entities WHERE repo_id = ? AND id = ?", repoID, entityID).Scan(&exists); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, false, fmt.Errorf("semantic entity %q not found in repository", entityID)
+		}
+		return nil, false, err
+	}
 	entities, err := s.getSemanticEntitiesLocked(repoID)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	repoName := repoNameLocked(s.db, repoID)
 	entityMap := make(map[string]semantic.Entity, len(entities))
@@ -835,7 +880,7 @@ func (s *IndexStore) TraceSemantic(repoID int64, entityID, direction string, dep
 	rows, err := s.db.Query(`SELECT id, from_entity_id, to_entity_id, kind, name, dynamic, confidence, file_path, line
 		FROM semantic_relationships WHERE repo_id = ? ORDER BY id`, repoID)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer func() { _ = rows.Close() }()
 	var relationships []semantic.Relationship
@@ -843,14 +888,14 @@ func (s *IndexStore) TraceSemantic(repoID int64, entityID, direction string, dep
 		var relationship semantic.Relationship
 		var dynamic int
 		if err := rows.Scan(&relationship.ID, &relationship.FromEntityID, &relationship.ToEntityID, &relationship.Kind, &relationship.Name, &dynamic, &relationship.Confidence, &relationship.File, &relationship.Line); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		relationship.Repo = repoName
 		relationship.Dynamic = dynamic != 0
 		relationships = append(relationships, relationship)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	if direction != "incoming" && direction != "outgoing" && direction != "both" {
@@ -863,7 +908,7 @@ func (s *IndexStore) TraceSemantic(repoID int64, entityID, direction string, dep
 	queue := []queueItem{{entityID, 0}}
 	visited := map[string]bool{entityID: true}
 	var result []semantic.TraceEdge
-	for len(queue) > 0 && len(result) < maxResults {
+	for len(queue) > 0 && len(result) < maxResults+1 {
 		current := queue[0]
 		queue = queue[1:]
 		if current.depth >= depth {
@@ -895,12 +940,16 @@ func (s *IndexStore) TraceSemantic(repoID int64, entityID, direction string, dep
 				visited[nextID] = true
 				queue = append(queue, queueItem{nextID, current.depth + 1})
 			}
-			if len(result) >= maxResults {
+			if len(result) >= maxResults+1 {
 				break
 			}
 		}
 	}
-	return result, nil
+	truncated := len(result) > maxResults
+	if truncated {
+		result = result[:maxResults]
+	}
+	return result, truncated, nil
 }
 
 func deleteSemanticIndexTx(tx *sql.Tx, repoID int64) error {

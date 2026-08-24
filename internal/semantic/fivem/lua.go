@@ -53,7 +53,7 @@ func analyzeCall(call luaCall, input semantic.FileInput) []semantic.Entity {
 		return eventEntities(call, input, KindEventRegistration, true)
 	case "AddEventHandler":
 		return eventEntities(call, input, KindEventHandler, false)
-	case "TriggerEvent", "TriggerServerEvent", "TriggerClientEvent":
+	case "TriggerEvent", "TriggerServerEvent", "TriggerClientEvent", "TriggerLatentServerEvent", "TriggerLatentClientEvent":
 		return eventEntities(call, input, KindEventTrigger, false)
 	case "RegisterNUICallback":
 		return namedEntities(call, input, KindNUICallback, "nui_callback")
@@ -63,7 +63,7 @@ func analyzeCall(call luaCall, input semantic.FileInput) []semantic.Entity {
 		return exportDefinition(call, input)
 	case "lib.callback.register":
 		return namedEntities(call, input, KindCallbackRegistration, "callback_registration")
-	case "lib.callback.await", "lib.callback.call", "lib.callback.trigger":
+	case "lib.callback", "lib.callback.await", "lib.callback.call", "lib.callback.trigger":
 		return namedEntities(call, input, KindCallbackCall, callee)
 	default:
 		if resource, name, ok := exportCall(callee); ok {
@@ -248,7 +248,15 @@ func ResolveRelationships(entities []semantic.Entity) []semantic.Relationship {
 			continue
 		}
 		for _, handler := range handlers {
-			if handler.Dynamic || handler.Name != trigger.Name || !compatibleEventSide(trigger, handler) {
+			if handler.Dynamic || handler.Name != trigger.Name {
+				continue
+			}
+			operation, _ := trigger.Metadata["operation"].(string)
+			if operation == "TriggerEvent" {
+				if !compatibleLocalEventSide(trigger, handler) {
+					continue
+				}
+			} else if !networkHandlerBackedByRegistration(trigger, handler, registrations) {
 				continue
 			}
 			result = append(result, relationship(trigger, handler, RelationshipTriggers))
@@ -259,7 +267,7 @@ func ResolveRelationships(entities []semantic.Entity) []semantic.Relationship {
 			continue
 		}
 		for _, registration := range registrations {
-			if registration.Name == handler.Name && !registration.Dynamic && registration.Repo == handler.Repo {
+			if registration.Name == handler.Name && !registration.Dynamic && registration.Repo == handler.Repo && compatibleHandlerRegistrationSide(handler, registration) {
 				result = append(result, relationship(handler, registration, RelationshipRegisters))
 			}
 		}
@@ -278,21 +286,47 @@ func ResolveRelationships(entities []semantic.Entity) []semantic.Relationship {
 	return result
 }
 
-func compatibleEventSide(trigger, handler semantic.Entity) bool {
-	expected := ""
+func compatibleLocalEventSide(trigger, handler semantic.Entity) bool {
+	return sidesCompatible(semantic.NormalizeSide(trigger.Side), semantic.NormalizeSide(handler.Side))
+}
+
+func networkHandlerBackedByRegistration(trigger, handler semantic.Entity, registrations []semantic.Entity) bool {
+	target := networkTargetSide(trigger)
+	if target == "" || !sidesCompatible(target, semantic.NormalizeSide(handler.Side)) {
+		return false
+	}
+	for _, registration := range registrations {
+		if registration.Dynamic || registration.Name != trigger.Name || registration.Repo != trigger.Repo {
+			continue
+		}
+		if sidesCompatible(target, semantic.NormalizeSide(registration.Side)) {
+			return true
+		}
+	}
+	return false
+}
+
+func networkTargetSide(trigger semantic.Entity) string {
 	operation, _ := trigger.Metadata["operation"].(string)
 	switch operation {
-	case "TriggerServerEvent":
-		expected = "server"
-	case "TriggerClientEvent":
-		expected = "client"
-	case "TriggerEvent":
-		expected = semantic.NormalizeSide(trigger.Side)
+	case "TriggerServerEvent", "TriggerLatentServerEvent":
+		return "server"
+	case "TriggerClientEvent", "TriggerLatentClientEvent":
+		return "client"
+	default:
+		return ""
 	}
-	if expected == "unknown" {
-		expected = ""
+}
+
+func compatibleHandlerRegistrationSide(handler, registration semantic.Entity) bool {
+	return sidesCompatible(semantic.NormalizeSide(handler.Side), semantic.NormalizeSide(registration.Side))
+}
+
+func sidesCompatible(expected, actual string) bool {
+	if expected == "unknown" || actual == "unknown" {
+		return expected == actual
 	}
-	return expected == "" || semantic.NormalizeSide(handler.Side) == expected || semantic.NormalizeSide(handler.Side) == "shared"
+	return expected == actual || expected == "shared" || actual == "shared"
 }
 
 func compatibleCallbackSide(call, registration semantic.Entity) bool {
@@ -303,7 +337,7 @@ func compatibleCallbackSide(call, registration semantic.Entity) bool {
 	if side == "server" {
 		return semantic.NormalizeSide(registration.Side) == "client" || semantic.NormalizeSide(registration.Side) == "shared"
 	}
-	return true
+	return false
 }
 
 func relationship(from, to semantic.Entity, kind string) semantic.Relationship {

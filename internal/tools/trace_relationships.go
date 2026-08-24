@@ -16,13 +16,16 @@ type TraceRelationshipsArgs struct {
 }
 
 type semanticEndpoint struct {
-	ID      string `json:"id"`
-	Kind    string `json:"kind"`
-	Name    string `json:"name"`
-	Side    string `json:"side,omitempty"`
-	File    string `json:"file"`
-	Line    int    `json:"line"`
-	Dynamic bool   `json:"dynamic,omitempty"`
+	ID        string `json:"id"`
+	Kind      string `json:"kind"`
+	Name      string `json:"name"`
+	Operation string `json:"operation,omitempty"`
+	Resource  string `json:"resource,omitempty"`
+	Side      string `json:"side,omitempty"`
+	File      string `json:"file"`
+	Line      int    `json:"line"`
+	SymbolID  string `json:"symbol_id,omitempty"`
+	Dynamic   bool   `json:"dynamic,omitempty"`
 }
 
 type relationshipTraceResult struct {
@@ -44,7 +47,7 @@ func TraceRelationshipsHandler(deps *Deps) func(context.Context, *mcp.CallToolRe
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
 		}
-		edges, err := deps.Store.TraceSemantic(repoID, args.EntityID, args.Direction, args.Depth, args.MaxResults)
+		edges, truncated, err := deps.Store.TraceSemantic(repoID, args.EntityID, args.Direction, args.Depth, args.MaxResults)
 		if err != nil {
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
@@ -71,8 +74,8 @@ func TraceRelationshipsHandler(deps *Deps) func(context.Context, *mcp.CallToolRe
 			"entity_id": args.EntityID,
 			"direction": normalizedDirection(args.Direction),
 			"results":   results,
-			"truncated": args.MaxResults > 0 && len(results) >= minTraceLimit(args.MaxResults),
-			"_meta":     deps.meta(t, args.Repo, args.MaxResults > 0 && len(results) >= minTraceLimit(args.MaxResults), 0, 0),
+			"truncated": truncated,
+			"_meta":     deps.meta(t, args.Repo, truncated, 0, 0),
 		}
 		r, _ := toTextResult(result)
 		return r, nil, nil
@@ -80,7 +83,8 @@ func TraceRelationshipsHandler(deps *Deps) func(context.Context, *mcp.CallToolRe
 }
 
 func endpoint(entity semantic.Entity) semanticEndpoint {
-	return semanticEndpoint{ID: entity.ID, Kind: entity.Kind, Name: entity.Name, Side: entity.Side, File: entity.File, Line: entity.Line, Dynamic: entity.Dynamic}
+	operation, resource := semanticMetadata(entity)
+	return semanticEndpoint{ID: entity.ID, Kind: entity.Kind, Name: entity.Name, Operation: operation, Resource: resource, Side: entity.Side, File: entity.File, Line: entity.Line, SymbolID: entity.SymbolID, Dynamic: entity.Dynamic}
 }
 
 func normalizedDirection(direction string) string {
@@ -88,14 +92,4 @@ func normalizedDirection(direction string) string {
 		return direction
 	}
 	return "both"
-}
-
-func minTraceLimit(value int) int {
-	if value <= 0 {
-		return 50
-	}
-	if value > 200 {
-		return 200
-	}
-	return value
 }

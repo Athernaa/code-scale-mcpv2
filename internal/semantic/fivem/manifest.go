@@ -11,14 +11,22 @@ import (
 )
 
 type manifestInfo struct {
-	FXVersion       string
-	Game            string
-	UIPage          string
-	ClientScripts   []string
-	ServerScripts   []string
-	SharedScripts   []string
-	Dependencies    []string
-	DependencyLines map[string]int
+	FXVersion         string
+	Game              string
+	UIPage            string
+	ClientScripts     []string
+	ServerScripts     []string
+	SharedScripts     []string
+	Dependencies      []string
+	DependencyLines   map[string]int
+	DependencySources map[string][]string
+	Exports           []manifestExport
+}
+
+type manifestExport struct {
+	Name string
+	Side string
+	Line int
 }
 
 func parseManifest(file string, source []byte) (manifestInfo, error) {
@@ -30,7 +38,10 @@ func parseManifest(file string, source []byte) (manifestInfo, error) {
 		return manifestInfo{}, fmt.Errorf("empty syntax tree")
 	}
 
-	result := manifestInfo{DependencyLines: make(map[string]int)}
+	result := manifestInfo{
+		DependencyLines:   make(map[string]int),
+		DependencySources: make(map[string][]string),
+	}
 	walkNodes(root, func(node *sitter.Node) {
 		if node.Type() != "function_call" {
 			return
@@ -47,22 +58,63 @@ func parseManifest(file string, source []byte) (manifestInfo, error) {
 			result.UIPage = first(values)
 		case "client_script", "client_scripts":
 			result.ClientScripts = append(result.ClientScripts, values...)
+			result.addExternalScriptDependencies(values, line)
 		case "server_script", "server_scripts":
 			result.ServerScripts = append(result.ServerScripts, values...)
+			result.addExternalScriptDependencies(values, line)
 		case "shared_script", "shared_scripts":
 			result.SharedScripts = append(result.SharedScripts, values...)
+			result.addExternalScriptDependencies(values, line)
 		case "dependency", "dependencies":
 			for _, value := range values {
-				if strings.HasPrefix(value, "@") {
-					// External resources remain dependencies, but are never
-					// interpreted as local script paths.
-				}
-				result.Dependencies = appendUnique(result.Dependencies, value)
-				result.DependencyLines[value] = line
+				result.addDependency(value, line, "explicit_dependency")
 			}
+		case "export", "exports":
+			result.addExports(values, "client", line)
+		case "server_export", "server_exports":
+			result.addExports(values, "server", line)
 		}
 	})
 	return result, nil
+}
+
+func (m *manifestInfo) addDependency(name string, line int, source string) {
+	if name == "" {
+		return
+	}
+	m.Dependencies = appendUnique(m.Dependencies, name)
+	if _, ok := m.DependencyLines[name]; !ok {
+		m.DependencyLines[name] = line
+	}
+	m.DependencySources[name] = appendUnique(m.DependencySources[name], source)
+}
+
+func (m *manifestInfo) addExternalScriptDependencies(values []string, line int) {
+	for _, value := range values {
+		if !strings.HasPrefix(value, "@") {
+			continue
+		}
+		resource := strings.TrimPrefix(value, "@")
+		if slash := strings.IndexByte(resource, '/'); slash >= 0 {
+			resource = resource[:slash]
+		}
+		m.addDependency(resource, line, "external_script_reference")
+	}
+}
+
+func (m *manifestInfo) addExports(values []string, side string, line int) {
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		for _, existing := range m.Exports {
+			if existing.Name == value && existing.Side == side {
+				goto next
+			}
+		}
+		m.Exports = append(m.Exports, manifestExport{Name: value, Side: side, Line: line})
+	next:
+	}
 }
 
 func walkNodes(node *sitter.Node, visit func(*sitter.Node)) {

@@ -108,4 +108,17 @@ func TestIndexFolderPersistsFiveMSemantics(t *testing.T) {
 	if !found {
 		t.Fatalf("indexed FiveM semantics missing server handler: %#v", entities)
 	}
+	resourceFound := false
+	exportResourceCorrect := false
+	for _, entity := range entities {
+		if entity.Kind == "manifest_resource" && entity.Name == "basic_resource" {
+			resourceFound = true
+		}
+		if entity.Kind == "export_definition" && entity.Name == "getCharacter" && entity.Metadata["resource"] == "basic_resource" {
+			exportResourceCorrect = true
+		}
+	}
+	if !resourceFound || !exportResourceCorrect {
+		t.Fatalf("semantic resource identity used the storage hash: %#v", entities)
+	}
 }

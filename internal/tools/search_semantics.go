@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 
+	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -18,11 +19,14 @@ type semanticSearchResult struct {
 	ID        string `json:"id"`
 	Kind      string `json:"kind"`
 	Name      string `json:"name"`
+	Operation string `json:"operation,omitempty"`
+	Resource  string `json:"resource,omitempty"`
 	Framework string `json:"framework,omitempty"`
 	Side      string `json:"side,omitempty"`
 	File      string `json:"file"`
 	Line      int    `json:"line"`
 	EndLine   int    `json:"end_line,omitempty"`
+	SymbolID  string `json:"symbol_id,omitempty"`
 	Dynamic   bool   `json:"dynamic,omitempty"`
 }
 
@@ -34,36 +38,36 @@ func SearchSemanticsHandler(deps *Deps) func(context.Context, *mcp.CallToolReque
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
 		}
-		entities, err := deps.Store.SearchSemantic(repoID, args.Query, args.Kind, args.Side, args.MaxResults)
+		entities, truncated, err := deps.Store.SearchSemantic(repoID, args.Query, args.Kind, args.Side, args.MaxResults)
 		if err != nil {
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
 		}
 		results := make([]semanticSearchResult, 0, len(entities))
 		for _, entity := range entities {
+			operation, resource := semanticMetadata(entity)
 			results = append(results, semanticSearchResult{
 				ID: entity.ID, Kind: entity.Kind, Name: entity.Name, Framework: entity.Framework,
 				Side: entity.Side, File: entity.File, Line: entity.Line, EndLine: entity.EndLine,
-				Dynamic: entity.Dynamic,
+				SymbolID: entity.SymbolID, Operation: operation, Resource: resource, Dynamic: entity.Dynamic,
 			})
 		}
 		result := map[string]any{
 			"repo":      args.Repo,
 			"results":   results,
-			"truncated": args.MaxResults > 0 && len(results) >= minSemanticLimit(args.MaxResults),
-			"_meta":     deps.meta(t, args.Repo, args.MaxResults > 0 && len(results) >= minSemanticLimit(args.MaxResults), 0, 0),
+			"truncated": truncated,
+			"_meta":     deps.meta(t, args.Repo, truncated, 0, 0),
 		}
 		r, _ := toTextResult(result)
 		return r, nil, nil
 	}
 }
 
-func minSemanticLimit(value int) int {
-	if value <= 0 {
-		return 20
+func semanticMetadata(entity semantic.Entity) (operation, resource string) {
+	if entity.Metadata == nil {
+		return "", ""
 	}
-	if value > 200 {
-		return 200
-	}
-	return value
+	operation, _ = entity.Metadata["operation"].(string)
+	resource, _ = entity.Metadata["resource"].(string)
+	return operation, resource
 }

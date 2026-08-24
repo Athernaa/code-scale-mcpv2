@@ -98,6 +98,11 @@ func TestAnalyzeBasicFiveMResource(t *testing.T) {
 			t.Fatalf("missing dependency %q", dependency)
 		}
 	}
+	oxLib := findEntities(result, KindManifestDependency, "ox_lib")[0]
+	sources, _ := oxLib.Metadata["sources"].([]string)
+	if len(sources) != 2 || sources[0] != "external_script_reference" || sources[1] != "explicit_dependency" {
+		t.Fatalf("dependency provenance was not preserved: %#v", oxLib.Metadata)
+	}
 
 	for _, want := range []struct {
 		path string
@@ -206,5 +211,143 @@ func TestAnalyzeInlineNetEventHandler(t *testing.T) {
 	}
 	if len(findEntities(result, KindEventRegistration, "avenlo:inline")) != 1 || len(findEntities(result, KindEventHandler, "avenlo:inline")) != 1 {
 		t.Fatalf("inline registration handler was not extracted: %#v", result.Entities)
+	}
+}
+
+func analyzeLuaForTest(t *testing.T, file, side, source string) []semantic.Entity {
+	t.Helper()
+	result, err := NewAnalyzer().AnalyzeFile(context.Background(), semantic.FileInput{
+		Repo: "local/test", File: file, Language: "lua", Side: side, Content: []byte(source),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result.Entities
+}
+
+func TestNetworkTriggersRequireNetworkRegistration(t *testing.T) {
+	entities := append(
+		analyzeLuaForTest(t, "client.lua", "client", `TriggerServerEvent("test:event")`),
+		analyzeLuaForTest(t, "server.lua", "server", `AddEventHandler("test:event", function() end)`)...,
+	)
+	if relationships := ResolveRelationships(entities); hasRelationship(semantic.Result{Entities: entities, Relationships: relationships}, RelationshipTriggers, KindEventTrigger, KindEventHandler, "test:event") {
+		t.Fatal("network trigger resolved without RegisterNetEvent")
+	}
+
+	entities = append(entities, analyzeLuaForTest(t, "server.lua", "server", `RegisterNetEvent("test:event")`)...)
+	if relationships := ResolveRelationships(entities); !hasRelationship(semantic.Result{Entities: entities, Relationships: relationships}, RelationshipTriggers, KindEventTrigger, KindEventHandler, "test:event") {
+		t.Fatal("network trigger did not resolve after matching RegisterNetEvent")
+	}
+
+	clientEntities := append(
+		analyzeLuaForTest(t, "server.lua", "server", `TriggerClientEvent("test:client", 1)`),
+		analyzeLuaForTest(t, "client.lua", "client", `AddEventHandler("test:client", function() end)`)...,
+	)
+	if relationships := ResolveRelationships(clientEntities); hasRelationship(semantic.Result{Entities: clientEntities, Relationships: relationships}, RelationshipTriggers, KindEventTrigger, KindEventHandler, "test:client") {
+		t.Fatal("client network trigger resolved without RegisterNetEvent")
+	}
+}
+
+func TestEventRegistrationAndHandlerSidesDoNotCrossLink(t *testing.T) {
+	client := analyzeLuaForTest(t, "client.lua", "client", `RegisterNetEvent("same:event")
+AddEventHandler("same:event", function() end)`)
+	server := analyzeLuaForTest(t, "server.lua", "server", `RegisterNetEvent("same:event")
+AddEventHandler("same:event", function() end)`)
+	entities := append(client, server...)
+	relationships := ResolveRelationships(entities)
+	byID := make(map[string]semantic.Entity, len(entities))
+	for _, entity := range entities {
+		byID[entity.ID] = entity
+	}
+	for _, relationship := range relationships {
+		if relationship.Kind != RelationshipRegisters {
+			continue
+		}
+		if byID[relationship.FromEntityID].Side != byID[relationship.ToEntityID].Side {
+			t.Fatalf("handler crossed registration side: %#v", relationship)
+		}
+	}
+}
+
+func TestCallbacksSupportOfficialLibCallbackFormsAndDirections(t *testing.T) {
+	entities := append(
+		analyzeLuaForTest(t, "client.lua", "client", `lib.callback("client:request", false, function() end)`),
+		analyzeLuaForTest(t, "server.lua", "server", `lib.callback.register("client:request", function() end)`)...,
+	)
+	entities = append(entities,
+		analyzeLuaForTest(t, "server.lua", "server", `lib.callback("server:request", 1, function() end)`)...,
+	)
+	entities = append(entities,
+		analyzeLuaForTest(t, "client.lua", "client", `lib.callback.register("server:request", function() end)`)...,
+	)
+	relationships := ResolveRelationships(entities)
+	if !hasRelationship(semantic.Result{Entities: entities, Relationships: relationships}, RelationshipCalls, KindCallbackCall, KindCallbackRegistration, "client:request") || !hasRelationship(semantic.Result{Entities: entities, Relationships: relationships}, RelationshipCalls, KindCallbackCall, KindCallbackRegistration, "server:request") {
+		t.Fatalf("official lib.callback directions did not resolve: %#v", relationships)
+	}
+
+	dynamic := append(
+		analyzeLuaForTest(t, "client.lua", "client", `local name = eventName
+lib.callback(name, false, function() end)`),
+		analyzeLuaForTest(t, "server.lua", "server", `lib.callback.register("eventName", function() end)`)...,
+	)
+	for _, relationship := range ResolveRelationships(dynamic) {
+		if relationship.Kind == RelationshipCalls {
+			t.Fatalf("dynamic callback fabricated relationship: %#v", relationship)
+		}
+	}
+}
+
+func TestLatentNetworkEventsUseRegistrationRules(t *testing.T) {
+	entities := append(
+		analyzeLuaForTest(t, "client.lua", "client", `TriggerLatentServerEvent("latent:server", 1000)`),
+		analyzeLuaForTest(t, "server.lua", "server", `RegisterNetEvent("latent:server")
+AddEventHandler("latent:server", function() end)`)...,
+	)
+	entities = append(entities,
+		analyzeLuaForTest(t, "server.lua", "server", `TriggerLatentClientEvent("latent:client", 1, 1000)`)...,
+	)
+	entities = append(entities, analyzeLuaForTest(t, "client.lua", "client", `RegisterNetEvent("latent:client")
+AddEventHandler("latent:client", function() end)`)...)
+	relationships := ResolveRelationships(entities)
+	if !hasRelationship(semantic.Result{Entities: entities, Relationships: relationships}, RelationshipTriggers, KindEventTrigger, KindEventHandler, "latent:server") || !hasRelationship(semantic.Result{Entities: entities, Relationships: relationships}, RelationshipTriggers, KindEventTrigger, KindEventHandler, "latent:client") {
+		t.Fatalf("latent network events did not resolve: %#v", relationships)
+	}
+}
+
+func TestManifestExportsAndExternalScriptDependencies(t *testing.T) {
+	files := map[string][]byte{
+		"fxmanifest.lua": []byte(`fx_version 'cerulean'
+game 'gta5'
+shared_script '@ox_lib/init.lua'
+server_script '@oxmysql/lib/MySQL.lua'
+export 'clientOne'
+exports { 'clientOne', 'clientTwo', 'clientTwo' }
+server_export 'serverOne'
+server_exports { 'serverOne', 'serverTwo' }`),
+	}
+	result, err := NewAnalyzer().AnalyzeRepository(context.Background(), semantic.RepositoryInput{
+		Repo: "local/resource-hash", Resource: "resource", Files: files, Languages: map[string]string{"fxmanifest.lua": "lua"}, Symbols: map[string][]parser.Symbol{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, dependency := range []string{"ox_lib", "oxmysql"} {
+		if len(findEntities(result, KindManifestDependency, dependency)) != 1 {
+			t.Fatalf("external script dependency %q missing: %#v", dependency, result.Entities)
+		}
+	}
+	if len(findEntities(result, KindManifestDependency, "@ox_lib/init.lua")) != 0 {
+		t.Fatal("external script path was stored as a dependency name")
+	}
+	for _, want := range []struct {
+		name string
+		side string
+	}{
+		{"clientOne", "client"}, {"clientTwo", "client"}, {"serverOne", "server"}, {"serverTwo", "server"},
+	} {
+		matches := findEntities(result, KindExportDefinition, want.name)
+		if len(matches) != 1 || matches[0].Side != want.side || matches[0].Metadata["operation"] != "manifest_export" || matches[0].Metadata["resource"] != "resource" {
+			t.Fatalf("manifest export was not normalized: want=%#v got=%#v", want, matches)
+		}
 	}
 }

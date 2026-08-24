@@ -69,6 +69,11 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 
 		owner := localID.Owner
 		repoName := localID.Name
+		resourceName, err := repository.LocalResourceName(absPath)
+		if err != nil {
+			r, _ := errorResult("derive resource name: " + err.Error())
+			return r, nil, nil
+		}
 
 		// Discover files
 		var sourceFiles []string
@@ -223,7 +228,7 @@ func IndexFolderHandler(deps *Deps) func(context.Context, *mcp.CallToolRequest, 
 			r, _ := errorResult("save index: " + err.Error())
 			return r, nil, nil
 		}
-		semanticCount, semanticErr := indexSemanticRepository(ctx, deps.Store, owner+"/"+repoName, repoName, "local", fileContents, fileLangs, symbolsByFile)
+		semanticCount, semanticErr := indexSemanticRepository(ctx, deps.Store, owner+"/"+repoName, resourceName, "local", fileContents, fileLangs, symbolsByFile)
 		if semanticErr != nil {
 			log.Printf("index_folder: semantic analysis failed: %v", semanticErr)
 			if len(diagnostics) < 3 {

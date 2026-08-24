@@ -61,6 +61,21 @@ func CanonicalPath(path string) (string, error) {
 	return abs, nil
 }
 
+// LocalResourceName returns the human-readable source directory basename used
+// by ecosystem analyzers. It is deliberately separate from LocalIdentity.Name,
+// which is the collision-resistant storage/cache component.
+func LocalResourceName(path string) (string, error) {
+	canonical, err := CanonicalPath(path)
+	if err != nil {
+		return "", err
+	}
+	name := filepath.Base(canonical)
+	if name == "" || name == "." || name == string(filepath.Separator) {
+		return "", fmt.Errorf("source path has no resource name: %q", path)
+	}
+	return name, nil
+}
+
 // ContentDir returns the cache directory for a repository identity. The
 // delimiter and digest make distinct owner/name pairs map to distinct paths,
 // even when their concatenated display names would collide.
