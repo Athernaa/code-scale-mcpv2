@@ -137,6 +137,7 @@ Once indexed, use symbol-level retrieval instead of reading entire files:
 get_repo_outline  → high-level structure (dirs, languages, symbol counts)
 get_file_outline  → all symbols in a file without reading the whole file
 search_symbols    → find functions/classes by name (FTS5 BM25 → substring → fuzzy)
+plan_context      → produce bounded, evidence-backed context candidates for a task
 get_symbol        → fetch just one function's source code (~50 tokens vs ~2,000)
 search_text       → full-text search with contextual snippet windows
 batch_execute     → combine multiple operations into a single call
@@ -215,6 +216,7 @@ CODE_SCALE_AUTH_TOKEN=your-secret-token code-scale-mcp --transport=sse --port=80
 | `get_symbol` | Retrieve full source code of a symbol by ID |
 | `get_symbols` | Batch retrieve source code for multiple symbols |
 | `search_symbols` | Search symbols with 3-layer fallback (FTS5 BM25, substring, fuzzy) |
+| `plan_context` | Plan bounded context candidates from indexed symbols and semantic relationships |
 | `search_text` | Full-text search with optional snippet context windows |
 | `batch_execute` | Execute multiple operations in a single call (max 10) |
 | `get_repo_outline` | High-level overview of an indexed repo |

@@ -1380,6 +1380,63 @@ func (s *IndexStore) GetSymbolByID(repoID int64, symbolID string) (*parser.Symbo
 	return &symbols[0], nil
 }
 
+// SearchSymbolsExact returns exact, case-sensitive symbol-name matches from
+// the indexed symbol table. It intentionally does not fall back to fuzzy or
+// full-text matching; callers such as the context planner use ambiguity as a
+// signal rather than choosing a lexical near-match.
+func (s *IndexStore) SearchSymbolsExact(repoID int64, query, filePath string, maxResults int) ([]parser.Symbol, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if maxResults <= 0 || maxResults > 200 {
+		maxResults = 200
+	}
+	where := "repo_id = ? AND (name = ? OR qualified_name = ?)"
+	args := []any{repoID, query, query}
+	if filePath != "" {
+		where += " AND file_path = ?"
+		args = append(args, filePath)
+	}
+	args = append(args, maxResults)
+	return s.querySymbols("SELECT * FROM symbols WHERE "+where+" ORDER BY file_path, line, symbol_id LIMIT ?", args...)
+}
+
+// GetSymbolsByIDs hydrates a bounded set of parser symbols in one indexed
+// query. Missing IDs are omitted so callers can enforce current-index
+// invariants without accepting stale symbol references.
+func (s *IndexStore) GetSymbolsByIDs(repoID int64, symbolIDs []string) (map[string]parser.Symbol, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	unique := make(map[string]struct{}, len(symbolIDs))
+	for _, id := range symbolIDs {
+		if id != "" {
+			unique[id] = struct{}{}
+		}
+	}
+	result := make(map[string]parser.Symbol, len(unique))
+	if len(unique) == 0 {
+		return result, nil
+	}
+	ids := make([]string, 0, len(unique))
+	for id := range unique {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, repoID)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	symbols, err := s.querySymbols("SELECT * FROM symbols WHERE repo_id = ? AND symbol_id IN ("+placeholders+") ORDER BY file_path, line, symbol_id", args...)
+	if err != nil {
+		return nil, err
+	}
+	for _, symbol := range symbols {
+		result[symbol.ID] = symbol
+	}
+	return result, nil
+}
+
 // MatchTier indicates which search layer produced a result.
 type MatchTier string
 
