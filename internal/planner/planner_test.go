@@ -177,6 +177,40 @@ func TestPlannerFrameworkAuthorityAndWorkspaceHealth(t *testing.T) {
 	}
 }
 
+func TestTraceProviderAuthorityRequiresStaticStructuralProof(t *testing.T) {
+	call := semantic.Entity{ID: "call", Kind: framework.KindAPICall, Metadata: map[string]any{"provider_status": framework.ProviderStatusLocalVerified, "provider_verified": true, "provider_entity_id": "provider"}}
+	provider := semantic.Entity{ID: "provider", Kind: framework.KindAPIProvider}
+	edge := semantic.TraceEdge{Relationship: semantic.Relationship{Kind: framework.RelationshipFrameworkCalls}, From: call, To: &provider}
+	if got := traceProviderAuthority(provider, edge, []semantic.TraceEdge{edge}, false); got != framework.ProviderStatusLocalVerified {
+		t.Fatalf("static framework provider proof was not propagated: %q", got)
+	}
+	edge.Dynamic = true
+	if got := traceProviderAuthority(provider, edge, []semantic.TraceEdge{edge}, false); got != "" {
+		t.Fatalf("dynamic framework provider was verified: %q", got)
+	}
+	edge.Dynamic = false
+	edge.From.Metadata["provider_entity_id"] = "other"
+	if got := traceProviderAuthority(provider, edge, []semantic.TraceEdge{edge}, false); got != "" {
+		t.Fatalf("mismatched provider identity was verified: %q", got)
+	}
+	exportCall := semantic.Entity{ID: "export-call", Kind: fivem.KindExportCall}
+	exportProvider := semantic.Entity{ID: "export-provider", Kind: fivem.KindExportDefinition}
+	exportEdge := semantic.TraceEdge{Relationship: semantic.Relationship{Kind: "cross_resource_export"}, From: exportCall, To: &exportProvider}
+	if got := traceProviderAuthority(exportProvider, exportEdge, []semantic.TraceEdge{exportEdge}, false); got != framework.ProviderStatusLocalVerified {
+		t.Fatalf("unique static export was not verified: %q", got)
+	}
+	duplicate := exportProvider
+	duplicate.ID = "export-provider-2"
+	duplicateEdge := exportEdge
+	duplicateEdge.To = &duplicate
+	if got := traceProviderAuthority(exportProvider, exportEdge, []semantic.TraceEdge{exportEdge, duplicateEdge}, false); got != "" {
+		t.Fatalf("duplicate static export was verified: %q", got)
+	}
+	if got := traceProviderAuthority(exportProvider, exportEdge, []semantic.TraceEdge{exportEdge}, true); got != "" {
+		t.Fatalf("truncated export trace was verified: %q", got)
+	}
+}
+
 func TestPlannerExternalProviderDoesNotFabricateSource(t *testing.T) {
 	store := plannerStore(t, "local", "external")
 	defer store.Close()

@@ -13,6 +13,7 @@ import (
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
 	"github.com/Athernaa/code-scale-mcpv2/internal/planner"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
+	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/framework"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/generic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
 	"github.com/Athernaa/code-scale-mcpv2/internal/sufficiency"
@@ -685,6 +686,23 @@ func TestAssembleRealisticFiveMWorkspaceContext(t *testing.T) {
 	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, genericResult); err != nil {
 		t.Fatal(err)
 	}
+	realPlan, err := planner.New(store).Plan(context.Background(), planner.Request{Repo: repo, Task: "inventory_add_item", IncludeImpact: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifiedProvider := false
+	for _, candidate := range append(append([]planner.Candidate{}, realPlan.Primary...), realPlan.Supporting...) {
+		if !containsAny(candidate.ReasonCodes, "framework_provider", "export_provider") {
+			continue
+		}
+		if candidate.Authority == framework.ProviderStatusLocalVerified || containsAny(candidate.Authorities, framework.ProviderStatusLocalVerified) {
+			verifiedProvider = true
+			break
+		}
+	}
+	if !verifiedProvider {
+		t.Fatalf("real framework provider authority was lost before context assembly: %#v", realPlan)
+	}
 	pkg, err := New(planner.New(store), store).Assemble(context.Background(), Request{Repo: repo, Task: "inventory_add_item", MaxContextTokens: 4000, IncludeImpact: true})
 	if err != nil {
 		t.Fatal(err)
@@ -853,6 +871,17 @@ func sectionsContainText(sections []Section, text string) bool {
 	for _, section := range sections {
 		if strings.Contains(section.Source, text) {
 			return true
+		}
+	}
+	return false
+}
+
+func containsAny(values []string, targets ...string) bool {
+	for _, value := range values {
+		for _, target := range targets {
+			if value == target {
+				return true
+			}
 		}
 	}
 	return false

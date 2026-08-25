@@ -9,6 +9,7 @@ import (
 
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
+	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/fivem"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/framework"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/generic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
@@ -923,9 +924,9 @@ func (p *Planner) expand(ctx context.Context, repoID int64, seeds []plannerSeedE
 						result.Truncated = true
 					}
 					for _, edge := range edges {
-						addTraceEntity(acc, edge.From, seed, edge, direction.impact, work)
+						addTraceEntity(acc, edge.From, seed, edge, direction.impact, edges, truncated, work)
 						if edge.To != nil {
-							addTraceEntity(acc, *edge.To, seed, edge, direction.impact, work)
+							addTraceEntity(acc, *edge.To, seed, edge, direction.impact, edges, truncated, work)
 						}
 					}
 				}
@@ -935,7 +936,10 @@ func (p *Planner) expand(ctx context.Context, repoID int64, seeds []plannerSeedE
 	return contextErr(ctx)
 }
 
-func addTraceEntity(acc map[string]*candidateAccumulator, entity semantic.Entity, seed semantic.Entity, edge semantic.TraceEdge, impact bool, work *plannerBudget) {
+func addTraceEntity(acc map[string]*candidateAccumulator, entity semantic.Entity, seed semantic.Entity, edge semantic.TraceEdge, impact bool, trace []semantic.TraceEdge, truncated bool, work *plannerBudget) {
+	if authority := traceProviderAuthority(entity, edge, trace, truncated); authority != "" {
+		entity = withTraceAuthority(entity, authority)
+	}
 	reasons := []string{relationshipReason(edge, seed)}
 	if impact {
 		reasons = append(reasons, "impact_direct")
@@ -944,6 +948,46 @@ func addTraceEntity(acc map[string]*candidateAccumulator, entity semantic.Entity
 		reasons = append(reasons, "impact_transitive")
 	}
 	addEntityCandidateWithRelationshipKind(acc, entity, reasons, edge.Depth, edge.Relationship.ID, edge.Kind, edge.Dynamic || entity.Dynamic, work)
+}
+
+func traceProviderAuthority(entity semantic.Entity, edge semantic.TraceEdge, trace []semantic.TraceEdge, truncated bool) string {
+	if edge.To == nil || entity.ID != edge.To.ID || edge.Dynamic || entity.Dynamic {
+		return ""
+	}
+	if edge.Kind == framework.RelationshipFrameworkCalls || edge.Kind == framework.RelationshipObjectCall || edge.Kind == framework.RelationshipProvidedBy {
+		status, _ := edge.From.Metadata["provider_status"].(string)
+		verified, _ := edge.From.Metadata["provider_verified"].(bool)
+		providerID, _ := edge.From.Metadata["provider_entity_id"].(string)
+		if status == framework.ProviderStatusLocalVerified && verified && ((edge.Kind == framework.RelationshipFrameworkCalls && providerID == entity.ID) || edge.Kind != framework.RelationshipFrameworkCalls) {
+			return framework.ProviderStatusLocalVerified
+		}
+		return ""
+	}
+	if edge.Kind != "cross_resource_export" || truncated || entity.Kind != fivem.KindExportDefinition {
+		return ""
+	}
+	seenTargets := map[string]bool{}
+	for _, candidate := range trace {
+		if candidate.Kind != "cross_resource_export" || candidate.Dynamic || candidate.From.ID != edge.From.ID || candidate.To == nil {
+			continue
+		}
+		seenTargets[candidate.To.ID] = true
+	}
+	if len(seenTargets) == 1 && seenTargets[entity.ID] {
+		return framework.ProviderStatusLocalVerified
+	}
+	return ""
+}
+
+func withTraceAuthority(entity semantic.Entity, authority string) semantic.Entity {
+	metadata := map[string]any{}
+	for key, value := range entity.Metadata {
+		metadata[key] = value
+	}
+	metadata["provider_status"] = authority
+	metadata["provider_verified"] = authority == framework.ProviderStatusLocalVerified
+	entity.Metadata = metadata
+	return entity
 }
 
 func relationshipReason(edge semantic.TraceEdge, seed semantic.Entity) string {
