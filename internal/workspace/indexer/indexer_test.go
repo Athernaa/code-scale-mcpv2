@@ -9,6 +9,7 @@ import (
 
 	"github.com/Athernaa/code-scale-mcpv2/internal/parser"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic"
+	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/fivem"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/framework"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/generic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
@@ -86,8 +87,9 @@ func TestWorkspaceCrossResourceFactsAndIsolation(t *testing.T) {
 		"server.cfg":                             "ensure core_a\nensure app_a\n",
 		"resources/[core]/core_a/fxmanifest.lua": "fx_version 'cerulean'\nserver_script 'server.lua'\nserver_export 'GetValue'\n",
 		"resources/[core]/core_a/server.lua":     "local function validate() end\nlocal function run() validate() end\nRegisterNetEvent('workspace:test')\nAddEventHandler('workspace:test', function() end)\nexports('GetValue', function() return 1 end)\nlib.callback.register('workspace:getValue', function() end)\n",
-		"resources/[app]/app_a/fxmanifest.lua":   "fx_version 'cerulean'\nclient_script 'client.lua'\n",
-		"resources/[app]/app_a/client.lua":       "TriggerServerEvent('workspace:test')\nexports.core_a:GetValue()\nlib.callback.await('workspace:getValue', false)\n",
+		"resources/[app]/app_a/fxmanifest.lua":   "fx_version 'cerulean'\nserver_script 'server.lua'\nclient_script 'client.lua'\n",
+		"resources/[app]/app_a/server.lua":       "exports.core_a:GetValue()\n",
+		"resources/[app]/app_a/client.lua":       "TriggerServerEvent('workspace:test')\nlib.callback.await('workspace:getValue', false)\n",
 	}
 	contents := map[string][]byte{}
 	langs := map[string]string{}
@@ -162,7 +164,7 @@ func TestWorkspaceCrossResourceFactsAndIsolation(t *testing.T) {
 		t.Fatal("workspace framework analyzer did not persist API facts")
 	}
 	for _, fact := range frameworkFacts {
-		if fact.Kind == "framework_api_call" && fact.File == "resources/[app]/app_a/client.lua" {
+		if fact.Kind == "framework_api_call" && fact.File == "resources/[app]/app_a/server.lua" {
 			if fact.Metadata["source_resource"] != "app_a" || fact.Metadata["target_resource"] != "core_a" {
 				t.Fatalf("workspace framework owner/target metadata incorrect: %#v", fact)
 			}
@@ -225,6 +227,29 @@ func TestWorkspaceCrossResourceFactsAndIsolation(t *testing.T) {
 	}
 	if got, err := store.GetSemanticEntitiesForAnalyzer(id, semantic.AnalyzerGenericGraph); err != nil || len(got) == 0 {
 		t.Fatalf("workspace clear damaged generic graph: count=%d err=%v", len(got), err)
+	}
+}
+
+func TestWorkspaceExportResolutionRespectsExecutionSides(t *testing.T) {
+	discovery := workspace.Discovery{Resources: []workspace.Resource{{Name: "jobs", RelativePath: "resources/jobs", ManifestPath: "resources/jobs/fxmanifest.lua"}, {Name: "inventory", RelativePath: "resources/inventory", ManifestPath: "resources/inventory/fxmanifest.lua"}}}
+	for _, tc := range []struct {
+		name, callerSide, providerSide string
+		want                           bool
+	}{
+		{"server_server", "server", "server", true},
+		{"client_server", "client", "server", false},
+		{"server_shared", "server", "shared", true},
+		{"client_shared", "client", "shared", true},
+		{"shared_server", "shared", "server", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			call := semantic.Entity{ID: "call", Analyzer: semantic.AnalyzerFiveM, File: "resources/jobs/server.lua", Kind: fivem.KindExportCall, Name: "AddItem", Side: tc.callerSide, Metadata: map[string]any{"source_resource": "jobs", "source_resource_path": "resources/jobs", "target_resource": "inventory"}}
+			provider := semantic.Entity{ID: "provider", Analyzer: semantic.AnalyzerFiveM, File: "resources/inventory/server.lua", Kind: fivem.KindExportDefinition, Name: "AddItem", Side: tc.providerSide, Metadata: map[string]any{"source_resource": "inventory", "source_resource_path": "resources/inventory"}}
+			_, relationships := resolveWorkspace("local/side", discovery, []semantic.Entity{call, provider}, map[string]semantic.Entity{})
+			if got := len(relationships) == 1; got != tc.want {
+				t.Fatalf("workspace side resolution=%v want=%v relationships=%#v", got, tc.want, relationships)
+			}
+		})
 	}
 }
 

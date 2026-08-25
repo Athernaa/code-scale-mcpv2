@@ -430,6 +430,9 @@ func resolveWorkspace(repo string, d workspace.Discovery, entities []semantic.En
 			}
 			for _, targetResource := range ts {
 				for _, to := range exports[sourceResourcePathForWorkspaceEntity(targetResource)+"\x00"+from.Name] {
+					if !semantic.ExportSidesCompatible(from.Side, to.Side) {
+						continue
+					}
 					rels = append(rels, workspaceRel(from, to, "cross_resource_export", from.Name))
 				}
 			}

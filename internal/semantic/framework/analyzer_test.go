@@ -11,13 +11,16 @@ import (
 
 func TestCustomProviderAndObjectFlow(t *testing.T) {
 	files := map[string][]byte{
-		"fxmanifest.lua": []byte("fx_version 'cerulean'\nserver_script 'provider.lua'\n"),
+		"fxmanifest.lua": []byte("fx_version 'cerulean'\nserver_script 'provider.lua'\nserver_script 'jobs.lua'\nserver_script 'admin.lua'\n"),
 		"provider.lua":   []byte("exports('GetContext', function(source) end)\nexports('FetchEntity', function(source) end)\nexports('SetFlag', function(source) end)\n"),
 		"jobs.lua":       []byte("local Context = exports.banana:GetContext(source)\nContext:SetFlag('working', true)\n"),
 		"admin.lua":      []byte("local Context = exports.banana:GetContext(source)\nContext:SetFlag('admin', true)\n"),
 	}
+	bananaManifest := manifest("banana")
+	bananaManifest.Metadata["server_scripts"] = []string{"provider.lua", "jobs.lua", "admin.lua"}
+	bananaManifest.Metadata["file_sides"] = map[string]string{"provider.lua": "server", "jobs.lua": "server", "admin.lua": "server"}
 	result := analyzeFixture(t, "banana", files, []semantic.Entity{
-		manifest("banana"),
+		bananaManifest,
 		exportDefinition("banana", "provider.lua", "GetContext", 1),
 		exportDefinition("banana", "provider.lua", "FetchEntity", 2),
 		exportDefinition("banana", "provider.lua", "SetFlag", 3),
@@ -75,8 +78,11 @@ Maybe:SetFlag('d', true)
 }
 
 func TestKnownAdapterRequiresLocalEvidenceAndPreservesCustomAPIs(t *testing.T) {
-	files := map[string][]byte{"fxmanifest.lua": []byte("fx_version 'cerulean'\nserver_script 'inventory.lua'\n"), "inventory.lua": []byte("exports('AddItem', function() end)\nexports('RemoveItem', function() end)\nexports('CustomTransfer', function() end)\nexports('ExperimentalContainer', function() end)\n"), "consumer.lua": []byte("exports.ox_inventory:AddItem(source, 'water', 2)\nexports.ox_inventory:CustomTransfer(source)\n")}
-	entities := []semantic.Entity{manifest("ox_inventory"), exportDefinition("ox_inventory", "inventory.lua", "AddItem", 1), exportDefinition("ox_inventory", "inventory.lua", "RemoveItem", 2), exportDefinition("ox_inventory", "inventory.lua", "CustomTransfer", 3), exportDefinition("ox_inventory", "inventory.lua", "ExperimentalContainer", 4)}
+	files := map[string][]byte{"fxmanifest.lua": []byte("fx_version 'cerulean'\nserver_script 'inventory.lua'\nserver_script 'consumer.lua'\n"), "inventory.lua": []byte("exports('AddItem', function() end)\nexports('RemoveItem', function() end)\nexports('CustomTransfer', function() end)\nexports('ExperimentalContainer', function() end)\n"), "consumer.lua": []byte("exports.ox_inventory:AddItem(source, 'water', 2)\nexports.ox_inventory:CustomTransfer(source)\n")}
+	inventoryManifest := manifest("ox_inventory")
+	inventoryManifest.Metadata["server_scripts"] = []string{"inventory.lua", "consumer.lua"}
+	inventoryManifest.Metadata["file_sides"] = map[string]string{"inventory.lua": "server", "consumer.lua": "server"}
+	entities := []semantic.Entity{inventoryManifest, exportDefinition("ox_inventory", "inventory.lua", "AddItem", 1), exportDefinition("ox_inventory", "inventory.lua", "RemoveItem", 2), exportDefinition("ox_inventory", "inventory.lua", "CustomTransfer", 3), exportDefinition("ox_inventory", "inventory.lua", "ExperimentalContainer", 4)}
 	result := analyzeFixture(t, "ox_inventory", files, entities)
 	providers := map[string]bool{}
 	operations := map[string]bool{}
@@ -145,6 +151,7 @@ function fake(QBCore)
 end
 `)}
 	result := analyzeFixture(t, "app", files, []semantic.Entity{
+		manifestWithPath("app", "main.lua", "app"),
 		manifestWithPath("qb-core", "core.lua", "core"),
 		exportDefinitionWithResource("qb-core", "core.lua", "GetCoreObject", 1, "core"),
 		exportDefinitionWithResource("qb-core", "core.lua", "GetPlayer", 2, "core"),
@@ -195,8 +202,8 @@ func TestOxLibRequiresManifestEvidence(t *testing.T) {
 }
 
 func TestRebuildFactsRefreshesCrossResourceProviderEdges(t *testing.T) {
-	provider := semantic.Entity{Analyzer: semantic.AnalyzerFramework, Repo: "r", File: "core.lua", Kind: KindAPIProvider, Name: "GetContext", Framework: FrameworkCustom, Metadata: map[string]any{"provider_resource": "core", "provider_resource_path": "core"}}
-	call := semantic.Entity{Analyzer: semantic.AnalyzerFramework, Repo: "r", File: "app.lua", Kind: KindAPICall, Name: "GetContext", Framework: FrameworkCustom, Metadata: map[string]any{"source_resource": "app", "source_resource_path": "app", "target_resource": "core", "api": "GetContext", "mechanism": "export", "provider_verified": false}}
+	provider := semantic.Entity{Analyzer: semantic.AnalyzerFramework, Repo: "r", File: "core.lua", Kind: KindAPIProvider, Name: "GetContext", Framework: FrameworkCustom, Side: "server", Metadata: map[string]any{"provider_resource": "core", "provider_resource_path": "core"}}
+	call := semantic.Entity{Analyzer: semantic.AnalyzerFramework, Repo: "r", File: "app.lua", Kind: KindAPICall, Name: "GetContext", Framework: FrameworkCustom, Side: "server", Metadata: map[string]any{"source_resource": "app", "source_resource_path": "app", "target_resource": "core", "api": "GetContext", "mechanism": "export", "provider_verified": false}}
 	result := RebuildFacts("r", []semantic.Entity{provider, call})
 	if len(result.Relationships) != 1 {
 		t.Fatalf("persisted facts did not resolve provider: %#v", result)
@@ -205,6 +212,61 @@ func TestRebuildFactsRefreshesCrossResourceProviderEdges(t *testing.T) {
 	result = RebuildFacts("r", []semantic.Entity{provider, call})
 	if len(result.Relationships) != 0 {
 		t.Fatalf("provider path mutation should not create unrelated edge: %#v", result.Relationships)
+	}
+}
+
+func TestRebuildFactsResolvesProvidersByExecutionSide(t *testing.T) {
+	cases := []struct {
+		name, callSide, providerSide string
+		verified                     bool
+	}{
+		{"server_server", "server", "server", true},
+		{"client_server", "client", "server", false},
+		{"client_shared", "client", "shared", true},
+		{"server_shared", "server", "shared", true},
+		{"shared_server", "shared", "server", false},
+		{"unknown_server", "unknown", "server", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := semantic.Entity{Analyzer: semantic.AnalyzerFramework, Repo: "r", File: "provider.lua", Kind: KindAPIProvider, Name: "AddItem", Side: tc.providerSide, Metadata: map[string]any{"provider_resource": "inventory", "provider_resource_path": "inventory"}}
+			call := semantic.Entity{Analyzer: semantic.AnalyzerFramework, Repo: "r", File: "caller.lua", Kind: KindAPICall, Name: "AddItem", Side: tc.callSide, Metadata: map[string]any{"source_resource": "jobs", "target_resource": "inventory", "api": "AddItem", "mechanism": "export"}}
+			result := RebuildFacts("r", []semantic.Entity{provider, call}, []semantic.ResourceIdentity{{Name: "jobs", Path: "jobs"}, {Name: "inventory", Path: "inventory"}})
+			if got := hasFrameworkCallRelationship(result.Relationships); got != tc.verified {
+				t.Fatalf("side resolution relationship=%v want=%v result=%#v", got, tc.verified, result)
+			}
+			for _, entity := range result.Entities {
+				if entity.Kind == KindAPICall {
+					if verified, _ := entity.Metadata["provider_verified"].(bool); verified != tc.verified {
+						t.Fatalf("provider verification=%v want=%v entity=%#v", verified, tc.verified, entity)
+					}
+				}
+			}
+		})
+	}
+	serverCall := semantic.Entity{Analyzer: semantic.AnalyzerFramework, Repo: "r", File: "caller.lua", Kind: KindAPICall, Name: "AddItem", Side: "server", Metadata: map[string]any{"source_resource": "jobs", "target_resource": "inventory", "api": "AddItem", "mechanism": "export"}}
+	clientProvider := semantic.Entity{Analyzer: semantic.AnalyzerFramework, Repo: "r", File: "client.lua", Kind: KindAPIProvider, Name: "AddItem", Side: "client", Metadata: map[string]any{"provider_resource": "inventory", "provider_resource_path": "inventory"}}
+	serverProvider := clientProvider
+	serverProvider.ID, serverProvider.File, serverProvider.Side = "server-provider", "server.lua", "server"
+	result := RebuildFacts("r", []semantic.Entity{clientProvider, serverProvider, serverCall}, []semantic.ResourceIdentity{{Name: "jobs", Path: "jobs"}, {Name: "inventory", Path: "inventory"}})
+	selected := false
+	for _, entity := range result.Entities {
+		if entity.Kind == KindAPICall && entity.Metadata["provider_entity_id"] == serverProvider.ID && entity.Metadata["provider_status"] == ProviderStatusLocalVerified {
+			selected = true
+		}
+	}
+	if !hasFrameworkCallRelationship(result.Relationships) || !selected {
+		t.Fatalf("compatible server provider was not selected: %#v", result)
+	}
+	duplicateA := serverProvider
+	duplicateA.ID, duplicateA.File = "server-provider-a", "server-a.lua"
+	duplicateB := serverProvider
+	duplicateB.ID, duplicateB.File = "server-provider-b", "server-b.lua"
+	duplicateResult := RebuildFacts("r", []semantic.Entity{duplicateA, duplicateB, serverCall}, []semantic.ResourceIdentity{{Name: "jobs", Path: "jobs"}, {Name: "inventory", Path: "inventory"}})
+	for _, entity := range duplicateResult.Entities {
+		if entity.Kind == KindAPICall && (entity.Metadata["provider_verified"] == true || entity.Metadata["provider_status"] != ProviderStatusLocalAmbiguous) {
+			t.Fatalf("duplicate same-side providers were verified: %#v", entity)
+		}
 	}
 }
 

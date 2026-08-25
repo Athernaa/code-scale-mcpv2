@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "setup_version": "2.0.2",
+  "obsidian": {
+    "vault": ".project-knowledge",
+    "mode": "repo-local",
+    "durable_project_knowledge": "obsidian-only",
+    "core_notes": [
+      "Home.md",
+      "Architecture.md",
+      "Development.md",
+      "Project Memory.md"
+    ],
+    "new_note_policy": "update-existing-first"
+  },
+  "testing": {
+    "prefer_existing_test_suite": true,
+    "ad_hoc_test_scripts": "avoid-persistent-files",
+    "temporary_verification": "inline-terminal-command",
+    "max_new_test_files_per_task": 2
+  },
+  "documentation": {
+    "feature_completion_markdown": "do-not-create",
+    "durable_internal_notes": "obsidian-vault",
+    "allowed_root_markdown": [
+      "CHANGELOG.md",
+      "CODE_OF_CONDUCT.md",
+      "CONTRIBUTING.md",
+      "LICENSE.md",
+      "README.md",
+      "SECURITY.md"
+    ],
+    "plan_files": "only-when-user-explicitly-requests-or-project-convention-requires"
+  },
+  "workflow": {
+    "inspect_git_status_before_editing": true,
+    "read_project_knowledge_before_substantial_work": true,
+    "smallest_coherent_diff": true,
+    "verify_with_existing_commands_first": true,
+    "clean_temporary_artifacts_before_finish": true,
+    "update_knowledge_only_for_durable_changes": true
+  }
+}

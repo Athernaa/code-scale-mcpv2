@@ -695,7 +695,7 @@ func TestAssembleRealisticFiveMWorkspaceContext(t *testing.T) {
 		if !containsAny(candidate.ReasonCodes, "framework_provider", "export_provider") {
 			continue
 		}
-		if candidate.Authority == framework.ProviderStatusLocalVerified || containsAny(candidate.Authorities, framework.ProviderStatusLocalVerified) {
+		if candidate.Name == "AddItem" && candidate.Resource == "ox_inventory" && strings.Contains(candidate.File, "resources/[ox]/ox_inventory/") && (candidate.Authority == framework.ProviderStatusLocalVerified || containsAny(candidate.Authorities, framework.ProviderStatusLocalVerified)) {
 			verifiedProvider = true
 			break
 		}

@@ -351,7 +351,7 @@ func RebuildFacts(repo string, input []semantic.Entity, registries ...[]semantic
 			matching := make([]semantic.Entity, 0, len(candidates))
 			for _, candidate := range candidates {
 				path, _ := candidate.Metadata["provider_resource_path"].(string)
-				if path == identityPath {
+				if path == identityPath && semantic.ExportSidesCompatible(call.Side, candidate.Side) {
 					matching = append(matching, candidate)
 				}
 			}
@@ -362,14 +362,22 @@ func RebuildFacts(repo string, input []semantic.Entity, registries ...[]semantic
 				status = ProviderStatusLocalAmbiguous
 				call.Metadata["provider_ambiguous"] = true
 			}
-		} else if !hasRegistry && len(candidates) == 1 {
-			// The compatibility path above has already made a unique provider
-			// identity. Keep its normal local verification semantics.
-			provider = &candidates[0]
-			status = ProviderStatusLocalVerified
-		} else if !hasRegistry && len(candidates) > 1 {
-			status = ProviderStatusLocalAmbiguous
-			call.Metadata["provider_ambiguous"] = true
+		} else if !hasRegistry {
+			matching := make([]semantic.Entity, 0, len(candidates))
+			for _, candidate := range candidates {
+				if semantic.ExportSidesCompatible(call.Side, candidate.Side) {
+					matching = append(matching, candidate)
+				}
+			}
+			if len(matching) == 1 {
+				// The compatibility path above has already made a unique provider
+				// identity. Keep its normal local verification semantics.
+				provider = &matching[0]
+				status = ProviderStatusLocalVerified
+			} else if len(matching) > 1 {
+				status = ProviderStatusLocalAmbiguous
+				call.Metadata["provider_ambiguous"] = true
+			}
 		}
 		call.Metadata["provider_status"] = status
 
