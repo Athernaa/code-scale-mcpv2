@@ -3,6 +3,8 @@ package planner
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,6 +14,8 @@ import (
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/framework"
 	"github.com/Athernaa/code-scale-mcpv2/internal/semantic/generic"
 	"github.com/Athernaa/code-scale-mcpv2/internal/storage"
+	"github.com/Athernaa/code-scale-mcpv2/internal/workspace"
+	workspaceindex "github.com/Athernaa/code-scale-mcpv2/internal/workspace/indexer"
 )
 
 func TestPlannerGenericFixUsesExactSymbolAndDirectNeighbors(t *testing.T) {
@@ -181,34 +185,188 @@ func TestTraceProviderAuthorityRequiresStaticStructuralProof(t *testing.T) {
 	call := semantic.Entity{ID: "call", Kind: framework.KindAPICall, Metadata: map[string]any{"provider_status": framework.ProviderStatusLocalVerified, "provider_verified": true, "provider_entity_id": "provider"}}
 	provider := semantic.Entity{ID: "provider", Kind: framework.KindAPIProvider}
 	edge := semantic.TraceEdge{Relationship: semantic.Relationship{Kind: framework.RelationshipFrameworkCalls}, From: call, To: &provider}
-	if got := traceProviderAuthority(provider, edge, []semantic.TraceEdge{edge}, false); got != framework.ProviderStatusLocalVerified {
+	if got := traceProviderAuthority(provider, edge); got != framework.ProviderStatusLocalVerified {
 		t.Fatalf("static framework provider proof was not propagated: %q", got)
 	}
 	edge.Dynamic = true
-	if got := traceProviderAuthority(provider, edge, []semantic.TraceEdge{edge}, false); got != "" {
+	if got := traceProviderAuthority(provider, edge); got != "" {
 		t.Fatalf("dynamic framework provider was verified: %q", got)
 	}
 	edge.Dynamic = false
 	edge.From.Metadata["provider_entity_id"] = "other"
-	if got := traceProviderAuthority(provider, edge, []semantic.TraceEdge{edge}, false); got != "" {
+	if got := traceProviderAuthority(provider, edge); got != "" {
 		t.Fatalf("mismatched provider identity was verified: %q", got)
 	}
-	exportCall := semantic.Entity{ID: "export-call", Kind: fivem.KindExportCall}
+	exportCall := semantic.Entity{ID: "export-call", Kind: fivem.KindExportCall, Metadata: map[string]any{"provider_status": framework.ProviderStatusLocalVerified, "provider_verified": true, "provider_entity_id": "export-provider"}}
 	exportProvider := semantic.Entity{ID: "export-provider", Kind: fivem.KindExportDefinition}
 	exportEdge := semantic.TraceEdge{Relationship: semantic.Relationship{Kind: "cross_resource_export"}, From: exportCall, To: &exportProvider}
-	if got := traceProviderAuthority(exportProvider, exportEdge, []semantic.TraceEdge{exportEdge}, false); got != framework.ProviderStatusLocalVerified {
+	if got := traceProviderAuthority(exportProvider, exportEdge); got != framework.ProviderStatusLocalVerified {
 		t.Fatalf("unique static export was not verified: %q", got)
 	}
 	duplicate := exportProvider
 	duplicate.ID = "export-provider-2"
 	duplicateEdge := exportEdge
 	duplicateEdge.To = &duplicate
-	if got := traceProviderAuthority(exportProvider, exportEdge, []semantic.TraceEdge{exportEdge, duplicateEdge}, false); got != "" {
+	duplicateEdge.From.Metadata = map[string]any{"provider_status": framework.ProviderStatusLocalAmbiguous, "provider_verified": false}
+	if got := traceProviderAuthority(exportProvider, duplicateEdge); got != "" {
 		t.Fatalf("duplicate static export was verified: %q", got)
 	}
-	if got := traceProviderAuthority(exportProvider, exportEdge, []semantic.TraceEdge{exportEdge}, true); got != "" {
-		t.Fatalf("truncated export trace was verified: %q", got)
+}
+
+func TestWorkspaceExportAuthorityIsDirectionInvariant(t *testing.T) {
+	for _, duplicate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("duplicate=%v", duplicate), func(t *testing.T) {
+			store, repoID, repo, d := buildExportAuthorityWorkspace(t, duplicate)
+			defer store.Close()
+			entities, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var call semantic.Entity
+			providers := make([]semantic.Entity, 0, 2)
+			for _, entity := range entities {
+				if entity.Kind == fivem.KindExportCall && entity.Name == "AddItem" {
+					call = entity
+				}
+				if entity.Kind == fivem.KindExportDefinition && entity.Name == "AddItem" {
+					providers = append(providers, entity)
+				}
+			}
+			if call.ID == "" || len(providers) != 1+boolIntForTest(duplicate) {
+				t.Fatalf("unexpected persisted export endpoints: call=%#v providers=%#v", call, providers)
+			}
+			status, _ := call.Metadata["provider_status"].(string)
+			if duplicate && status != framework.ProviderStatusLocalAmbiguous {
+				t.Fatalf("duplicate provider status=%q: %#v", status, call)
+			}
+			if !duplicate && status != framework.ProviderStatusLocalVerified {
+				t.Fatalf("unique provider status=%q: %#v", status, call)
+			}
+			for _, provider := range providers {
+				outgoing, _, err := store.TraceSemanticRankedWithOptions(repoID, call.ID, semantic.AnalyzerFiveMWorkspace, "outgoing", []string{"cross_resource_export"}, 1, 20)
+				if err != nil {
+					t.Fatal(err)
+				}
+				incoming, _, err := store.TraceSemanticRankedWithOptions(repoID, provider.ID, semantic.AnalyzerFiveMWorkspace, "incoming", []string{"cross_resource_export"}, 1, 20)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var incomingEdge *semantic.TraceEdge
+				for i := range incoming {
+					if incoming[i].To != nil && incoming[i].To.ID == provider.ID {
+						incomingEdge = &incoming[i]
+					}
+				}
+				if len(outgoing) == 0 || incomingEdge == nil {
+					t.Fatalf("missing persisted direction edge duplicate=%v outgoing=%#v incoming=%#v", duplicate, outgoing, incoming)
+				}
+				if duplicate {
+					if got := traceProviderAuthority(provider, *incomingEdge); got == framework.ProviderStatusLocalVerified {
+						t.Fatalf("duplicate provider became verified on incoming traversal: %q", got)
+					}
+				} else if got := traceProviderAuthority(provider, *incomingEdge); got != framework.ProviderStatusLocalVerified {
+					t.Fatalf("unique provider lost verification on incoming traversal: %q", got)
+				}
+			}
+			plan, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "trace AddItem", IncludeImpact: true, MaxCandidates: 100})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = d
+			for _, candidate := range append(append([]Candidate{}, plan.Primary...), plan.Supporting...) {
+				if candidate.Name == "AddItem" && containsCandidateReason(candidate, "export_provider") && duplicate && candidate.Authority == framework.ProviderStatusLocalVerified {
+					t.Fatalf("Planner fabricated duplicate export provider verification: %#v", candidate)
+				}
+			}
+		})
 	}
+}
+
+func buildExportAuthorityWorkspace(t *testing.T, duplicate bool) (*storage.IndexStore, int64, string, workspace.Discovery) {
+	t.Helper()
+	root := t.TempDir()
+	filesText := map[string]string{
+		"server.cfg":                         "ensure jobs\nensure inventory\n",
+		"resources/jobs/fxmanifest.lua":      "fx_version 'cerulean'\nserver_script 'server.lua'\n",
+		"resources/jobs/server.lua":          "exports.inventory:AddItem(source, 'water', 1)\n",
+		"resources/inventory/fxmanifest.lua": "fx_version 'cerulean'\nserver_script 'server.lua'\n",
+		"resources/inventory/server.lua":     "exports('AddItem', function(source, item, count) end)\n",
+	}
+	if duplicate {
+		filesText["resources/inventory/fxmanifest.lua"] = "fx_version 'cerulean'\nserver_script 'server.lua'\nserver_script 'other.lua'\n"
+		filesText["resources/inventory/other.lua"] = "exports('AddItem', function(source, item, count) end)\n"
+	}
+	contents := map[string][]byte{}
+	languages := map[string]string{}
+	symbols := map[string][]parser.Symbol{}
+	hashes := map[string]string{}
+	all := []parser.Symbol{}
+	for path, source := range filesText {
+		full := filepath.Join(root, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(source), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if path == "server.cfg" {
+			continue
+		}
+		data := []byte(source)
+		language := parser.DetectLanguage(path)
+		parsed, err := parser.ParseFile(data, path, language)
+		if err != nil {
+			t.Fatal(err)
+		}
+		contents[path], languages[path], symbols[path], hashes[path] = data, language, parsed, workspace.ContentHash(data)
+		all = append(all, parsed...)
+	}
+	store, err := storage.NewIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceRepoIndex("local", "export-authority", "local", "", hashes, languages, all, root); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	for path, data := range contents {
+		if err := store.SaveContentFile("local", "export-authority", path, data); err != nil {
+			store.Close()
+			t.Fatal(err)
+		}
+	}
+	repo := "local/export-authority"
+	repoID, err := store.GetRepoID(repo)
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	d, err := workspace.Discover(root)
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if _, err := workspaceindex.Index(context.Background(), store, repoID, repo, root, contents, languages, symbols, d); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	return store, repoID, repo, d
+}
+
+func boolIntForTest(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func containsCandidateReason(candidate Candidate, reason string) bool {
+	for _, value := range candidate.ReasonCodes {
+		if value == reason {
+			return true
+		}
+	}
+	return false
 }
 
 func TestPlannerExternalProviderDoesNotFabricateSource(t *testing.T) {

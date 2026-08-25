@@ -924,9 +924,9 @@ func (p *Planner) expand(ctx context.Context, repoID int64, seeds []plannerSeedE
 						result.Truncated = true
 					}
 					for _, edge := range edges {
-						addTraceEntity(acc, edge.From, seed, edge, direction.impact, edges, truncated, work)
+						addTraceEntity(acc, edge.From, seed, edge, direction.impact, work)
 						if edge.To != nil {
-							addTraceEntity(acc, *edge.To, seed, edge, direction.impact, edges, truncated, work)
+							addTraceEntity(acc, *edge.To, seed, edge, direction.impact, work)
 						}
 					}
 				}
@@ -936,8 +936,8 @@ func (p *Planner) expand(ctx context.Context, repoID int64, seeds []plannerSeedE
 	return contextErr(ctx)
 }
 
-func addTraceEntity(acc map[string]*candidateAccumulator, entity semantic.Entity, seed semantic.Entity, edge semantic.TraceEdge, impact bool, trace []semantic.TraceEdge, truncated bool, work *plannerBudget) {
-	if authority := traceProviderAuthority(entity, edge, trace, truncated); authority != "" {
+func addTraceEntity(acc map[string]*candidateAccumulator, entity semantic.Entity, seed semantic.Entity, edge semantic.TraceEdge, impact bool, work *plannerBudget) {
+	if authority := traceProviderAuthority(entity, edge); authority != "" {
 		entity = withTraceAuthority(entity, authority)
 	}
 	reasons := []string{relationshipReason(edge, seed)}
@@ -950,7 +950,7 @@ func addTraceEntity(acc map[string]*candidateAccumulator, entity semantic.Entity
 	addEntityCandidateWithRelationshipKind(acc, entity, reasons, edge.Depth, edge.Relationship.ID, edge.Kind, edge.Dynamic || entity.Dynamic, work)
 }
 
-func traceProviderAuthority(entity semantic.Entity, edge semantic.TraceEdge, trace []semantic.TraceEdge, truncated bool) string {
+func traceProviderAuthority(entity semantic.Entity, edge semantic.TraceEdge) string {
 	if edge.To == nil || entity.ID != edge.To.ID || edge.Dynamic || entity.Dynamic {
 		return ""
 	}
@@ -963,17 +963,13 @@ func traceProviderAuthority(entity semantic.Entity, edge semantic.TraceEdge, tra
 		}
 		return ""
 	}
-	if edge.Kind != "cross_resource_export" || truncated || entity.Kind != fivem.KindExportDefinition {
+	if edge.Kind != "cross_resource_export" || entity.Kind != fivem.KindExportDefinition {
 		return ""
 	}
-	seenTargets := map[string]bool{}
-	for _, candidate := range trace {
-		if candidate.Kind != "cross_resource_export" || candidate.Dynamic || candidate.From.ID != edge.From.ID || candidate.To == nil {
-			continue
-		}
-		seenTargets[candidate.To.ID] = true
-	}
-	if len(seenTargets) == 1 && seenTargets[entity.ID] {
+	status, _ := edge.From.Metadata["provider_status"].(string)
+	verified, _ := edge.From.Metadata["provider_verified"].(bool)
+	providerID, _ := edge.From.Metadata["provider_entity_id"].(string)
+	if status == framework.ProviderStatusLocalVerified && verified && providerID == entity.ID {
 		return framework.ProviderStatusLocalVerified
 	}
 	return ""

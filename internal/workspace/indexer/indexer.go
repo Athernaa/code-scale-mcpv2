@@ -392,7 +392,7 @@ func resolveWorkspace(repo string, d workspace.Discovery, entities []semantic.En
 			callbacksByName[entity.Name] = append(callbacksByName[entity.Name], entity)
 		}
 	}
-	for _, from := range entities {
+	for entityIndex, from := range entities {
 		if from.Dynamic {
 			continue
 		}
@@ -429,10 +429,23 @@ func resolveWorkspace(repo string, d workspace.Discovery, entities []semantic.En
 				continue
 			}
 			for _, targetResource := range ts {
+				compatible := make([]semantic.Entity, 0)
 				for _, to := range exports[sourceResourcePathForWorkspaceEntity(targetResource)+"\x00"+from.Name] {
-					if !semantic.ExportSidesCompatible(from.Side, to.Side) {
-						continue
+					if !to.Dynamic && semantic.ExportSidesCompatible(from.Side, to.Side) {
+						compatible = append(compatible, to)
 					}
+				}
+				status := framework.ProviderStatusLocalMissing
+				if len(compatible) > 1 {
+					status = framework.ProviderStatusLocalAmbiguous
+				}
+				if len(compatible) == 1 {
+					status = framework.ProviderStatusLocalVerified
+					setExportProviderProof(&entities[entityIndex], compatible[0], status)
+				} else {
+					setExportProviderProof(&entities[entityIndex], semantic.Entity{}, status)
+				}
+				for _, to := range compatible {
 					rels = append(rels, workspaceRel(from, to, "cross_resource_export", from.Name))
 				}
 			}
@@ -473,6 +486,22 @@ func sourceResourcePathForWorkspaceEntity(e semantic.Entity) string {
 		}
 	}
 	return sourceResourcePath(e)
+}
+
+func setExportProviderProof(call *semantic.Entity, provider semantic.Entity, status string) {
+	if call.Metadata == nil {
+		call.Metadata = map[string]any{}
+	}
+	call.Metadata["provider_status"] = status
+	call.Metadata["provider_verified"] = status == framework.ProviderStatusLocalVerified
+	if status == framework.ProviderStatusLocalVerified {
+		call.Metadata["provider_entity_id"] = provider.ID
+		call.Metadata["provider_resource"] = provider.Metadata["source_resource"]
+		call.Metadata["provider_resource_path"] = provider.Metadata["source_resource_path"]
+		call.Metadata["provider_resource_id"] = provider.Metadata["source_resource_id"]
+	} else {
+		delete(call.Metadata, "provider_entity_id")
+	}
 }
 func networkTarget(e semantic.Entity) string {
 	op, _ := e.Metadata["operation"].(string)
