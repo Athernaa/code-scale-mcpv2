@@ -23,6 +23,7 @@ tags:
 - Persisted FiveM/framework facts flow through workspace/provider resolution into Planner evidence and ContextAssembler sufficiency policy.
 - Export provider verification is execution-side aware: client callers require client/shared providers, server callers require server/shared providers, and shared callers require shared providers. Unknown or incompatible sides cannot produce local verification.
 - Framework `RebuildFacts` and workspace `cross_resource_export` use the shared semantic side-compatibility rule. Workspace resolution persists the complete static export-provider uniqueness proof on the source call before traversal, so Planner authority is invariant across incoming/outgoing trace windows.
+- Incremental workspace rebuilds persist the bounded export-call proof refresh and the replacement workspace entities/relationships through one storage transaction; non-verified states clear all provider identity fields, and a failed derived rebuild marks workspace completeness incomplete when possible.
 - Planner propagates `local_verified` only from a unique static relationship whose upstream provider proof is verified.
 
 ## External integrations

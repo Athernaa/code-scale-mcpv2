@@ -216,7 +216,7 @@ func TestTraceProviderAuthorityRequiresStaticStructuralProof(t *testing.T) {
 func TestWorkspaceExportAuthorityIsDirectionInvariant(t *testing.T) {
 	for _, duplicate := range []bool{false, true} {
 		t.Run(fmt.Sprintf("duplicate=%v", duplicate), func(t *testing.T) {
-			store, repoID, repo, d := buildExportAuthorityWorkspace(t, duplicate)
+			store, repoID, repo, _, d := buildExportAuthorityWorkspace(t, duplicate)
 			defer store.Close()
 			entities, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM)
 			if err != nil {
@@ -282,7 +282,130 @@ func TestWorkspaceExportAuthorityIsDirectionInvariant(t *testing.T) {
 	}
 }
 
-func buildExportAuthorityWorkspace(t *testing.T, duplicate bool) (*storage.IndexStore, int64, string, workspace.Discovery) {
+func TestWorkspaceExportAuthorityPersistsAcrossRealIncrementalRebuilds(t *testing.T) {
+	store, repoID, repo, root, discovery := buildExportAuthorityWorkspace(t, false)
+	defer store.Close()
+
+	call, providers := assertPersistedExportAuthority(t, store, repoID, framework.ProviderStatusLocalVerified, true, "", 1)
+	assertPlannerExportAuthority(t, store, repo, call, providers, true)
+
+	writeExportProviderResource(t, root, "duplicate_server")
+	refreshExportResource(t, store, repoID, repo, root, "resources/inventory")
+	call, providers = assertPersistedExportAuthority(t, store, repoID, framework.ProviderStatusLocalAmbiguous, false, "", 2)
+	assertPlannerExportAuthority(t, store, repo, call, providers, false)
+
+	writeExportProviderResource(t, root, "unique_server")
+	refreshExportResource(t, store, repoID, repo, root, "resources/inventory")
+	call, providers = assertPersistedExportAuthority(t, store, repoID, framework.ProviderStatusLocalVerified, true, "", 1)
+	assertPlannerExportAuthority(t, store, repo, call, providers, true)
+
+	writeExportProviderResource(t, root, "missing_server")
+	refreshExportResource(t, store, repoID, repo, root, "resources/inventory")
+	call, providers = assertPersistedExportAuthority(t, store, repoID, framework.ProviderStatusLocalMissing, false, "", 0)
+	assertPlannerExportAuthority(t, store, repo, call, providers, false)
+
+	writeExportProviderResource(t, root, "unique_server")
+	refreshExportResource(t, store, repoID, repo, root, "resources/inventory")
+	call, providers = assertPersistedExportAuthority(t, store, repoID, framework.ProviderStatusLocalVerified, true, "", 1)
+	assertPlannerExportAuthority(t, store, repo, call, providers, true)
+
+	writeExportProviderResource(t, root, "client_only")
+	refreshExportResource(t, store, repoID, repo, root, "resources/inventory")
+	call, providers = assertPersistedExportAuthority(t, store, repoID, framework.ProviderStatusLocalMissing, false, "", 0)
+	assertPlannerExportAuthority(t, store, repo, call, providers, false)
+
+	writeExportProviderResource(t, root, "unique_server")
+	refreshExportResource(t, store, repoID, repo, root, "resources/inventory")
+	call, providers = assertPersistedExportAuthority(t, store, repoID, framework.ProviderStatusLocalVerified, true, "", 1)
+	assertPlannerExportAuthority(t, store, repo, call, providers, true)
+
+	writeTestResource(t, root, "resources/[duplicate]/inventory", map[string]string{
+		"fxmanifest.lua": "fx_version 'cerulean'\nserver_script 'server.lua'\n",
+		"server.lua":     "exports('OtherItem', function() end)\n",
+	})
+	discovery, err := workspace.Discover(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspaceindex.RefreshWorkspaceConfiguration(store, repoID, repo, root, discovery); err != nil {
+		t.Fatal(err)
+	}
+	call, providers = assertPersistedExportAuthority(t, store, repoID, framework.ProviderStatusLocalAmbiguous, false, "", 0)
+	assertPlannerExportAuthority(t, store, repo, call, providers, false)
+
+	if err := os.RemoveAll(filepath.Join(root, filepath.FromSlash("resources/[duplicate]/inventory"))); err != nil {
+		t.Fatal(err)
+	}
+	discovery, err = workspace.Discover(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspaceindex.RefreshWorkspaceConfiguration(store, repoID, repo, root, discovery); err != nil {
+		t.Fatal(err)
+	}
+	call, providers = assertPersistedExportAuthority(t, store, repoID, framework.ProviderStatusLocalVerified, true, "", 1)
+	assertPlannerExportAuthority(t, store, repo, call, providers, true)
+
+	beforeRefresh := exportAuthoritySnapshot(t, store, repoID)
+	refreshExportResource(t, store, repoID, repo, root, "resources/inventory")
+	refreshExportResource(t, store, repoID, repo, root, "resources/inventory")
+	if afterRefresh := exportAuthoritySnapshot(t, store, repoID); afterRefresh != beforeRefresh {
+		t.Fatalf("repeated resource refresh was not idempotent: before=%s after=%s", beforeRefresh, afterRefresh)
+	}
+
+	if err := writeTestResource(t, root, "resources/jobs", map[string]string{
+		"fxmanifest.lua": "fx_version 'cerulean'\nserver_script 'server.lua'\n",
+		"server.lua":     "exports.missing_inventory:AddItem(source, 'water', 1)\n",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	refreshExportResource(t, store, repoID, repo, root, "resources/jobs")
+	call, providers = assertPersistedExportAuthority(t, store, repoID, framework.ProviderStatusLocalMissing, false, "", 0)
+	assertPlannerExportAuthority(t, store, repo, call, providers, false)
+
+	writeTestResource(t, root, "resources/jobs", map[string]string{
+		"fxmanifest.lua": "fx_version 'cerulean'\nserver_script 'server.lua'\n",
+		"server.lua":     "exports.inventory:AddItem(source, 'water', 1)\n",
+	})
+	refreshExportResource(t, store, repoID, repo, root, "resources/jobs")
+	call, providers = assertPersistedExportAuthority(t, store, repoID, framework.ProviderStatusLocalVerified, true, "", 1)
+	assertPlannerExportAuthority(t, store, repo, call, providers, true)
+
+	incrementalSnapshot := exportAuthoritySnapshot(t, store, repoID)
+	freshStore, freshRepoID, _, _, _ := buildExportAuthorityWorkspace(t, false)
+	defer freshStore.Close()
+	if freshSnapshot := exportAuthoritySnapshot(t, freshStore, freshRepoID); freshSnapshot != incrementalSnapshot {
+		t.Fatalf("incremental authority differs from full indexing: incremental=%s full=%s", incrementalSnapshot, freshSnapshot)
+	}
+
+	entities, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fiveMRelationships, err := store.GetSemanticRelationshipsForAnalyzer(repoID, semantic.AnalyzerFiveM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range entities {
+		if entities[index].Kind == fivem.KindExportCall && entities[index].Name == "AddItem" {
+			entities[index].Dynamic = true
+		}
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, semantic.Result{Entities: entities, Relationships: fiveMRelationships}); err != nil {
+		t.Fatal(err)
+	}
+	discovery, err = workspace.Discover(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspaceindex.RebuildWorkspaceFacts(store, repoID, repo, discovery); err != nil {
+		t.Fatal(err)
+	}
+	call, providers = assertPersistedExportAuthority(t, store, repoID, framework.ProviderStatusLocalMissing, false, "", 0)
+	assertPlannerExportAuthority(t, store, repo, call, providers, false)
+}
+
+func buildExportAuthorityWorkspace(t *testing.T, duplicate bool) (*storage.IndexStore, int64, string, string, workspace.Discovery) {
 	t.Helper()
 	root := t.TempDir()
 	filesText := map[string]string{
@@ -350,7 +473,262 @@ func buildExportAuthorityWorkspace(t *testing.T, duplicate bool) (*storage.Index
 		store.Close()
 		t.Fatal(err)
 	}
-	return store, repoID, repo, d
+	return store, repoID, repo, root, d
+}
+
+func assertPersistedExportAuthority(t *testing.T, store *storage.IndexStore, repoID int64, wantStatus string, wantVerified bool, wantProviderID string, wantRelationships int) (semantic.Entity, []semantic.Entity) {
+	t.Helper()
+	entities, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var call semantic.Entity
+	providers := make([]semantic.Entity, 0, 2)
+	for _, entity := range entities {
+		if entity.Kind == fivem.KindExportCall && entity.Name == "AddItem" {
+			call = entity
+		}
+		if entity.Kind == fivem.KindExportDefinition && entity.Name == "AddItem" {
+			providers = append(providers, entity)
+		}
+	}
+	if call.ID == "" {
+		t.Fatal("persisted export call missing")
+	}
+	if status, _ := call.Metadata["provider_status"].(string); status != wantStatus {
+		t.Fatalf("persisted provider status=%q want=%q: %#v", status, wantStatus, call)
+	}
+	if verified, _ := call.Metadata["provider_verified"].(bool); verified != wantVerified {
+		t.Fatalf("persisted provider verification=%v want=%v: %#v", verified, wantVerified, call)
+	}
+	providerID, _ := call.Metadata["provider_entity_id"].(string)
+	if wantProviderID != "" && providerID != wantProviderID {
+		t.Fatalf("persisted provider ID=%q want=%q: %#v", providerID, wantProviderID, call)
+	}
+	if !wantVerified {
+		for _, field := range []string{"provider_entity_id", "provider_resource", "provider_resource_path", "provider_resource_id"} {
+			if value, ok := call.Metadata[field]; ok && value != "" {
+				t.Fatalf("stale provider proof field %s=%#v: %#v", field, value, call)
+			}
+		}
+	}
+	relationships, err := store.GetSemanticRelationshipsForAnalyzer(repoID, semantic.AnalyzerFiveMWorkspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exportRelationships := 0
+	for _, relationship := range relationships {
+		if relationship.Kind == "cross_resource_export" {
+			exportRelationships++
+		}
+	}
+	if exportRelationships != wantRelationships {
+		t.Fatalf("persisted export relationship count=%d want=%d: %#v", exportRelationships, wantRelationships, relationships)
+	}
+	return call, providers
+}
+
+func assertPlannerExportAuthority(t *testing.T, store *storage.IndexStore, repo string, call semantic.Entity, providers []semantic.Entity, wantVerified bool) {
+	t.Helper()
+	repoID, err := store.GetRepoID(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outgoing, _, err := store.TraceSemanticRankedWithOptions(repoID, call.ID, semantic.AnalyzerFiveMWorkspace, "outgoing", []string{"cross_resource_export"}, 1, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wantVerified && len(outgoing) != 1 {
+		t.Fatalf("verified outgoing export trace count=%d want=1 call=%s: trace=%#v", len(outgoing), call.ID, outgoing)
+	}
+	if len(outgoing) > len(providers) {
+		t.Fatalf("outgoing export trace count=%d exceeds provider count=%d: trace=%#v", len(outgoing), len(providers), outgoing)
+	}
+	for _, edge := range outgoing {
+		if edge.To == nil {
+			t.Fatalf("outgoing export trace has no provider endpoint: %#v", edge)
+		}
+		verified := traceProviderAuthority(*edge.To, edge) == framework.ProviderStatusLocalVerified
+		if verified != wantVerified {
+			t.Fatalf("outgoing planner authority=%v want=%v edge=%#v", verified, wantVerified, edge)
+		}
+	}
+	for _, provider := range providers {
+		incoming, _, err := store.TraceSemanticRankedWithOptions(repoID, provider.ID, semantic.AnalyzerFiveMWorkspace, "incoming", []string{"cross_resource_export"}, 1, 20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, edge := range incoming {
+			if edge.To == nil || edge.To.ID != provider.ID {
+				continue
+			}
+			found = true
+			verified := traceProviderAuthority(provider, edge) == framework.ProviderStatusLocalVerified
+			if verified != wantVerified {
+				t.Fatalf("incoming planner authority=%v want=%v edge=%#v", verified, wantVerified, edge)
+			}
+		}
+		if wantVerified && !found {
+			t.Fatalf("verified provider had no incoming export edge: %#v", incoming)
+		}
+	}
+	for _, task := range []string{"what does AddItem call", "who calls AddItem"} {
+		plan, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: task, IncludeImpact: true, MaxCandidates: 100})
+		if err != nil {
+			t.Fatal(err)
+		}
+		verifiedProvider := false
+		for _, candidate := range append(append(append([]Candidate{}, plan.Primary...), plan.Supporting...), plan.Peripheral...) {
+			if !containsCandidateReason(candidate, "export_provider") {
+				continue
+			}
+			candidateVerified := candidate.Authority == framework.ProviderStatusLocalVerified || containsString(candidate.Authorities, framework.ProviderStatusLocalVerified)
+			if candidateVerified {
+				verifiedProvider = true
+			}
+			if candidateVerified && !wantVerified {
+				t.Fatalf("planner retained local_verified export provider for %q: %#v", task, candidate)
+			}
+		}
+		if task == "what does AddItem call" && wantVerified && !verifiedProvider {
+			t.Fatalf("planner lost local_verified outgoing export provider for %q: %#v", task, plan)
+		}
+	}
+}
+
+func exportAuthoritySnapshot(t *testing.T, store *storage.IndexStore, repoID int64) string {
+	t.Helper()
+	entities, err := store.GetSemanticEntitiesForAnalyzer(repoID, semantic.AnalyzerFiveM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var call semantic.Entity
+	for _, entity := range entities {
+		if entity.Kind == fivem.KindExportCall && entity.Name == "AddItem" {
+			call = entity
+			break
+		}
+	}
+	if call.ID == "" {
+		t.Fatal("cannot snapshot missing export call")
+	}
+	status, _ := call.Metadata["provider_status"].(string)
+	verified, _ := call.Metadata["provider_verified"].(bool)
+	providerID, _ := call.Metadata["provider_entity_id"].(string)
+	relationships, err := store.GetSemanticRelationshipsForAnalyzer(repoID, semantic.AnalyzerFiveMWorkspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edges := make([]string, 0, len(relationships))
+	for _, relationship := range relationships {
+		if relationship.Kind == "cross_resource_export" {
+			edges = append(edges, relationship.ID)
+		}
+	}
+	return strings.Join([]string{status, fmt.Sprint(verified), providerID, strings.Join(edges, ",")}, "|")
+}
+
+func refreshExportResource(t *testing.T, store *storage.IndexStore, repoID int64, repo, root, resourcePath string) {
+	t.Helper()
+	contents, languages, symbols := readExportResourceInputs(t, root, resourcePath)
+	discovery, err := workspace.Discover(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspaceindex.RefreshResource(context.Background(), store, repoID, repo, root, resourcePath, contents, languages, symbols, discovery); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readExportResourceInputs(t *testing.T, root, resourcePath string) (map[string][]byte, map[string]string, map[string][]parser.Symbol) {
+	t.Helper()
+	contents := map[string][]byte{}
+	languages := map[string]string{}
+	symbols := map[string][]parser.Symbol{}
+	resourceRoot := filepath.Join(root, filepath.FromSlash(resourcePath))
+	err := filepath.Walk(resourceRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		relative = filepath.ToSlash(relative)
+		language := parser.DetectLanguage(relative)
+		if language == "" {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		parsed, err := parser.ParseFile(data, relative, language)
+		if err != nil {
+			return err
+		}
+		contents[relative] = data
+		languages[relative] = language
+		symbols[relative] = parsed
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return contents, languages, symbols
+}
+
+func writeExportProviderResource(t *testing.T, root, state string) {
+	t.Helper()
+	files := map[string]string{}
+	switch state {
+	case "unique_server":
+		files = map[string]string{
+			"fxmanifest.lua": "fx_version 'cerulean'\nserver_script 'server.lua'\n",
+			"server.lua":     "exports('AddItem', function(source, item, count) end)\n",
+		}
+	case "duplicate_server":
+		files = map[string]string{
+			"fxmanifest.lua": "fx_version 'cerulean'\nserver_script 'server.lua'\nserver_script 'other.lua'\n",
+			"server.lua":     "exports('AddItem', function(source, item, count) end)\n",
+			"other.lua":      "exports('AddItem', function(source, item, count) end)\n",
+		}
+	case "missing_server":
+		files = map[string]string{
+			"fxmanifest.lua": "fx_version 'cerulean'\nserver_script 'server.lua'\n",
+			"server.lua":     "local value = 1\n",
+		}
+	case "client_only":
+		files = map[string]string{
+			"fxmanifest.lua": "fx_version 'cerulean'\nclient_script 'client.lua'\n",
+			"client.lua":     "exports('AddItem', function(source, item, count) end)\n",
+		}
+	default:
+		t.Fatalf("unknown provider state %q", state)
+	}
+	writeTestResource(t, root, "resources/inventory", files)
+}
+
+func writeTestResource(t *testing.T, root, resourcePath string, files map[string]string) error {
+	t.Helper()
+	directory := filepath.Join(root, filepath.FromSlash(resourcePath))
+	if err := os.RemoveAll(directory); err != nil {
+		return err
+	}
+	for relative, content := range files {
+		path := filepath.Join(directory, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func boolIntForTest(value bool) int {

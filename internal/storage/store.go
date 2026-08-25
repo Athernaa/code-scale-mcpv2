@@ -884,6 +884,54 @@ func (s *IndexStore) ReplaceSemanticResourceForAnalyzer(repoID int64, analyzer, 
 	return tx.Commit()
 }
 
+// ReplaceWorkspaceFactsWithProviderProof updates the bounded set of persisted
+// FiveM export-call proof metadata and the derived workspace facts in one
+// transaction. It intentionally leaves all other FiveM entities and
+// relationships untouched.
+func (s *IndexStore) ReplaceWorkspaceFactsWithProviderProof(repoID int64, providerCalls []semantic.Entity, result semantic.Result) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, call := range providerCalls {
+		if call.ID == "" {
+			return fmt.Errorf("invalid provider proof entity %q", call.ID)
+		}
+		metadata, err := json.Marshal(call.Metadata)
+		if err != nil {
+			return fmt.Errorf("marshal provider proof metadata for %s: %w", call.ID, err)
+		}
+		updated, err := tx.Exec(`UPDATE semantic_entities SET metadata = ?
+			WHERE repo_id = ? AND analyzer = ? AND id = ? AND kind = 'export_call'`,
+			string(metadata), repoID, semantic.AnalyzerFiveM, call.ID)
+		if err != nil {
+			return fmt.Errorf("update provider proof for %s: %w", call.ID, err)
+		}
+		rows, err := updated.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("check provider proof update for %s: %w", call.ID, err)
+		}
+		if rows != 1 {
+			return fmt.Errorf("provider proof entity %s is not a persisted FiveM export call", call.ID)
+		}
+	}
+
+	if err := deleteSemanticIndexTx(tx, repoID, semantic.AnalyzerFiveMWorkspace); err != nil {
+		return err
+	}
+	if err := insertSemanticEntitiesTx(tx, repoID, semantic.AnalyzerFiveMWorkspace, result.Entities); err != nil {
+		return err
+	}
+	if err := insertSemanticRelationshipsTx(tx, repoID, semantic.AnalyzerFiveMWorkspace, result.Relationships); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // ReplaceSemanticRelationships replaces only relationship edges, preserving
 // all entity records. It is used after an incremental file semantic update.
 func (s *IndexStore) ReplaceSemanticRelationships(repoID int64, relationships []semantic.Relationship) error {

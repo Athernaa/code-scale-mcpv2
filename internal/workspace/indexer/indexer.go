@@ -243,14 +243,42 @@ func rebuildWorkspaceFacts(store *storage.IndexStore, repoID int64, repo string,
 		}
 	}
 	workspaceEntities, workspaceRelationships := resolveWorkspace(repo, d, entities, manifests)
-	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveMWorkspace, semantic.Result{Entities: workspaceEntities, Relationships: workspaceRelationships}); err != nil {
+	providerCalls := exportProviderProofEntities(entities)
+	if err := store.ReplaceWorkspaceFactsWithProviderProof(repoID, providerCalls, semantic.Result{Entities: workspaceEntities, Relationships: workspaceRelationships}); err != nil {
+		markWorkspaceDegraded(store, repoID)
 		return Result{}, err
 	}
 	withSemantics, withoutSemantics := semanticCoverage(d, entities)
 	if err := updateWorkspaceSemanticCoverage(store, repoID, withSemantics, withoutSemantics, degraded); err != nil {
+		markWorkspaceDegraded(store, repoID)
 		return Result{}, err
 	}
 	return Result{Discovery: d, FiveMCount: len(entities), WorkspaceCount: len(workspaceEntities), RelationshipCount: len(workspaceRelationships), ResourcesWithSemantics: withSemantics, ResourcesWithoutSemantics: withoutSemantics}, nil
+}
+
+func exportProviderProofEntities(entities []semantic.Entity) []semantic.Entity {
+	result := make([]semantic.Entity, 0)
+	for _, entity := range entities {
+		if entity.Kind == fivem.KindExportCall {
+			result = append(result, entity)
+		}
+	}
+	return result
+}
+
+func markWorkspaceDegraded(store *storage.IndexStore, repoID int64) {
+	previous, err := store.GetWorkspace(repoID)
+	if err != nil {
+		return
+	}
+	_ = store.UpdateWorkspaceCompleteness(repoID, storage.WorkspaceCompleteness{
+		FilesDiscoveredTotal:      previous.FilesDiscoveredTotal,
+		FilesIndexed:              previous.FilesIndexed,
+		IndexTruncated:            previous.IndexTruncated,
+		Incomplete:                true,
+		ResourcesWithSemantics:    previous.ResourcesWithSemantics,
+		ResourcesWithoutSemantics: previous.ResourcesWithoutSemantics,
+	})
 }
 
 // RefreshWorkspaceConfiguration updates config/resource metadata and
@@ -274,6 +302,7 @@ func RefreshWorkspaceConfiguration(store *storage.IndexStore, repoID int64, repo
 		ResourcesWithSemantics:    result.ResourcesWithSemantics,
 		ResourcesWithoutSemantics: result.ResourcesWithoutSemantics,
 	}); err != nil {
+		markWorkspaceDegraded(store, repoID)
 		return Result{}, err
 	}
 	return result, nil
@@ -393,6 +422,9 @@ func resolveWorkspace(repo string, d workspace.Discovery, entities []semantic.En
 		}
 	}
 	for entityIndex, from := range entities {
+		if from.Kind == fivem.KindExportCall {
+			setExportProviderProof(&entities[entityIndex], semantic.Entity{}, framework.ProviderStatusLocalMissing)
+		}
 		if from.Dynamic {
 			continue
 		}
@@ -426,6 +458,11 @@ func resolveWorkspace(repo string, d workspace.Discovery, entities []semantic.En
 			}
 			ts := resourceByName[target]
 			if len(ts) != 1 {
+				status := framework.ProviderStatusLocalMissing
+				if len(ts) > 1 {
+					status = framework.ProviderStatusLocalAmbiguous
+				}
+				setExportProviderProof(&entities[entityIndex], semantic.Entity{}, status)
 				continue
 			}
 			for _, targetResource := range ts {
@@ -492,6 +529,7 @@ func setExportProviderProof(call *semantic.Entity, provider semantic.Entity, sta
 	if call.Metadata == nil {
 		call.Metadata = map[string]any{}
 	}
+	delete(call.Metadata, "provider_ambiguous")
 	call.Metadata["provider_status"] = status
 	call.Metadata["provider_verified"] = status == framework.ProviderStatusLocalVerified
 	if status == framework.ProviderStatusLocalVerified {
@@ -500,7 +538,9 @@ func setExportProviderProof(call *semantic.Entity, provider semantic.Entity, sta
 		call.Metadata["provider_resource_path"] = provider.Metadata["source_resource_path"]
 		call.Metadata["provider_resource_id"] = provider.Metadata["source_resource_id"]
 	} else {
-		delete(call.Metadata, "provider_entity_id")
+		for _, key := range []string{"provider_entity_id", "provider_resource", "provider_resource_path", "provider_resource_id"} {
+			delete(call.Metadata, key)
+		}
 	}
 }
 func networkTarget(e semantic.Entity) string {
