@@ -25,7 +25,7 @@ Durable architecture, conventions, important constraints, and handoff context ar
 
 ## Durable changes
 Add only changes future developers/agents need to know. Prefer concise dated bullets; do not log routine edits.
-- 2026-08-26: Phase 7.4 official clean run is recorded by implementation commit `dc229dee2c56081e8f49d0f03ab5c3468c495e63` (tree `e8c212f33f3dcd411708077627f6e678a9e159c8`): 34 tasks, 6 modes, 7 budgets, 2 repeats; supported recall 26/26, false sufficiency/provider fabrication/repo leakage/budget/determinism/incremental mismatches all zero. Final status is CONDITIONAL PASS because the provisional token target was missed; realistic fixtures measured 93.6% median broad reduction while small fixtures measured -13.7%.
+- 2026-08-26: Phase 7.4 corrected official clean run is recorded by implementation commit `d58a016fb252a7e9d34f0256825a2f43de67722c` (tree `6cf404944ff95fee1b627d9e5680feeb51073794`): 34 tasks, 6 modes, 7 budgets, 2 repeats; supported recall 26/26, panoramic/scoped self-baseline violations, false sufficiency, provider fabrication, repo leakage, budget, determinism, and incremental mismatches all zero. Final status remains CONDITIONAL PASS because the provisional token target was missed; realistic/small/scoped strata remain reported separately.
 
 ## Handoff
 Keep this section current only when unfinished work, migration state, or non-obvious follow-up matters.
