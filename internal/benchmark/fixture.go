@@ -23,6 +23,7 @@ type FixtureIndex struct {
 	BasePath string
 	RepoIDs  map[string]int64
 	Files    map[string][]FixtureFile
+	Symbols  map[string]map[string][]parser.Symbol
 }
 
 type FixtureFile struct {
@@ -41,7 +42,7 @@ func BuildFixtureIndex(ctx context.Context, corpus Corpus, fixtureRoot string) (
 		_ = os.RemoveAll(base)
 		return nil, nil, err
 	}
-	index := &FixtureIndex{Store: store, BasePath: base, RepoIDs: map[string]int64{}, Files: map[string][]FixtureFile{}}
+	index := &FixtureIndex{Store: store, BasePath: base, RepoIDs: map[string]int64{}, Files: map[string][]FixtureFile{}, Symbols: map[string]map[string][]parser.Symbol{}}
 	cleanup := func() {
 		_ = store.Close()
 		_ = os.RemoveAll(base)
@@ -78,6 +79,7 @@ func indexRepository(ctx context.Context, index *FixtureIndex, spec RepositorySp
 	}
 	index.RepoIDs[spec.Name] = repoID
 	index.Files[spec.Name] = fixtureFiles(files, languages)
+	index.Symbols[spec.Name] = symbols
 
 	if spec.Kind == "fivem" {
 		discovery, err := workspace.Discover(root)

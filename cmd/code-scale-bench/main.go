@@ -17,7 +17,7 @@ func main() {
 	}
 	flags := flag.NewFlagSet("run", flag.ExitOnError)
 	corpus := flags.String("corpus", "benchmarks/corpus.json", "benchmark corpus JSON")
-	mode := flags.String("mode", "all", "manual, panoramic, primitive, phase7, or all")
+	mode := flags.String("mode", "all", "manual, panoramic, scoped_panoramic, primitive, phase7, phase7_no_early_stop, or all")
 	task := flags.String("task", "", "run one task ID")
 	category := flags.String("category", "", "run one category")
 	output := flags.String("output", "benchmarks/reports/latest.json", "JSON report path")
@@ -44,7 +44,7 @@ func main() {
 	if err := benchmark.WriteReport(report, *output, markdownPath); err != nil {
 		fatal(err)
 	}
-	fmt.Printf("benchmark report: %s\nmarkdown report: %s\nstatus: %s\n", *output, markdownPath, status(report))
+	fmt.Printf("benchmark report: %s\nmarkdown report: %s\nstatus: %s\n", *output, markdownPath, benchmark.Status(report))
 	if *jsonStdout {
 		data, err := os.ReadFile(*output)
 		if err != nil {
@@ -52,13 +52,6 @@ func main() {
 		}
 		fmt.Print(string(data))
 	}
-}
-
-func status(report benchmark.Report) string {
-	if report.Validation.ProviderFabricationZero && report.Validation.CrossRepoLeakageZero && report.Validation.SerializedBudgetZero && report.Validation.SupportedRecallAtLeast95 && report.Validation.FalseSufficiencyBelow5 && report.Validation.TokenReductionAtLeast50 && report.Validation.DeterminismFailures == 0 && report.Validation.BudgetMonotonicityFailures == 0 && report.Validation.IncrementalFullMismatches == 0 {
-		return "PASS"
-	}
-	return "CONDITIONAL PASS"
 }
 
 func fatal(err error) {

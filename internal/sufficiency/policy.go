@@ -162,6 +162,10 @@ func (Policy) Evaluate(input Input) Decision {
 	if len(decision.Missing) > 0 {
 		return finalizeIncomplete(input, decision, stageRank, 1)
 	}
+	if input.IncludeImpact && taskClass == "relationship_trace" && decision.Coverage.ImpactRequired == 0 {
+		decision = addMissing(decision, Missing{Kind: "impact", CandidateID: anchorCandidateID(input), Reason: "impact_coverage_missing"})
+		return blocked(input, decision, "impact_coverage_missing")
+	}
 	if taskClass == "cross_resource" {
 		decision = evaluateCrossResource(input, sections, decision, stageRank)
 		if decision.Status != StatusSufficient {
@@ -468,12 +472,17 @@ func providerRequirementNeeded(input Input) bool {
 	if taskClass != "exact_semantic" && taskClass != "cross_resource" && taskClass != "localized_change" {
 		return false
 	}
+	anchorID := anchorCandidateID(input)
 	for _, candidate := range append(append(append([]planner.Candidate{}, input.Plan.Primary...), input.Plan.Supporting...), input.Plan.Peripheral...) {
-		if requiresProvider(candidate) {
+		if requiresProvider(candidate) || (candidate.ID != anchorID && providerCandidate(candidate)) {
 			return true
 		}
 	}
 	return false
+}
+
+func providerCandidate(candidate planner.Candidate) bool {
+	return requiresProvider(candidate) || isProvider(candidate) || candidate.Kind == "framework_api_provider" || candidate.Kind == "export_definition"
 }
 
 func requiresProvider(candidate planner.Candidate) bool {

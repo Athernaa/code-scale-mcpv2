@@ -210,6 +210,37 @@ fn()`,
 	}
 }
 
+func TestLuaUniqueRequiredModuleCallResolves(t *testing.T) {
+	result := analyzeTestRepository(t, map[string]string{
+		"app/user/repository.lua": `function write(value) return value end`,
+		"app/user/service.lua": `local repository = require("app.user.repository")
+function persist_user(value) return repository.write(value) end`,
+	}, map[string]string{"app/user/repository.lua": "lua", "app/user/service.lua": "lua"}, "")
+	persist, ok := symbolEntity(result, "app/user/service.lua", "persist_user")
+	if !ok {
+		t.Fatal("persist_user symbol missing")
+	}
+	write, ok := symbolEntity(result, "app/user/repository.lua", "write")
+	if !ok {
+		t.Fatal("write symbol missing")
+	}
+	if !relationshipConnects(result, persist, write, RelationshipCalls) {
+		t.Fatalf("unique required Lua module call did not resolve: %#v", relationshipsOf(result, RelationshipCalls))
+	}
+}
+
+func TestLuaFacadeFunctionCallResolves(t *testing.T) {
+	result := analyzeTestRepository(t, map[string]string{
+		"core.lua": `function GetPlayer(source) return source end
+function GetCoreObject(source) return { Functions = { GetPlayer = GetPlayer(source) } } end`,
+	}, map[string]string{"core.lua": "lua"}, "")
+	from, fromOK := symbolEntity(result, "core.lua", "GetCoreObject")
+	to, toOK := symbolEntity(result, "core.lua", "GetPlayer")
+	if !fromOK || !toOK || !relationshipConnects(result, from, to, RelationshipCalls) {
+		t.Fatalf("Lua facade call did not resolve: %#v", relationshipsOf(result, RelationshipCalls))
+	}
+}
+
 func TestGoPackageAndExternalResolution(t *testing.T) {
 	result := analyzeTestRepository(t, map[string]string{
 		"go.mod": `module example.com/project`,

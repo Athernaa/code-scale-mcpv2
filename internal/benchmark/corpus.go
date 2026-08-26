@@ -20,9 +20,13 @@ func LoadCorpus(path string) (Corpus, error) {
 		return Corpus{}, fmt.Errorf("invalid corpus metadata")
 	}
 	repos := make(map[string]bool, len(corpus.Repositories))
-	for _, repo := range corpus.Repositories {
-		if repo.Name == "" || repo.Path == "" || (repo.Kind != "generic" && repo.Kind != "fivem") {
+	for index := range corpus.Repositories {
+		repo := &corpus.Repositories[index]
+		if repo.Name == "" || repo.Path == "" || (repo.Kind != "generic" && repo.Kind != "fivem") || (repo.Tier != "" && repo.Tier != "small" && repo.Tier != "realistic") {
 			return Corpus{}, fmt.Errorf("invalid repository spec %#v", repo)
+		}
+		if repo.Tier == "" {
+			repo.Tier = "small"
 		}
 		if repos[repo.Name] {
 			return Corpus{}, fmt.Errorf("duplicate repository %q", repo.Name)
@@ -33,6 +37,20 @@ func LoadCorpus(path string) (Corpus, error) {
 	for _, task := range corpus.Tasks {
 		if task.ID == "" || task.Repo == "" || task.Text == "" || len(task.Required) == 0 || len(task.RelevantFiles) == 0 {
 			return Corpus{}, fmt.Errorf("invalid task %q", task.ID)
+		}
+		if task.AcceptanceClass != AcceptanceSupported && task.AcceptanceClass != AcceptanceDiagnostic && task.AcceptanceClass != AcceptanceAdversarial {
+			return Corpus{}, fmt.Errorf("task %q has invalid acceptance_class %q", task.ID, task.AcceptanceClass)
+		}
+		if task.AcceptanceClass == AcceptanceDiagnostic && task.ExclusionReason == "" {
+			return Corpus{}, fmt.Errorf("diagnostic task %q requires exclusion_reason", task.ID)
+		}
+		for _, required := range task.Required {
+			if required.Kind != "symbol" && required.Kind != "file" && required.Kind != "relationship" && required.Kind != "provider" {
+				return Corpus{}, fmt.Errorf("task %q has invalid required kind %q", task.ID, required.Kind)
+			}
+			if required.Kind == "relationship" && (required.From == "" || required.To == "" || required.Relationship == "") {
+				return Corpus{}, fmt.Errorf("task %q has incomplete relationship ground truth", task.ID)
+			}
 		}
 		if !repos[task.Repo] {
 			return Corpus{}, fmt.Errorf("task %q references unknown repo %q", task.ID, task.Repo)

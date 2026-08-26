@@ -1,7 +1,6 @@
 function LoadCharacter(source)
     local player = exports.core:GetPlayer(source)
     exports.inventory:AddItem(source, 'water', 1)
-    lib.callback.await('inventory:get', false)
     return player
 end
 

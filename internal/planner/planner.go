@@ -518,6 +518,9 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 		if count > 1 {
 			addAmbiguity(&result, Ambiguity{Kind: "source_anchor", Query: hint, CandidateCount: count, Truncated: declarationTruncatedByHint[hint], AnchorIDs: sortedBoolKeys(anchors)})
 			for anchor := range anchors {
+				if request.FocusSymbolID != "" && anchor == "symbol:"+request.FocusSymbolID {
+					continue
+				}
 				collector.markAmbiguous(anchor)
 			}
 		}
@@ -908,7 +911,7 @@ func (p *Planner) expand(ctx context.Context, repoID int64, seeds []plannerSeedE
 			directions := []struct {
 				value  string
 				impact bool
-			}{{value: baseDirection}}
+			}{{value: baseDirection, impact: request.IncludeImpact && baseDirection == "incoming"}}
 			if request.IncludeImpact && baseDirection != "incoming" && baseDirection != "both" {
 				directions = append(directions, struct {
 					value  string

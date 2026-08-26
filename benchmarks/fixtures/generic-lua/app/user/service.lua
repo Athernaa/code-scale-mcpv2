@@ -1,4 +1,4 @@
-require("app.user.repository")
+local repository = require("app.user.repository")
 
 function validate_user(value)
     return value and value.email ~= nil
@@ -8,5 +8,5 @@ function persist_user(value)
     if not validate_user(value) then
         return false
     end
-    return write(value)
+    return repository.write(value)
 end

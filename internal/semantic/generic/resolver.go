@@ -289,7 +289,12 @@ func sourceEntity(site semantic.Entity, idx graphIndexes) (semantic.Entity, bool
 func uniqueExportTarget(files []semantic.Entity, name string, idx graphIndexes) (semantic.Entity, bool) {
 	var candidates []semantic.Entity
 	for _, file := range files {
-		candidates = append(candidates, idx.exports[normalizePath(file.File)][name]...)
+		path := normalizePath(file.File)
+		fileCandidates := idx.exports[path][name]
+		if len(fileCandidates) == 0 && idx.languages[path] == "lua" {
+			fileCandidates = idx.symbolsByFileName[path+"\x00"+name]
+		}
+		candidates = append(candidates, fileCandidates...)
 	}
 	return exactlyOne(candidates)
 }

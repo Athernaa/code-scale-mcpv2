@@ -270,7 +270,11 @@ func collectLuaBindings(root *sitter.Node, source []byte) *lexicalBindings {
 			if name == nil {
 				name = firstNodeOfType(node, "variable_declarator")
 			}
-			addPatternBindingsFromSource(bindings, name, nearestScope(node.Parent(), "lua"), "variable", source)
+			kind := "variable"
+			if call := firstNodeOfType(node, "function_call"); call != nil && luaCallText(call, source) == "require" {
+				kind = "import"
+			}
+			addPatternBindingsFromSource(bindings, name, nearestScope(node.Parent(), "lua"), kind, source)
 		}
 	})
 	return bindings

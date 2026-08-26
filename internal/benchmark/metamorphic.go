@@ -145,7 +145,7 @@ func buildSingleFixtureIndex(ctx context.Context, root, repoName string) (*Fixtu
 		_ = os.RemoveAll(base)
 		return nil, nil, err
 	}
-	index := &FixtureIndex{Store: store, BasePath: base, RepoIDs: map[string]int64{}, Files: map[string][]FixtureFile{}}
+	index := &FixtureIndex{Store: store, BasePath: base, RepoIDs: map[string]int64{}, Files: map[string][]FixtureFile{}, Symbols: map[string]map[string][]parser.Symbol{}}
 	cleanup := func() { _ = store.Close(); _ = os.RemoveAll(base) }
 	if err := indexRepository(ctx, index, RepositorySpec{Name: repoName, Path: ".", Kind: "fivem"}, root); err != nil {
 		cleanup()
@@ -179,6 +179,7 @@ func refreshGenericAndFiles(ctx context.Context, index *FixtureIndex, repoName, 
 		return err
 	}
 	index.Files[repoName] = fixtureFiles(files, languages)
+	index.Symbols[repoName] = symbols
 	return nil
 }
 

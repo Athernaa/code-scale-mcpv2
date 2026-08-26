@@ -319,8 +319,7 @@ func (f *fileFacts) analyzeLua() {
 		if node.Type() != "function_call" {
 			return
 		}
-		prefix := node.ChildByFieldName("prefix")
-		name := strings.TrimSpace(nodeText(f.input.Content, prefix))
+		name := luaCallText(node, f.input.Content)
 		if name == "" || strings.Contains(name, "=") {
 			return
 		}
@@ -335,11 +334,61 @@ func (f *fileFacts) analyzeLua() {
 		if member == "require" {
 			if args := node.ChildByFieldName("args"); args != nil {
 				if module := firstStringChild(args, f.input.Content); module != "" {
-					f.addImportSite(module, "", "", node, "lua_require")
+					f.addImportSite(module, luaRequireLocal(node, f.input.Content), "*", node, "lua_require")
 				}
 			}
 		}
 	})
+}
+
+func luaCallText(node *sitter.Node, source []byte) string {
+	if node == nil {
+		return ""
+	}
+	first, last := (*sitter.Node)(nil), (*sitter.Node)(nil)
+	for index := 0; index < int(node.NamedChildCount()); index++ {
+		child := node.NamedChild(index)
+		if child == nil || child.Type() == "function_arguments" || child.Type() == "function_call" {
+			continue
+		}
+		if child.Type() != "identifier" && child.Type() != "field_identifier" {
+			continue
+		}
+		if first == nil {
+			first = child
+		}
+		last = child
+	}
+	if first != nil && last != nil {
+		return strings.TrimSpace(string(source[first.StartByte():last.EndByte()]))
+	}
+	return strings.TrimSpace(nodeText(source, node.ChildByFieldName("prefix")))
+}
+
+func luaRequireLocal(node *sitter.Node, source []byte) string {
+	if node == nil {
+		return ""
+	}
+	for current := node.Parent(); current != nil; current = current.Parent() {
+		switch current.Type() {
+		case "variable_declaration", "assignment_statement":
+			local := ""
+			walk(current, func(child *sitter.Node) {
+				if child.Type() != "identifier" || child.EndByte() > node.StartByte() {
+					return
+				}
+				value := nodeText(source, child)
+				if value != "" {
+					local = value
+				}
+			})
+			return local
+		}
+		if current.Type() == "function_statement" || current.Type() == "chunk" {
+			break
+		}
+	}
+	return ""
 }
 
 func (f *fileFacts) analyzeGo() {
