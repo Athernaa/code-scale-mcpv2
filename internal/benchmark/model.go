@@ -186,12 +186,14 @@ type RelationshipEvidence struct {
 }
 
 type AcceptanceSummary struct {
-	SupportedTotal  int               `json:"supported_total"`
-	SupportedPassed int               `json:"supported_passed"`
-	SupportedFailed int               `json:"supported_failed"`
-	ExcludedTotal   int               `json:"excluded_total"`
-	ExcludedByClass map[string]int    `json:"excluded_by_class"`
-	ExcludedTasks   map[string]string `json:"excluded_tasks"`
+	SupportedTotal   int               `json:"supported_total"`
+	SupportedPassed  int               `json:"supported_passed"`
+	SupportedFailed  int               `json:"supported_failed"`
+	DiagnosticTotal  int               `json:"diagnostic_total"`
+	AdversarialTotal int               `json:"adversarial_total"`
+	ExcludedTotal    int               `json:"excluded_total"`
+	ExcludedByClass  map[string]int    `json:"excluded_by_class"`
+	ExcludedTasks    map[string]string `json:"excluded_tasks"`
 }
 
 type Aggregate struct {
@@ -235,6 +237,7 @@ type Aggregate struct {
 	EarlyStopTokensAvoided           int     `json:"early_stop_tokens_avoided"`
 	EarlyStopSourceReadsAvoided      int     `json:"early_stop_source_reads_avoided"`
 	EarlyStopRoundsAvoided           int     `json:"early_stop_rounds_avoided"`
+	BaselineAccountingViolations     int     `json:"baseline_accounting_violations"`
 }
 
 type Summary struct {
@@ -266,4 +269,7 @@ type Validation struct {
 	FalseSufficiencyZero       bool `json:"false_sufficiency_zero"`
 	RuntimeErrorsZero          bool `json:"runtime_errors_zero"`
 	TokenReductionAtLeast50    bool `json:"token_reduction_at_least_50"`
+	PanoramicSelfBaselineZero  bool `json:"panoramic_self_baseline_zero"`
+	ScopedSelfBaselineZero     bool `json:"scoped_self_baseline_zero"`
+	BaselineAccountingZero     bool `json:"baseline_accounting_zero"`
 }

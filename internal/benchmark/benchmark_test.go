@@ -83,8 +83,102 @@ func TestEmptyRetrievalPrecisionIsUndefined(t *testing.T) {
 	}
 }
 
+func TestScoreResultPreservesSuppliedContextPayload(t *testing.T) {
+	counter, err := contextpack.NewTokenCounter(contextpack.TokenizerO200K)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := Task{ID: "payload", Required: []GroundTruthItem{{Kind: "symbol", Name: "Target", File: "target.go"}}}
+	output := modeOutput{
+		Items: []retrievedItem{
+			{Key: "symbol:target", Name: "Target", File: "target.go", SymbolID: "target.go::Target#function", Source: "scoring-only source"},
+			{Key: "provider:target", Name: "Target", File: "provider.go", Kind: "framework_api_provider", Authority: "local_verified", Source: "scoring-only provider metadata"},
+		},
+		Ranked:      []retrievedItem{{Key: "symbol:target", Name: "Target", File: "target.go", SymbolID: "target.go::Target#function"}},
+		ContextText: "actual manual context payload",
+	}
+	result := scoreResult(task, ModeManual, 1024, 1, output, counter, counter.Count(output.ContextText), counter.Count(output.ContextText))
+	if result.ContextTokens != counter.Count(output.ContextText) || result.TokenSaving != 0 {
+		t.Fatalf("scoring-only items changed supplied payload accounting: got=%d saving=%v", result.ContextTokens, result.TokenSaving)
+	}
+}
+
+func TestPanoramicSelfBaselinesUseExactPayloadTokens(t *testing.T) {
+	report, err := Run(context.Background(), Config{
+		CorpusPath: "../../benchmarks/corpus.json",
+		Mode:       "all",
+		Budgets:    []int{512},
+		Repeat:     1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range report.Results {
+		switch result.Mode {
+		case ModePanoramic:
+			if result.ContextTokens != result.BaselineContextTokens || result.TokenSaving != 0 {
+				t.Fatalf("panoramic self baseline mismatch for %s: context=%d baseline=%d saving=%v", result.TaskID, result.ContextTokens, result.BaselineContextTokens, result.TokenSaving)
+			}
+		case ModeScopedPanoramic:
+			if result.ContextTokens != result.ScopedBaselineContextTokens || result.ScopedTokenSaving != 0 {
+				t.Fatalf("scoped panoramic self baseline mismatch for %s: context=%d baseline=%d saving=%v", result.TaskID, result.ContextTokens, result.ScopedBaselineContextTokens, result.ScopedTokenSaving)
+			}
+		}
+	}
+	if !report.Validation.PanoramicSelfBaselineZero || !report.Validation.ScopedSelfBaselineZero || report.Aggregate.BaselineAccountingViolations != 0 {
+		t.Fatalf("baseline accounting validation failed: validation=%+v aggregate=%+v", report.Validation, report.Aggregate)
+	}
+}
+
+func TestManualPrimitiveAndPhase7PayloadAccounting(t *testing.T) {
+	corpus, err := LoadCorpus("../../benchmarks/corpus.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, cleanup, err := BuildFixtureIndex(context.Background(), corpus, "../../benchmarks/fixtures")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	var task Task
+	for _, candidate := range corpus.Tasks {
+		if candidate.ID == "go_save_fix" {
+			task = candidate
+			break
+		}
+	}
+	counter, err := contextpack.NewTokenCounter(corpus.DefaultTokenizer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &runner{index: index, corpus: corpus, counter: counter, tokenizer: corpus.DefaultTokenizer}
+	broad := runner.panoramic(task)
+	scoped := runner.scopedPanoramic(task)
+	broadTokens, scopedTokens := counter.Count(broad.ContextText), counter.Count(scoped.ContextText)
+	manual := scoreResult(task, ModeManual, 32000, 1, runner.manual(task), counter, broadTokens, scopedTokens)
+	if manual.ContextTokens != counter.Count(runner.manual(task).ContextText) {
+		t.Fatalf("manual accounting did not use supplied payload: %d", manual.ContextTokens)
+	}
+	primitiveOutput, err := runner.primitive(context.Background(), task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	primitive := scoreResult(task, ModePrimitive, 32000, 1, primitiveOutput, counter, broadTokens, scopedTokens)
+	if primitive.ContextTokens != counter.Count(primitiveOutput.ContextText) {
+		t.Fatalf("primitive accounting did not use supplied payload: %d", primitive.ContextTokens)
+	}
+	phaseOutput, err := runner.phase7(context.Background(), task, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	phase := scoreResult(task, ModePhase7, 2048, 1, phaseOutput, counter, broadTokens, scopedTokens)
+	if phase.ContextTokens != counter.Count(phaseOutput.ContextText) {
+		t.Fatalf("Phase-7 accounting changed serialized package tokens: %d", phase.ContextTokens)
+	}
+}
+
 func TestReportStatusTreatsHardFailuresAsFail(t *testing.T) {
-	base := Report{Validation: Validation{ProviderFabricationZero: true, CrossRepoLeakageZero: true, SerializedBudgetZero: true, FalseSufficiencyZero: true, SupportedRecallAtLeast95: true, RuntimeErrorsZero: true, TokenReductionAtLeast50: true}}
+	base := Report{Validation: Validation{ProviderFabricationZero: true, CrossRepoLeakageZero: true, SerializedBudgetZero: true, FalseSufficiencyZero: true, SupportedRecallAtLeast95: true, RuntimeErrorsZero: true, BaselineAccountingZero: true, TokenReductionAtLeast50: true}}
 	if Status(base) != "PASS" {
 		t.Fatalf("all release gates should pass: %s", Status(base))
 	}

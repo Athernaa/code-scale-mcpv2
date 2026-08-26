@@ -115,6 +115,7 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 		"Phase-7 defect fixed: unique Lua require aliases now resolve dotted module calls while ambiguous and shadowed imports remain unresolved; Lua false-sufficiency matrix rerun passed.",
 		"Phase-7 defect fixed: explicit focused generic symbols can expand past same-source multi-analyzer ambiguity; facade-chain budget matrix rerun passed.",
 		"Phase-7 defect fixed: exact semantic provider operations and incoming impact traces remain incomplete until provider/impact evidence is returned; low-budget framework and blast-radius regressions pass.",
+		"Benchmark accounting defect fixed: supplied ContextText is counted directly, scoring-only symbol/provider/relationship records remain outside the payload, and panoramic/scoped self-baseline invariants pass.",
 	}}
 	for _, rawTask := range tasks {
 		task := rawTask
@@ -147,6 +148,8 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 		}
 	}
 	report.Aggregate = aggregateResults(report.Results)
+	panoramicBaselineViolations, scopedBaselineViolations := baselineSelfBaselineViolations(report.Results)
+	report.Aggregate.BaselineAccountingViolations = panoramicBaselineViolations + scopedBaselineViolations
 	report.ByCategory = summarizeCategories(report.Results)
 	report.ByTier = summarizeTiers(report.Results)
 	report.Acceptance = acceptanceSummary(report.Results)

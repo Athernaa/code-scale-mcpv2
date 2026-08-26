@@ -41,8 +41,8 @@ func LoadCorpus(path string) (Corpus, error) {
 		if task.AcceptanceClass != AcceptanceSupported && task.AcceptanceClass != AcceptanceDiagnostic && task.AcceptanceClass != AcceptanceAdversarial {
 			return Corpus{}, fmt.Errorf("task %q has invalid acceptance_class %q", task.ID, task.AcceptanceClass)
 		}
-		if task.AcceptanceClass == AcceptanceDiagnostic && task.ExclusionReason == "" {
-			return Corpus{}, fmt.Errorf("diagnostic task %q requires exclusion_reason", task.ID)
+		if task.AcceptanceClass != AcceptanceSupported && task.ExclusionReason == "" {
+			return Corpus{}, fmt.Errorf("excluded task %q requires exclusion_reason", task.ID)
 		}
 		for _, required := range task.Required {
 			if required.Kind != "symbol" && required.Kind != "file" && required.Kind != "relationship" && required.Kind != "provider" {

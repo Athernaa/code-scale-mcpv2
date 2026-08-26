@@ -16,7 +16,9 @@ import (
 func scoreResult(task Task, mode Mode, budget, repeat int, output modeOutput, counter contextpack.TokenCounter, baselineContextTokens, scopedBaselineContextTokens int) TaskResult {
 	contextTokens := output.ContextTokens
 	if contextTokens == 0 {
-		output.ContextText = renderItems(output.Items)
+		if output.ContextText == "" {
+			output.ContextText = renderItems(output.Items)
+		}
 		contextTokens = counter.Count(output.ContextText)
 	}
 	sourceTokens := output.SourceTokens
@@ -547,7 +549,8 @@ func summarizeTiers(results []TaskResult) map[string]Summary {
 
 func validateReport(results []TaskResult, aggregate Aggregate) Validation {
 	phase := filterMode(results, ModePhase7)
-	v := Validation{ProviderFabricationZero: aggregate.ProviderFabrication == 0, CrossRepoLeakageZero: aggregate.CrossRepoLeaks == 0, SerializedBudgetZero: aggregate.SerializedBudgetViolations == 0, FalseSufficiencyZero: aggregate.FalseSufficiencyAllBudgets == 0, RuntimeErrorsZero: aggregate.RuntimeErrors == 0, DeterminismFailures: aggregate.Nondeterministic}
+	panoramicViolations, scopedViolations := baselineSelfBaselineViolations(results)
+	v := Validation{ProviderFabricationZero: aggregate.ProviderFabrication == 0, CrossRepoLeakageZero: aggregate.CrossRepoLeaks == 0, SerializedBudgetZero: aggregate.SerializedBudgetViolations == 0, FalseSufficiencyZero: aggregate.FalseSufficiencyAllBudgets == 0, RuntimeErrorsZero: aggregate.RuntimeErrors == 0, DeterminismFailures: aggregate.Nondeterministic, PanoramicSelfBaselineZero: panoramicViolations == 0, ScopedSelfBaselineZero: scopedViolations == 0, BaselineAccountingZero: panoramicViolations == 0 && scopedViolations == 0}
 	eligible := eligibleAtMaximumBudget(phase)
 	v.SupportedRecallAtLeast95 = mean(field(eligible, func(r TaskResult) float64 { return r.DependencyRecall })) >= .95
 	falseEligible := 0
@@ -563,6 +566,25 @@ func validateReport(results []TaskResult, aggregate Aggregate) Validation {
 	}
 	v.TokenReductionAtLeast50 = aggregate.SupportedMedianTokenSaving >= .50
 	return v
+}
+
+func baselineSelfBaselineViolations(results []TaskResult) (panoramic, scoped int) {
+	panoramic = countModeBaselineViolations(results, ModePanoramic)
+	scoped = countModeBaselineViolations(results, ModeScopedPanoramic)
+	return panoramic, scoped
+}
+
+func countModeBaselineViolations(results []TaskResult, mode Mode) int {
+	violations := 0
+	for _, result := range results {
+		if result.Mode == ModePanoramic && mode == ModePanoramic && (result.ContextTokens != result.BaselineContextTokens || result.TokenSaving != 0) {
+			violations++
+		}
+		if result.Mode == ModeScopedPanoramic && mode == ModeScopedPanoramic && (result.ContextTokens != result.ScopedBaselineContextTokens || result.ScopedTokenSaving != 0) {
+			violations++
+		}
+	}
+	return violations
 }
 
 func acceptanceSummary(results []TaskResult) AcceptanceSummary {
@@ -592,6 +614,12 @@ func acceptanceSummary(results []TaskResult) AcceptanceSummary {
 		}
 		summary.ExcludedTotal++
 		summary.ExcludedByClass[classes[taskID]]++
+		switch classes[taskID] {
+		case AcceptanceDiagnostic:
+			summary.DiagnosticTotal++
+		case AcceptanceAdversarial:
+			summary.AdversarialTotal++
+		}
 		for _, result := range taskResults {
 			if result.ExclusionReason != "" {
 				summary.ExcludedTasks[taskID] = result.ExclusionReason
