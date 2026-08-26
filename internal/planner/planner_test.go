@@ -181,6 +181,47 @@ func TestPlannerFrameworkAuthorityAndWorkspaceHealth(t *testing.T) {
 	}
 }
 
+func TestPlannerFocusBridgesPersistedAnalyzerFacts(t *testing.T) {
+	store := plannerStore(t, "local", "focus-bridge")
+	defer store.Close()
+	repo := "local/focus-bridge"
+	focus := plannerSymbol("resources/[jobs]/jobs/server.lua", "LoadCharacter", 1)
+	providerSymbol := plannerSymbol("resources/[inventory]/inventory/server.lua", "AddItem", 1)
+	if err := replacePlannerIndex(store, "local", "focus-bridge", repo, []parser.Symbol{focus, providerSymbol}); err != nil {
+		t.Fatal(err)
+	}
+	repoID, err := store.GetRepoID(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericFocus := plannerCodeSymbol(repo, focus)
+	call := semantic.Entity{ID: "fivem-call", Analyzer: semantic.AnalyzerFiveM, Repo: repo, File: focus.File, SymbolID: focus.ID, Kind: fivem.KindExportCall, Name: "AddItem", Side: "server", Line: 2, Metadata: map[string]any{"source_resource": "jobs", "target_resource": "inventory", "provider_status": framework.ProviderStatusLocalVerified, "provider_verified": true, "provider_entity_id": "fivem-provider"}}
+	provider := semantic.Entity{ID: "fivem-provider", Analyzer: semantic.AnalyzerFiveM, Repo: repo, File: providerSymbol.File, SymbolID: providerSymbol.ID, Kind: fivem.KindExportDefinition, Name: "AddItem", Side: "server", Line: 1, Metadata: map[string]any{"source_resource": "inventory"}}
+	frameworkCall := semantic.Entity{ID: "framework-call", Analyzer: semantic.AnalyzerFramework, Repo: repo, File: focus.File, SymbolID: focus.ID, Kind: framework.KindAPICall, Name: "AddItem", Side: "server", Metadata: map[string]any{"provider_status": framework.ProviderStatusLocalVerified, "provider_verified": true, "provider_entity_id": "framework-provider", "source_resource": "jobs", "target_resource": "inventory"}}
+	frameworkProvider := semantic.Entity{ID: "framework-provider", Analyzer: semantic.AnalyzerFramework, Repo: repo, File: providerSymbol.File, SymbolID: providerSymbol.ID, Kind: framework.KindAPIProvider, Name: "AddItem", Side: "server", Metadata: map[string]any{"source_resource": "inventory"}}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerGenericGraph, semantic.Result{Entities: []semantic.Entity{genericFocus}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveM, semantic.Result{Entities: []semantic.Entity{call, provider}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFramework, semantic.Result{Entities: []semantic.Entity{frameworkCall, frameworkProvider}, Relationships: []semantic.Relationship{plannerRelationship(repo, frameworkCall, frameworkProvider, framework.RelationshipFrameworkCalls)}}); err != nil {
+		t.Fatal(err)
+	}
+	workspaceEdge := plannerRelationship(repo, call, provider, "cross_resource_export")
+	workspaceEdge.Analyzer = semantic.AnalyzerFiveMWorkspace
+	if err := store.ReplaceSemanticIndexForAnalyzer(repoID, semantic.AnalyzerFiveMWorkspace, semantic.Result{Relationships: []semantic.Relationship{workspaceEdge}}); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := New(store).Plan(context.Background(), Request{Repo: repo, Task: "fix LoadCharacter AddItem", FocusSymbolID: focus.ID, IncludeImpact: true, MaxCandidates: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !planContainsSymbolReason(plan, providerSymbol.ID, "export_provider") && !planContainsSymbolReason(plan, providerSymbol.ID, "framework_provider") {
+		t.Fatalf("focused source anchor did not bridge persisted analyzer providers: %#v", plan)
+	}
+}
+
 func TestTraceProviderAuthorityRequiresStaticStructuralProof(t *testing.T) {
 	call := semantic.Entity{ID: "call", Kind: framework.KindAPICall, Metadata: map[string]any{"provider_status": framework.ProviderStatusLocalVerified, "provider_verified": true, "provider_entity_id": "provider"}}
 	provider := semantic.Entity{ID: "provider", Kind: framework.KindAPIProvider}

@@ -1011,6 +1011,30 @@ func (s *IndexStore) GetSemanticEntityBySymbolID(repoID int64, analyzer, symbolI
 	return matches[0], nil
 }
 
+// GetSemanticEntitiesForSymbolID returns all analyzer-owned semantic facts
+// that share one source parser symbol. A source symbol can legitimately have
+// a generic declaration plus FiveM/framework occurrence facts.
+func (s *IndexStore) GetSemanticEntitiesForSymbolID(repoID int64, symbolID string) ([]semantic.Entity, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	repoName := repoNameLocked(s.db, repoID)
+	rows, err := s.db.Query(`SELECT id, analyzer, file_path, symbol_id, kind, name, framework, side, line, end_line, dynamic, metadata
+		FROM semantic_entities WHERE repo_id = ? AND symbol_id = ? ORDER BY analyzer, id`, repoID, symbolID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var result []semantic.Entity
+	for rows.Next() {
+		entity, err := scanSemanticEntity(rows, repoName)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, entity)
+	}
+	return result, rows.Err()
+}
+
 // GetSemanticRelationships returns all stored semantic edges for verification
 // and maintenance operations. Query tools should prefer TraceSemantic.
 func (s *IndexStore) GetSemanticRelationships(repoID int64) ([]semantic.Relationship, error) {

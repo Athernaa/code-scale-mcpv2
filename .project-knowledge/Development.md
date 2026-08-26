@@ -12,6 +12,7 @@ tags:
 
 ## Detected commands
 - No package scripts detected during bootstrap. Inspect the repository before adding commands.
+- `go run ./cmd/code-scale-bench run --budgets 512,1024,2048,4000,8000,16000,32000 --repeat 2` runs the offline Phase 7.4 matrix and writes `benchmarks/reports/latest.json` plus `benchmarks/reports/latest.md`.
 
 ## Verification strategy
 - Prefer existing project commands and test suites.

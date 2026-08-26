@@ -225,7 +225,28 @@ func (a *Assembler) Assemble(ctx context.Context, request Request) (Package, err
 	}
 	if !request.Debug {
 		pkg.Debug = nil
+		for i := 0; i < 4; i++ {
+			before := sectionFingerprint(pkg.Sections)
+			pkg.Sufficiency = a.evaluateSufficiency(plan, pkg, request, evaluatedStage)
+			if err := finalizePackage(ctx, &pkg, originals, debug, counter, budget); err != nil {
+				return Package{}, err
+			}
+			data, err := json.Marshal(pkg)
+			if err != nil {
+				return Package{}, err
+			}
+			if before == sectionFingerprint(pkg.Sections) && counter.Count(string(data)) <= budget {
+				break
+			}
+		}
 		stabilizeBudget(&pkg, counter, budget)
+		data, err := json.Marshal(pkg)
+		if err != nil {
+			return Package{}, err
+		}
+		if counter.Count(string(data)) > budget {
+			return Package{}, fmt.Errorf("final context package exceeds token budget")
+		}
 	}
 	return pkg, nil
 }

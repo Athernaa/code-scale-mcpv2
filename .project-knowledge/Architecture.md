@@ -31,3 +31,7 @@ tags:
 
 ## Performance-critical paths
 - Record measured or structurally important hot paths when they become known.
+
+## Benchmark boundary
+- Phase 7.4 evaluation lives in `internal/benchmark`, `cmd/code-scale-bench`, and `benchmarks/`; it builds temporary offline indexes and is not part of the MCP runtime or a runtime dependency.
+- The measured Phase 7.4 corpus passed supported-task recall, provider fabrication, repository isolation, serialized-budget, determinism, and incremental/full authority checks. Its supported-task median token reduction was below the provisional 50% target, so token efficiency remains a release limitation rather than a marketing claim.

@@ -408,6 +408,27 @@ func (p *Planner) plan(ctx context.Context, request Request) (Plan, error) {
 			processSemanticEntity(entity, currentSemanticHint)
 		}
 	}
+	if request.FocusSymbolID != "" && work.allowSemanticQuery() {
+		focusedEntities, searchErr := p.Store.GetSemanticEntitiesForSymbolID(repoID, request.FocusSymbolID)
+		if searchErr != nil {
+			return Plan{}, searchErr
+		}
+		for _, entity := range focusedEntities {
+			if entity.Analyzer == semantic.AnalyzerGenericGraph || entity.Analyzer == semantic.AnalyzerFiveMWorkspace || entity.Kind == framework.KindStatus {
+				continue
+			}
+			if work.semanticRows >= work.maxSemanticRows {
+				work.exactExhausted = true
+				break
+			}
+			work.semanticRows++
+			anchor := entitySourceAnchor(entity)
+			collector.add(entity, "semantic_entity", "explicit_focus", 0, true)
+			addEntityCandidate(acc, entity, []string{"explicit_focus"}, 0, work)
+			exactSymbolAnchors[anchor] = true
+			strongExactAnchors[anchor] = true
+		}
+	}
 
 	for _, hint := range orderedLookupHints(intent) {
 		if err := contextErr(ctx); err != nil {

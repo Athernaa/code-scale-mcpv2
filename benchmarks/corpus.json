@@ -1,0 +1,368 @@
+{
+  "schema_version": 1,
+  "corpus_version": "7.4.0",
+  "fixture_revision": "phase7.4-initial",
+  "default_tokenizer": "o200k_base",
+  "repos": [
+    {"name": "bench/go", "path": "generic-go", "kind": "generic"},
+    {"name": "bench/typescript", "path": "generic-typescript", "kind": "generic"},
+    {"name": "bench/lua", "path": "generic-lua", "kind": "generic"},
+    {"name": "bench/fivem", "path": "fivem-workspace", "kind": "fivem"},
+    {"name": "bench/fivem-adversarial", "path": "fivem-adversarial", "kind": "fivem"},
+    {"name": "bench/isolation-a", "path": "isolation-a", "kind": "generic"},
+    {"name": "bench/isolation-b", "path": "isolation-b", "kind": "generic"}
+  ],
+  "tasks": [
+    {
+      "id": "go_exact_save_user",
+      "repo": "bench/go",
+      "category": "exact_symbol_lookup",
+      "text": "find SaveUser",
+      "required": [{"kind": "symbol", "name": "SaveUser", "file": "user/service.go"}],
+      "relevant_files": ["user/service.go"],
+      "anchor_names": ["SaveUser"]
+    },
+    {
+      "id": "go_exact_write_user",
+      "repo": "bench/go",
+      "category": "exact_semantic_endpoint",
+      "text": "find WriteUser",
+      "required": [{"kind": "symbol", "name": "WriteUser", "file": "storage/repository.go"}],
+      "relevant_files": ["storage/repository.go"],
+      "anchor_names": ["WriteUser"]
+    },
+    {
+      "id": "go_save_fix",
+      "repo": "bench/go",
+      "category": "narrow_bug_fix",
+      "text": "fix SaveUser persistence",
+      "required": [
+        {"kind": "symbol", "name": "SaveUser", "file": "user/service.go"},
+        {"kind": "symbol", "name": "ValidateUser", "file": "user/service.go"},
+        {"kind": "symbol", "name": "WriteUser", "file": "storage/repository.go"},
+        {"kind": "relationship", "from": "SaveUser", "to": "WriteUser", "relationship": "calls"}
+      ],
+      "relevant_files": ["user/service.go", "storage/repository.go"],
+      "anchor_names": ["SaveUser"],
+      "eligible_for_acceptance": true
+    },
+    {
+      "id": "go_validation_feature",
+      "repo": "bench/go",
+      "category": "medium_feature",
+      "text": "implement SaveUser validation persistence flow",
+      "required": [
+        {"kind": "symbol", "name": "ValidateUser", "file": "user/service.go"},
+        {"kind": "symbol", "name": "SaveUser", "file": "user/service.go"},
+        {"kind": "symbol", "name": "WriteUser", "file": "storage/repository.go"},
+        {"kind": "relationship", "from": "SaveUser", "to": "ValidateUser", "relationship": "calls"}
+      ],
+      "relevant_files": ["user/service.go", "storage/repository.go"],
+      "anchor_names": ["SaveUser"],
+      "eligible_for_acceptance": true
+    },
+    {
+      "id": "go_save_callers",
+      "repo": "bench/go",
+      "category": "caller_trace",
+      "text": "who calls SaveUser",
+      "required": [
+        {"kind": "symbol", "name": "HandleSave", "file": "http/handler.go"},
+        {"kind": "relationship", "from": "HandleSave", "to": "SaveUser", "relationship": "calls"}
+      ],
+      "relevant_files": ["http/handler.go", "user/service.go"],
+      "anchor_names": ["SaveUser"]
+    },
+    {
+      "id": "go_save_callees",
+      "repo": "bench/go",
+      "category": "callee_trace",
+      "text": "what does SaveUser call",
+      "required": [
+        {"kind": "symbol", "name": "ValidateUser", "file": "user/service.go"},
+        {"kind": "symbol", "name": "WriteUser", "file": "storage/repository.go"},
+        {"kind": "relationship", "from": "SaveUser", "to": "WriteUser", "relationship": "calls"}
+      ],
+      "relevant_files": ["user/service.go", "storage/repository.go"],
+      "anchor_names": ["SaveUser"]
+    },
+    {
+      "id": "go_refactor_save_flow",
+      "repo": "bench/go",
+      "category": "generic_refactor",
+      "text": "refactor user save flow",
+      "required": [
+        {"kind": "symbol", "name": "HandleSave", "file": "http/handler.go"},
+        {"kind": "symbol", "name": "SaveUser", "file": "user/service.go"},
+        {"kind": "symbol", "name": "WriteUser", "file": "storage/repository.go"}
+      ],
+      "relevant_files": ["http/handler.go", "user/service.go", "storage/repository.go"],
+      "anchor_names": ["SaveUser"]
+    },
+    {
+      "id": "typescript_create_user",
+      "repo": "bench/typescript",
+      "category": "typescript_feature",
+      "text": "implement createUser validation flow",
+      "required": [
+        {"kind": "symbol", "name": "createUser", "file": "src/controller.ts"},
+        {"kind": "symbol", "name": "validateUser", "file": "src/validators.ts"},
+        {"kind": "symbol", "name": "saveUser", "file": "src/userService.ts"},
+        {"kind": "symbol", "name": "insert", "file": "src/userRepository.ts"}
+      ],
+      "relevant_files": ["src/controller.ts", "src/validators.ts", "src/userService.ts", "src/userRepository.ts"],
+      "anchor_names": ["createUser"],
+      "eligible_for_acceptance": true
+    },
+    {
+      "id": "typescript_controller_lookup",
+      "repo": "bench/typescript",
+      "category": "typescript_api",
+      "text": "find createUser",
+      "required": [{"kind": "symbol", "name": "createUser", "file": "src/controller.ts"}],
+      "relevant_files": ["src/controller.ts"],
+      "anchor_names": ["createUser"]
+    },
+    {
+      "id": "lua_save_flow",
+      "repo": "bench/lua",
+      "category": "lua_generic_feature",
+      "text": "trace save_user persist_user write persistence flow",
+      "required": [
+        {"kind": "symbol", "name": "save_user", "file": "app/init.lua"},
+        {"kind": "symbol", "name": "persist_user", "file": "app/user/service.lua"},
+        {"kind": "symbol", "name": "write", "file": "app/user/repository.lua"},
+        {"kind": "relationship", "from": "persist_user", "to": "write", "relationship": "calls"}
+      ],
+      "relevant_files": ["app/init.lua", "app/user/service.lua", "app/user/repository.lua"],
+      "anchor_names": ["save_user"],
+      "eligible_for_acceptance": true
+    },
+    {
+      "id": "fivem_event_flow",
+      "repo": "bench/fivem",
+      "category": "fivem_event_flow",
+      "text": "trace inventory:use event flow",
+      "required": [
+        {"kind": "symbol", "name": "inventory:use", "file": "resources/[ui]/ui/client.lua"},
+        {"kind": "symbol", "name": "inventory:use", "file": "resources/[inventory]/inventory/server.lua"},
+        {"kind": "relationship", "from": "inventory:use", "to": "inventory:use", "relationship": "cross_resource_event"}
+      ],
+      "relevant_files": ["resources/[ui]/ui/client.lua", "resources/[inventory]/inventory/server.lua"],
+      "anchor_names": ["inventory:use"]
+    },
+    {
+      "id": "fivem_callback_flow",
+      "repo": "bench/fivem",
+      "category": "fivem_callback_flow",
+      "text": "trace inventory:get callback",
+      "required": [
+        {"kind": "symbol", "name": "inventory:get", "file": "resources/[jobs]/jobs/server.lua"},
+        {"kind": "symbol", "name": "inventory:get", "file": "resources/[inventory]/inventory/server.lua"},
+        {"kind": "relationship", "from": "inventory:get", "to": "inventory:get", "relationship": "cross_resource_callback"}
+      ],
+      "relevant_files": ["resources/[jobs]/jobs/server.lua", "resources/[inventory]/inventory/server.lua"],
+      "anchor_names": ["inventory:get"]
+    },
+    {
+      "id": "fivem_export_flow",
+      "repo": "bench/fivem",
+      "category": "fivem_export_flow",
+      "text": "trace AddItem export flow",
+      "required": [
+        {"kind": "symbol", "name": "AddItem", "file": "resources/[jobs]/jobs/server.lua"},
+        {"kind": "symbol", "name": "AddItem", "file": "resources/[inventory]/inventory/server.lua"},
+        {"kind": "relationship", "from": "AddItem", "to": "AddItem", "relationship": "cross_resource_export"}
+      ],
+      "relevant_files": ["resources/[jobs]/jobs/server.lua", "resources/[inventory]/inventory/server.lua"],
+      "anchor_names": ["AddItem"]
+    },
+    {
+      "id": "fivem_nui_callback",
+      "repo": "bench/fivem",
+      "category": "nui_callback",
+      "text": "find RegisterNUICallback inventory:use",
+      "required": [{"kind": "symbol", "name": "inventory:use", "file": "resources/[ui]/ui/client.lua"}],
+      "relevant_files": ["resources/[ui]/ui/client.lua"],
+      "anchor_names": ["inventory:use"]
+    },
+    {
+      "id": "fivem_command",
+      "repo": "bench/fivem",
+      "category": "command",
+      "text": "find jobs:start command",
+      "required": [{"kind": "symbol", "name": "jobs:start", "file": "resources/[jobs]/jobs/server.lua"}],
+      "relevant_files": ["resources/[jobs]/jobs/server.lua"],
+      "anchor_names": ["jobs:start"]
+    },
+    {
+      "id": "fivem_verified_cross_resource",
+      "repo": "bench/fivem",
+      "category": "verified_cross_resource_call",
+      "text": "fix verified inventory AddItem call",
+      "required": [
+        {"kind": "symbol", "name": "AddItem", "file": "resources/[jobs]/jobs/server.lua"},
+        {"kind": "provider", "name": "AddItem", "file": "resources/[inventory]/inventory/server.lua", "authority": "local_verified"},
+        {"kind": "relationship", "from": "AddItem", "to": "AddItem", "relationship": "cross_resource_export"}
+      ],
+      "relevant_files": ["resources/[jobs]/jobs/server.lua", "resources/[inventory]/inventory/server.lua"],
+      "anchor_names": ["AddItem"],
+      "eligible_for_acceptance": true
+    },
+    {
+      "id": "fivem_custom_framework",
+      "repo": "bench/fivem",
+      "category": "custom_framework_operation",
+      "text": "find GetPlayer custom framework API",
+      "required": [{"kind": "provider", "name": "GetPlayer", "file": "resources/[core]/core/server.lua"}],
+      "relevant_files": ["resources/[core]/core/server.lua"],
+      "anchor_names": ["GetPlayer"]
+    },
+    {
+      "id": "fivem_known_framework",
+      "repo": "bench/fivem",
+      "category": "known_framework_operation",
+      "text": "find inventory_add_item operation",
+      "required": [{"kind": "provider", "name": "AddItem", "file": "resources/[inventory]/inventory/server.lua"}],
+      "relevant_files": ["resources/[inventory]/inventory/server.lua", "resources/[jobs]/jobs/server.lua"],
+      "anchor_names": ["inventory_add_item"]
+    },
+    {
+      "id": "fivem_facade_chain",
+      "repo": "bench/fivem",
+      "category": "framework_facade_chain",
+      "text": "what does GetCoreObject call",
+      "required": [
+        {"kind": "provider", "name": "GetCoreObject", "file": "resources/[core]/core/server.lua"},
+        {"kind": "symbol", "name": "GetPlayer", "file": "resources/[core]/core/server.lua"}
+      ],
+      "relevant_files": ["resources/[core]/core/server.lua", "resources/[jobs]/jobs/server.lua"],
+      "anchor_names": ["GetCoreObject"]
+    },
+    {
+      "id": "fivem_natural_inventory",
+      "repo": "bench/fivem",
+      "category": "multi_resource_feature",
+      "text": "fix character inventory loading",
+      "required": [
+        {"kind": "symbol", "name": "LoadCharacter", "file": "resources/[jobs]/jobs/server.lua"},
+        {"kind": "provider", "name": "GetPlayer", "file": "resources/[core]/core/server.lua"},
+        {"kind": "provider", "name": "AddItem", "file": "resources/[inventory]/inventory/server.lua", "authority": "local_verified"}
+      ],
+      "relevant_files": ["resources/[jobs]/jobs/server.lua", "resources/[core]/core/server.lua", "resources/[inventory]/inventory/server.lua", "resources/[ui]/ui/client.lua"],
+      "anchor_names": ["LoadCharacter"]
+    },
+    {
+      "id": "fivem_focused_inventory",
+      "repo": "bench/fivem",
+      "category": "focused_multi_resource_feature",
+      "text": "fix character inventory loading",
+      "focus_symbol_id": "resources/[jobs]/jobs/server.lua::LoadCharacter#function",
+      "required": [
+        {"kind": "symbol", "name": "LoadCharacter", "file": "resources/[jobs]/jobs/server.lua"},
+        {"kind": "provider", "name": "GetPlayer", "file": "resources/[core]/core/server.lua"},
+        {"kind": "provider", "name": "AddItem", "file": "resources/[inventory]/inventory/server.lua", "authority": "local_verified"}
+      ],
+      "relevant_files": ["resources/[jobs]/jobs/server.lua", "resources/[core]/core/server.lua", "resources/[inventory]/inventory/server.lua"],
+      "anchor_names": ["LoadCharacter"],
+      "eligible_for_acceptance": true
+    },
+    {
+      "id": "fivem_vehicle_impact",
+      "repo": "bench/fivem",
+      "category": "impact_blast_radius",
+      "text": "who calls vehicle repair",
+      "include_impact": true,
+      "required": [
+        {"kind": "symbol", "name": "vehicle:repair", "file": "resources/[vehicle]/vehicle/server.lua"},
+        {"kind": "symbol", "name": "repairVehicle", "file": "resources/[jobs]/jobs/server.lua"}
+      ],
+      "relevant_files": ["resources/[vehicle]/vehicle/server.lua", "resources/[jobs]/jobs/server.lua"],
+      "anchor_names": ["vehicle:repair"]
+    },
+    {
+      "id": "fivem_shared_provider",
+      "repo": "bench/fivem",
+      "category": "execution_side_provider",
+      "text": "find FormatName shared provider",
+      "required": [{"kind": "provider", "name": "FormatName", "file": "resources/[shared]/shared_utils/shared.lua"}],
+      "relevant_files": ["resources/[shared]/shared_utils/shared.lua"],
+      "anchor_names": ["FormatName"]
+    },
+    {
+      "id": "fivem_provider_ambiguity",
+      "repo": "bench/fivem-adversarial",
+      "category": "provider_ambiguity",
+      "text": "trace duplicateInventory AddItem provider",
+      "required": [{"kind": "symbol", "name": "duplicateInventory", "file": "resources/[jobs]/jobs/server.lua"}],
+      "relevant_files": ["resources/[jobs]/jobs/server.lua", "resources/[inventory]/inventory/server.lua", "resources/[legacy]/inventory/server.lua"],
+      "anchor_names": ["AddItem"],
+      "forbidden_verified_provider": "AddItem"
+    },
+    {
+      "id": "fivem_external_provider",
+      "repo": "bench/fivem-adversarial",
+      "category": "external_provider",
+      "text": "trace externalInventory AddItem provider",
+      "required": [{"kind": "symbol", "name": "externalInventory", "file": "resources/[jobs]/jobs/server.lua"}],
+      "relevant_files": ["resources/[jobs]/jobs/server.lua"],
+      "anchor_names": ["externalInventory"],
+      "forbidden_verified_provider": "AddItem"
+    },
+    {
+      "id": "fivem_dynamic_provider",
+      "repo": "bench/fivem-adversarial",
+      "category": "dynamic_provider",
+      "text": "fix dynamicInventory provider call",
+      "required": [{"kind": "symbol", "name": "dynamicInventory", "file": "resources/[jobs]/jobs/server.lua"}],
+      "relevant_files": ["resources/[jobs]/jobs/server.lua", "resources/[inventory]/inventory/server.lua"],
+      "anchor_names": ["dynamicInventory"],
+      "forbidden_verified_provider": "AddItem"
+    },
+    {
+      "id": "fivem_client_server_provider",
+      "repo": "bench/fivem-adversarial",
+      "category": "client_server_side_provider",
+      "text": "trace clientInventory AddItem provider",
+      "required": [{"kind": "symbol", "name": "clientInventory", "file": "resources/[jobs]/jobs/client.lua"}],
+      "relevant_files": ["resources/[jobs]/jobs/client.lua", "resources/[inventory]/inventory/server.lua"],
+      "anchor_names": ["clientInventory"],
+      "forbidden_verified_provider": "AddItem"
+    },
+    {
+      "id": "go_duplicate_symbol",
+      "repo": "bench/go",
+      "category": "duplicate_symbol",
+      "text": "find Handle",
+      "required": [
+        {"kind": "symbol", "name": "Handle", "file": "http/handler.go"},
+        {"kind": "symbol", "name": "Handle", "file": "admin/handler.go"}
+      ],
+      "relevant_files": ["http/handler.go", "admin/handler.go"],
+      "anchor_names": ["Handle"]
+    },
+    {
+      "id": "repo_isolation_a",
+      "repo": "bench/isolation-a",
+      "category": "repo_isolation",
+      "text": "find LoadConfig",
+      "required": [{"kind": "symbol", "name": "LoadConfig", "file": "app.go"}],
+      "relevant_files": ["app.go"],
+      "anchor_names": ["LoadConfig"],
+      "forbidden_markers": ["REPO_B_ONLY_MARKER"]
+    },
+    {
+      "id": "broad_architecture_go",
+      "repo": "bench/go",
+      "category": "broad_architecture",
+      "text": "review the user persistence architecture and dependencies",
+      "required": [
+        {"kind": "symbol", "name": "SaveUser", "file": "user/service.go"},
+        {"kind": "symbol", "name": "WriteUser", "file": "storage/repository.go"},
+        {"kind": "symbol", "name": "HandleSave", "file": "http/handler.go"}
+      ],
+      "relevant_files": ["user/service.go", "storage/repository.go", "http/handler.go", "audit/audit.go"],
+      "anchor_names": ["SaveUser"]
+    }
+  ]
+}
