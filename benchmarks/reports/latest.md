@@ -4,9 +4,9 @@ CONDITIONAL PASS
 
 ## Code-Scale Commit
 
-`dc229dee2c56081e8f49d0f03ab5c3468c495e63`
+`d58a016fb252a7e9d34f0256825a2f43de67722c`
 
-Tree: `e8c212f33f3dcd411708077627f6e678a9e159c8`; dirty worktree: **false**.
+Tree: `6cf404944ff95fee1b627d9e5680feeb51073794`; dirty worktree: **false**.
 
 ## Corpus Version
 
@@ -18,10 +18,16 @@ Go `go1.26.7`, tokenizer `o200k_base`, repeats `2`, budgets `[512 1024 2048 4000
 
 ## Corpus Summary
 
-Tasks selected: **34**. Results recorded: **2856**. Supported tasks: **26 total / 26 passed / 0 failed**. Excluded tasks: **8**.
+Tasks selected: **34**. Results recorded: **2856**. Supported tasks: **26 total / 26 passed / 0 failed**. Diagnostic/open-ended: **2**. Adversarial safety: **6**. Excluded from recall acceptance: **8**.
 
 - excluded `broad_architecture_go`: Broad architecture has no complete deterministic dependency boundary.
+- excluded `fivem_client_server_provider`: Wrong-side provider resolution is a hard execution-side safety case.
+- excluded `fivem_dynamic_provider`: Dynamic provider targets are excluded from deterministic recall acceptance and checked for fabrication.
+- excluded `fivem_external_provider`: External provider authority must remain unverified and is evaluated by the safety gate.
 - excluded `fivem_natural_inventory`: Natural-language no-focus workspace task is intentionally reported as diagnostic/open-ended.
+- excluded `fivem_provider_ambiguity`: Provider ambiguity is a hard safety case, not supported recall acceptance.
+- excluded `go_duplicate_symbol`: Duplicate symbol identity is evaluated for conservative ambiguity handling, not recall acceptance.
+- excluded `repo_isolation_a`: Repository isolation is evaluated by the leakage safety gate, not supported recall.
 
 - `realistic` fixtures: 56 results, median recall 100.0%, broad reduction 93.6%, scoped reduction 1.8%.
 - `small` fixtures: 420 results, median recall 100.0%, broad reduction -13.7%, scoped reduction -290.4%.
@@ -67,12 +73,12 @@ Ground truth is manually authored in `benchmarks/corpus.json`; it is not generat
 
 ## Modes Compared
 
-- **manual**: 476 results, median recall 100.0%, median saving 69.3%.
-- **panoramic**: 476 results, median recall 100.0%, median saving -30.2%.
-- **scoped_panoramic**: 476 results, median recall 100.0%, median saving 69.3%.
-- **primitive**: 476 results, median recall 70.8%, median saving 81.1%.
-- **phase7**: 476 results, median recall 100.0%, median saving 1.0%.
-- **phase7_no_early_stop**: 476 results, median recall 100.0%, median saving -7.4%.
+- **manual**: 476 results, median recall 100.0%, relevant-baseline saving 78.0%.
+- **panoramic**: 476 results, median recall 100.0%, relevant-baseline saving 0.0%.
+- **scoped_panoramic**: 476 results, median recall 100.0%, relevant-baseline saving 0.0%.
+- **primitive**: 476 results, median recall 70.8%, relevant-baseline saving 81.1%.
+- **phase7**: 476 results, median recall 100.0%, relevant-baseline saving 1.0%.
+- **phase7_no_early_stop**: 476 results, median recall 100.0%, relevant-baseline saving -7.4%.
 
 ### Manual/Baseline
 
@@ -117,9 +123,13 @@ Benchmark-only paired run using the same Planner/ranking policy while continuing
 
 Sufficient **212**, blocked **234**, indeterminate **30**, false sufficiency **0**, false insufficiency **174**. False sufficiency: all budgets **0**, maximum budget **0**, supported **0**, diagnostic **0**, adversarial **0**. Empty retrievals **46**.
 
+## Baseline Accounting
+
+Panoramic self-baseline violations: **0**; scoped panoramic self-baseline violations: **0**. Both must be zero.
+
 ## Early Stop
 
-Median retrieval rounds **1.0**, median source reads **2.0**, median latency **8.8 ms**, p95 latency **33.0 ms**. Paired early-stop totals: **13544 tokens**, **14 source reads**, **586 rounds** avoided.
+Median retrieval rounds **1.0**, median source reads **2.0**, median latency **9.0 ms**, p95 latency **33.1 ms**. Paired early-stop totals: **13544 tokens**, **14 source reads**, **586 rounds** avoided.
 
 - `broad_architecture`: 14 paired runs, 0 tokens, 0 source reads, 0 rounds avoided.
 - `callee_trace`: 14 paired runs, 2016 tokens, 14 source reads, 28 rounds avoided.
@@ -176,7 +186,7 @@ Leaks: **0**.
 
 ## Budget Compliance
 
-Serialized budget violations: **0**.
+Serialized budget violations: **0**; baseline accounting violations: **0**.
 
 ## Determinism
 
@@ -227,6 +237,7 @@ The runner checks repeated-output fingerprints, budget recall monotonicity, and 
 - Phase-7 defect fixed: unique Lua require aliases now resolve dotted module calls while ambiguous and shadowed imports remain unresolved; Lua false-sufficiency matrix rerun passed.
 - Phase-7 defect fixed: explicit focused generic symbols can expand past same-source multi-analyzer ambiguity; facade-chain budget matrix rerun passed.
 - Phase-7 defect fixed: exact semantic provider operations and incoming impact traces remain incomplete until provider/impact evidence is returned; low-budget framework and blast-radius regressions pass.
+- Benchmark accounting defect fixed: supplied ContextText is counted directly, scoring-only symbol/provider/relationship records remain outside the payload, and panoramic/scoped self-baseline invariants pass.
 
 ## Verification Commands
 
