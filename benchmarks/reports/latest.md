@@ -4,9 +4,9 @@ CONDITIONAL PASS
 
 ## Code-Scale Commit
 
-`43cd8bda14166738a88e6f3eb5ba333cf28ff31a`
+`dc229dee2c56081e8f49d0f03ab5c3468c495e63`
 
-Tree: `b531bc35e8f7a8e1201734f78f248a170645e849`; dirty worktree: **false**.
+Tree: `e8c212f33f3dcd411708077627f6e678a9e159c8`; dirty worktree: **false**.
 
 ## Corpus Version
 
@@ -119,7 +119,7 @@ Sufficient **212**, blocked **234**, indeterminate **30**, false sufficiency **0
 
 ## Early Stop
 
-Median retrieval rounds **1.0**, median source reads **2.0**, median latency **8.9 ms**, p95 latency **34.1 ms**. Paired early-stop totals: **13544 tokens**, **14 source reads**, **586 rounds** avoided.
+Median retrieval rounds **1.0**, median source reads **2.0**, median latency **8.8 ms**, p95 latency **33.0 ms**. Paired early-stop totals: **13544 tokens**, **14 source reads**, **586 rounds** avoided.
 
 - `broad_architecture`: 14 paired runs, 0 tokens, 0 source reads, 0 rounds avoided.
 - `callee_trace`: 14 paired runs, 2016 tokens, 14 source reads, 28 rounds avoided.
