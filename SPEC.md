@@ -1,435 +1,397 @@
 # Technical Specification
 
-## Overview
+## Scope
+
+code-scale-mcp is a local-first MCP server and agent context engine. It indexes
+source repositories, persists symbols and semantic facts, plans task-specific
+evidence, and assembles bounded source-backed context.
+
+It is not an autonomous coding agent. Editing, tests, builds, deployment, and
+runtime validation remain the responsibility of the calling agent or developer.
+
+## System goals
+
+- Make repository structure and source symbols searchable.
+- Preserve repository and analyzer identity in persisted facts.
+- Resolve useful structural and domain relationships conservatively.
+- Provide FiveM workspace and framework/provider intelligence.
+- Assemble task context under an exact serialized token ceiling.
+- Stop only when sufficiency evidence supports stopping.
+- Refresh local indexes incrementally without retaining stale derived authority.
+- Keep indexing and benchmark operation local-first and deterministic by default.
+
+## Non-goals
+
+- Perfect static resolution for dynamic languages or runtime-generated calls.
+- Treating text co-occurrence as proof of a symbol or relationship.
+- Treating every export, framework operation, or external API as verified local
+  authority.
+- Simulating an autonomous agent or guaranteeing that a retrieved package is
+  sufficient for every open-ended task.
+- Replacing native project tests, builds, security checks, or runtime validation.
+
+## Runtime architecture
+
+~~~text
+MCP transport
+    → internal/server registration and internal/tools handlers
+    → storage.IndexStore
+    → parser and repository indexers
+    → generic, FiveM, framework, and workspace analyzers
+    → planner.Plan and RankPolicy
+    → contextpack.Assembler
+    → sufficiency.Policy
+    → serialized source-backed Package
+~~~
+
+The MCP server owns dependency construction and registers the current tool
+surface. Tool handlers translate MCP arguments into repository, semantic,
+planner, context, watcher, and storage operations.
+
+## Repository identity
+
+GitHub repositories use an owner/name identity. Local folders receive a stable
+repository identity derived from their canonical path. Repository identity is
+used for SQLite rows, cached source paths, semantic facts, and repository
+isolation.
+
+A semantic query is always scoped to a repository ID. A symbol or semantic
+entity from another repository must not satisfy a query for the current
+repository.
+
+## Indexing pipeline
+
+1. The repository or local-folder indexer discovers candidate files.
+2. Security and path filters reject disallowed, ignored, secret, binary, invalid,
+   or oversized inputs.
+3. Tree-sitter parses supported source files into parser.Symbol values.
+4. Symbols, file metadata, content hashes, and searchable fields are persisted.
+5. The generic analyzer builds language-appropriate structural facts.
+6. A FiveM resource analyzer adds resource/Lua facts when the repository is a
+   resource or workspace.
+7. The framework analyzer derives framework calls, operations, providers, and
+   authority.
+8. The workspace indexer resolves resource/configuration relationships for
+   FiveM workspaces.
+9. Analyzer-scoped semantic entities and relationships are persisted.
+
+AI summaries are optional. Without an AI key, summarization falls back to
+docstrings or signatures. The implemented optional provider variables are
+ANTHROPIC_API_KEY and GOOGLE_API_KEY.
+
+## AST and symbol model
+
+A parser symbol contains an identity, file path, name, qualified name, kind,
+language, signature, content hash, optional docstring/summary, parent
+relationship, source line range, and byte range.
+
+Symbol IDs have this form:
+
+~~~text
+file_path::qualified_name#kind
+~~~
+
+The supported parser languages are Python, JavaScript, TypeScript, Go, Rust,
+Java, PHP, C, C++, Ruby, Kotlin, Swift, and Lua. Parser coverage does not imply
+semantic relationship parity across all languages.
+
+## Semantic entity model
 
-**code-scale-mcp** pre-indexes repository source code using tree-sitter AST parsing, extracting a structured catalog of every symbol (function, class, method, constant, type). Each symbol stores its **signature + one-line summary**, with full source retrievable on demand via O(1) byte-offset seeking.
+Semantic entities are analyzer-owned facts with fields including:
+
+- stable entity ID;
+- repository and analyzer;
+- file and optional parser symbol ID;
+- semantic kind and name;
+- framework classification;
+- execution side;
+- line range;
+- dynamic marker;
+- structured metadata.
 
-Written in Go for single-binary distribution, true parallelism via goroutines, and millisecond startup. SQLite with FTS5 replaces JSON file storage — enabling 100K+ symbols, structured queries, and full-text search.
+Current analyzer identities include generic_graph, fivem, framework, and
+fivem_workspace. Storage and traversal preserve analyzer ownership.
 
-### Token Savings
+## Semantic relationship model
 
-| Scenario                        | Raw dump        | code-scale    | Savings   |
-| ------------------------------- | --------------- | ------------- | --------- |
-| Explore 500-file repo structure | measured by response | compact outline/tree | measured per response |
-| Find a specific function        | measure native containing-file read | measure search + symbol response | measured per run |
-| Read one function body          | measure native containing-file read | measure symbol response | measured per run |
-| Understand module API           | measure native workflow | measure outline + symbol responses | measured per run |
+Semantic relationships contain:
 
----
+- stable relationship ID;
+- analyzer and repository;
+- from and optional to entity IDs;
+- relationship kind and name;
+- dynamic marker;
+- confidence;
+- source file and line.
 
-## MCP Tools (15)
+Relationships are traversed by analyzer, direction, relationship kind, depth,
+and result bound. An edge is evidence from an analyzer; it is not inferred only
+because two returned source sections mention the same name.
 
-### Indexing Tools
+## Generic analyzer
 
-#### `index_repo` — Index a GitHub repository
+The generic analyzer indexes code files, declarations, imports, call sites,
+and reference sites. It resolves exact local or module relationships when the
+indexed language facts prove the target.
 
-```json
-{
-  "url": "owner/repo",
-  "use_ai_summaries": true
-}
-```
+Supported generic relationship kinds include calls, references, and imports.
+Ambiguous modules, dynamic dispatch, unknown receivers, and shadowed bindings
+remain unresolved rather than being fabricated.
 
-Fetches source via `git/trees?recursive=1` (single API call), filters through the security pipeline, parses with tree-sitter using 20 concurrent workers, summarizes, and saves the index plus raw files to SQLite.
+## FiveM analyzer
 
-#### `index_folder` — Index a local folder
+The FiveM analyzer parses resource manifests and Lua AST facts including:
 
-```json
-{
-  "path": "/path/to/project",
-  "extra_ignore_patterns": ["*.generated.*"],
-  "follow_symlinks": false,
-  "use_ai_summaries": false
-}
-```
+- manifest resources and dependencies;
+- event registrations, handlers, and triggers;
+- callback calls and registrations;
+- export calls and definitions;
+- command registrations;
+- NUI callbacks.
 
-Walks the local directory with full security controls: path traversal prevention, symlink escape protection, secret detection, binary filtering, and `.gitignore` respect. Files are parsed concurrently with 20 goroutine workers.
+It resolves literal relationships conservatively. Dynamic names and dynamic
+targets are excluded from target resolution. Execution-side compatibility is
+checked for event and callback flows.
 
-#### `invalidate_cache` — Delete index for a repository
+## Workspace detection and indexing
 
-```json
-{
-  "repo": "owner/repo"
-}
-```
+A FiveM workspace is discovered from server configuration, resource manifests,
+resource paths, and related configuration files. Workspace facts include
+resources, config files, start/ensure information, dependencies, duplicate
+resource names, completeness, and workspace-derived relationships.
 
-Deletes all stored index data (SQLite rows and cached content files) for the repository.
+Workspace relationships include cross-resource events, callbacks, exports,
+resource starts, and dependencies where identity, literal names, sides, and
+resource resolution support the edge.
 
----
+Configuration parsing describes indexed configuration facts; it does not prove
+live runtime state.
 
-### Discovery Tools
+## Framework intelligence
 
-#### `list_repos` — List indexed repositories
+Framework analysis enriches local facts with framework API calls, providers,
+operations, object/facade lineage, resource ownership, and relationship edges.
+Adapters recognize supported framework evidence without replacing deterministic
+source/resource discovery.
 
-No input required. Returns all indexed repositories with symbol counts, file counts, languages, and index timestamps.
+### Provider authority
 
-#### `get_file_tree` — Get file structure
+Provider status values include:
 
-```json
-{
-  "repo": "owner/repo",
-  "path_prefix": "src/"
-}
-```
+- local_verified;
+- local_ambiguous;
+- local_api_missing;
+- external_unverified.
 
-Returns a nested directory tree with per-file language and symbol count annotations.
+local_verified requires positive structural proof of a unique compatible local
+provider. A name match, source mention, dynamic target, external reference,
+duplicate provider, missing API, or incompatible execution side is not enough.
 
-#### `get_file_outline` — Get symbols in a file
+Provider proof is persisted on affected source-call facts and used by Planner
+candidates and relationship traversal.
 
-```json
-{
-  "repo": "owner/repo",
-  "file_path": "src/main.py",
-  "flat": false
-}
-```
+### Execution-side compatibility
 
-Returns a hierarchical symbol tree (classes contain methods) with signatures and summaries. Source code is not included; use `get_symbol` for that. Set `flat: true` to get a flat list with depth integers instead of nested tree — simpler for linear processing and more token-efficient.
+Supported sides are client, server, shared, and unknown. A provider must be
+compatible with the caller side:
 
-#### `get_repo_outline` — High-level repository overview
+- client callers may use compatible client/shared providers;
+- server callers may use compatible server/shared providers;
+- shared callers require evidence compatible with shared execution.
 
-```json
-{
-  "repo": "owner/repo"
-}
-```
+Unknown or incompatible sides cannot produce local_verified authority.
 
-Returns directory file counts, language breakdown, and symbol kind distribution. Lighter than `get_file_tree`.
+## Planner and RankPolicy
 
----
+Planner receives a repository, task text, optional focus file/symbol/resource,
+candidate limit, and optional impact request. It classifies task intent, finds
+anchors, gathers relationship evidence, expands bounded graph support, and
+returns ranked candidates.
 
-### Retrieval Tools
+Candidates carry source location, symbol/entity identity, tier, score,
+reason codes, resource/framework/side information, authority, and distance.
+The current context tiers are anchor, direct_support, domain_support, and
+peripheral.
 
-#### `get_symbol` — Get full source of a symbol
+RankPolicy is the centralized ranking seam for task alignment, relationship
+quality, provider evidence, focus, locality, distance, uncertainty, and
+candidate tier.
 
-```json
-{
-  "repo": "owner/repo",
-  "symbol_id": "src/main.py::MyClass.login#method",
-  "verify": true,
-  "context_lines": 3,
-  "max_length": 8192
-}
-```
+Planner output can be truncated, ambiguous, incomplete, degraded, or
+unresolved. Those states remain visible to ContextAssembler and Sufficiency.
 
-Retrieves source via byte-offset seeking (O(1)). Optional `verify` re-hashes the source and compares it to the stored `content_hash`. Optional `context_lines` includes surrounding lines. Optional `max_length` applies smart 60/40 head/tail truncation to large symbols — preserving the end of output where errors and return values typically appear.
+## ContextAssembler
 
-#### `get_symbols` — Batch retrieve multiple symbols
+ContextAssembler consumes a planner and source store and returns a Package
+containing source-backed sections, candidate tiers, retrieval rounds, omissions,
+diagnostics, stop reason, sufficiency, and budget accounting.
 
-```json
-{
-  "repo": "owner/repo",
-  "symbol_ids": ["id1", "id2", "id3"]
-}
-```
+Important request fields include:
 
-Returns a list of symbols plus an error list for any IDs not found.
+- repo;
+- task;
+- max_context_tokens;
+- tokenizer;
+- max_candidates;
+- focus_file;
+- focus_symbol_id;
+- focus_resource;
+- include_impact;
+- debug.
 
----
+The debug option exposes bounded counters; it does not change retrieval
+semantics.
 
-### Search Tools
+### Token budget contract
 
-#### `search_symbols` — Search across all symbols
+Current context budget constants are:
 
-```json
-{
-  "repo": "owner/repo",
-  "query": "authenticate",
-  "kind": "function",
-  "language": "python",
-  "file_pattern": "src/**/*.py",
-  "max_results": 10
-}
-```
+- minimum: 512 tokens;
+- default: 8,000 tokens;
+- maximum: 64,000 tokens.
 
-Uses a 3-layer search fallback chain:
+The requested budget is the final serialized package ceiling. The assembler
+accounts for package metadata and source sections, performs final stabilization,
+and rejects a package that exceeds the requested serialized budget.
 
-1. **FTS5 BM25** — Queries the `symbols_fts` table with weighted BM25 ranking (name=10, qualified_name=5, signature=3, summary=2, docstring=1). Supports stemming (e.g. "caching" matches "cached").
-2. **Substring scoring** — Falls back to in-memory substring matching across name, signature, summary, keywords, and docstring with weighted scoring.
-3. **Fuzzy Levenshtein** — Final fallback using edit distance on symbol names. Threshold: `max(2, len(query)/4)`. Catches typos like "authenticat" → "authenticate".
+Source and outline bounds include:
 
-Each result includes a `match_tier` field (`fts5`, `substring`, or `fuzzy`) indicating which layer produced it. All filters are optional.
+- maximum source reads: 64;
+- aggregate source bytes: 4 MiB;
+- per-symbol source bytes: 32 KiB;
+- outline symbols per file: 128;
+- total outline symbols: 512.
 
-**Progressive throttling**: Calls 1-3 per 60s window return full results. Calls 4-8 return reduced results with a warning. Calls 9+ are blocked with a suggestion to use `batch_execute`.
+The planner has a hard candidate maximum of 100. Lower request limits can be
+used for narrower retrieval.
 
-#### `search_text` — Full-text search across file contents
+### Progressive retrieval and early stop
 
-```json
-{
-  "repo": "owner/repo",
-  "query": "TODO",
-  "file_pattern": "*.py",
-  "max_results": 20,
-  "context_lines": 3
-}
-```
+The assembler evaluates stages progressively:
 
-Case-insensitive search across indexed file contents. Use when symbol search misses (string literals, comments, config values).
+1. anchor;
+2. direct_support;
+3. domain_support;
+4. peripheral.
 
-When `context_lines` is 0 (default), returns individual matching lines truncated to 200 characters. When `context_lines` > 0, returns **consolidated snippet windows** — contextual blocks of ±N lines around each match. Overlapping windows are merged into single snippets, reducing token usage while providing meaningful context. Maximum `context_lines` is 10.
+At each stage it loads eligible source sections, evaluates sufficiency, and may
+stop when the policy is satisfied. A larger budget can permit more context, but
+does not require consuming the full budget.
 
-**Progressive throttling**: Same per-tool rate limiting as `search_symbols`.
-
----
-
-### Batch Tools
-
-#### `batch_execute` — Execute multiple operations in one call
-
-```json
-{
-  "operations": [
-    { "tool": "search_symbols", "args": { "repo": "owner/repo", "query": "auth" } },
-    { "tool": "get_symbol", "args": { "repo": "owner/repo", "symbol_id": "src/auth.py::login#function" } },
-    { "tool": "get_file_outline", "args": { "repo": "owner/repo", "file_path": "src/auth.py" } }
-  ]
-}
-```
-
-Executes up to 10 operations concurrently in a single MCP tool call. Supported tools: `get_symbol`, `get_symbols`, `search_symbols`, `search_text`, `get_file_outline`, `get_file_tree`, `get_repo_outline`. Each operation runs independently — failures in one don't affect others. Returns indexed results with per-operation errors.
-
-Reduces MCP round-trips and context overhead when multiple lookups are needed.
-
----
-
-### Watch Tools
-
-#### `watch_folder` — Start watching a folder for changes
+## Sufficiency engine
 
-```json
-{
-  "path": "/path/to/project"
-}
-```
-
-Starts an fsnotify-based file watcher on the folder. Modified, created, or deleted source files are automatically re-parsed and the index is updated. Changes are debounced (500ms) to batch rapid edits.
+Sufficiency evaluates planner obligations against returned sections and index
+health. It considers anchors, critical support, providers, flow peers, cross-
+resource coverage, impact evidence, source availability, partial content,
+ambiguity, degradation, and truncation.
 
-#### `unwatch_folder` — Stop watching a folder
+States are:
 
-```json
-{
-  "path": "/path/to/project"
-}
-```
+- sufficient;
+- needs_more_context;
+- blocked;
+- indeterminate.
 
-Stops the file watcher for the specified folder.
+Sufficiency is evidence-based and conservative. Missing or partial source,
+unresolved high-signal hints, incomplete/truncated index state, degraded
+framework resources, unverified providers, or missing required flow evidence
+can prevent sufficient.
 
-#### `list_watches` — List active folder watches
+## Incremental refresh
 
-No input required. Returns all currently watched folder paths with start times.
+The watcher handles local file events, debounce, resource/configuration changes,
+and repository lifecycle. Depending on repository type, refresh paths update
+parser symbols, generic facts, FiveM facts, framework facts, workspace facts,
+and derived relationships.
 
----
+For FiveM resources, RefreshResource reparses the changed resource and rebuilds
+workspace-derived facts from persisted compact facts. Configuration refresh
+rebuilds workspace state from persisted source facts. Failures clear or degrade
+affected derived facts rather than leaving mismatched authoritative state.
 
-## Data Models
+## Storage model
 
-### Symbol
+The current storage schema version is 10.
 
-```go
-type Symbol struct {
-    ID            string   // "{file_path}::{qualified_name}#{kind}"
-    File          string   // Relative file path
-    Name          string   // Symbol name
-    QualifiedName string   // Dot-separated with parent context
-    Kind          string   // function | class | method | constant | type
-    Language      string   // python | javascript | typescript | go | rust | java | php | c | cpp | ruby | kotlin | swift | lua
-    Signature     string   // Full signature line(s)
-    ContentHash   string   // SHA-256 of source bytes (drift detection)
-    Docstring     string   // Extracted documentation
-    Summary       string   // One-line summary (AI or fallback)
-    Decorators    []string // Decorators/attributes
-    Keywords      []string // Search keywords
-    Parent        string   // Parent symbol ID (methods → class)
-    Line          int      // Start line (1-indexed)
-    EndLine       int      // End line (1-indexed)
-    ByteOffset    int64    // Start byte in raw file
-    ByteLength    int64    // Byte length of source
-}
-```
+Conceptually, SQLite stores:
 
-### SQLite Schema
+- repositories and source identity;
+- files, languages, content hashes, and cached-source references;
+- symbols and FTS5 symbol metadata;
+- analyzer-scoped semantic entities;
+- analyzer-scoped semantic relationships;
+- workspace/resource/configuration metadata;
+- persisted watches and token-tracking data where enabled;
+- schema version and migrations.
 
-```sql
--- Repository metadata
-CREATE TABLE repos (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    owner TEXT, name TEXT, repo TEXT UNIQUE,
-    indexed_at TEXT, git_head TEXT, source_type TEXT,
-    source_path TEXT DEFAULT ''  -- original local path (for stale cleanup)
-);
+The semantic tables are analyzer-aware. Generic, FiveM, framework, and
+workspace facts have separate ownership and can be replaced or refreshed
+without silently erasing unrelated analyzer data.
 
--- Source files with content hashes for incremental indexing
-CREATE TABLE files (
-    id INTEGER PRIMARY KEY, repo_id INTEGER REFERENCES repos(id) ON DELETE CASCADE,
-    path TEXT, language TEXT, content_hash TEXT,
-    UNIQUE(repo_id, path)
-);
+## MCP tool surface
 
--- Extracted symbols
-CREATE TABLE symbols (
-    id INTEGER PRIMARY KEY, repo_id INTEGER REFERENCES repos(id) ON DELETE CASCADE,
-    file_id INTEGER REFERENCES files(id) ON DELETE CASCADE,
-    symbol_id TEXT, file_path TEXT, name TEXT, qualified_name TEXT,
-    kind TEXT, language TEXT, signature TEXT, docstring TEXT, summary TEXT,
-    decorators TEXT, keywords TEXT, parent_id TEXT,
-    line INTEGER, end_line INTEGER, byte_offset INTEGER, byte_length INTEGER,
-    content_hash TEXT, UNIQUE(repo_id, symbol_id)
-);
+The server registers 21 tools for indexing, exploration, retrieval, semantic
+search, relationship tracing, impact analysis, context planning, context
+assembly, batching, cache management, and watching. The authoritative list and
+user-facing descriptions are maintained in README.md and USER_GUIDE.md.
 
--- FTS5 for full-text search across symbol metadata
-CREATE VIRTUAL TABLE symbols_fts USING fts5(
-    name, qualified_name, signature, summary, docstring,
-    content='symbols', content_rowid='id'
-);
+## Security boundaries
 
--- Token savings tracking
-CREATE TABLE token_savings (
-    id INTEGER PRIMARY KEY, total_tokens_saved INTEGER, anon_id TEXT
-);
-```
+Indexing validates repository identity and local paths, denies restricted system
+roots, checks symlinks, respects ignore rules, excludes known secrets and binary
+files, applies file-size limits, safely decodes invalid UTF-8, and stores data
+under validated repository identities.
 
-Indexes on `name`, `kind`, `language`, `file_path`, `repo_id` for common query patterns.
+SSE/HTTP authentication is opt-in through CODE_SCALE_AUTH_TOKEN. stdio is the
+default local transport.
 
-Raw source files are stored on the filesystem at `~/.code-index/{owner}-{name}-{identity-digest}/{file_path}` for O(1) byte-offset retrieval. The digest is derived from the unambiguous repository identity. Existing local indexes created before the hashed identity change may need one manual invalidation and re-index; source files are not deleted.
+code-scale is local-first, not necessarily network-zero. index_repo uses the
+GitHub API. Optional summarization calls Anthropic or Google when explicitly
+enabled and configured. Ordinary local indexing, semantic analysis, planning,
+and context assembly do not require those services.
 
----
+## Telemetry
 
-## Startup Behavior
+Compact timing/truncation metadata is the default. CODE_SCALE_TELEMETRY=full
+enables measured response/baseline metadata and token-tracking fields where a
+defensible baseline exists. CODE_SCALE_TELEMETRY=off suppresses the metadata
+envelope.
 
-On startup, the server performs automatic maintenance:
+Telemetry is local to the server/index store; no remote telemetry service is
+required by the runtime.
 
-1. **Schema migration** — Applies any pending database migrations (currently v1→v3)
-2. **Stale repo cleanup** — Checks all local repos (`source_type = "local"`) and removes index data for any whose `source_path` directory no longer exists on disk
-3. **Orphaned directory cleanup** — Removes content directories under `~/.code-index/` that don't correspond to any indexed repository
-4. **Watch restoration** — Restores file watches from the previous session
+## Benchmark and validation boundary
 
----
+The deterministic benchmark lives in internal/benchmark,
+cmd/code-scale-bench, and benchmarks/. It uses temporary offline indexes,
+manually authored ground truth, six modes, seven budgets, and repeated runs.
 
-## File Discovery
+The current Phase 7 status is:
 
-### GitHub Repositories
+- 7.0 CLOSED;
+- 7.1 CLOSED;
+- 7.2 CLOSED;
+- 7.3 CLOSED;
+- 7.4 CLOSED — CONDITIONAL PASS.
 
-Single API call:
-`GET /repos/{owner}/{repo}/git/trees/HEAD?recursive=1`
+The condition is token-efficiency acceptance. The official report records zero
+false sufficiency, provider fabrication, repository leakage, serialized budget,
+baseline accounting, determinism, and incremental/full mismatch failures. It
+does not claim universal token savings.
 
-Concurrent file fetching with a 20-goroutine worker pool.
+## Known limitations
 
-### Local Folders
+- Dynamic dispatch and runtime-generated names may remain unresolved.
+- Semantic relationship coverage differs by language and domain.
+- Configuration facts do not prove live runtime state.
+- Sufficiency can remain blocked or indeterminate for broad tasks, incomplete
+  indexes, degraded resources, missing source, ambiguity, or unverified
+  authority.
+- Benchmark results are fixture- and baseline-specific.
+- Optional AI summarization has external-provider network boundaries.
 
-Recursive directory walk with `filepath.WalkDir` and full security pipeline. Concurrent parsing with 20-goroutine worker pool.
+## Change policy
 
-### Filtering Pipeline (Both Paths)
-
-1. **Extension filter** — must match one of 13 supported languages
-2. **Skip patterns** — `node_modules/`, `vendor/`, `.git/`, `build/`, `dist/`, lock files, minified files, etc.
-3. **`.gitignore`** — respected via gitignore pattern matching
-4. **Secret detection** — `.env`, `*.pem`, `*.key`, `*.p12`, credentials files excluded (36 patterns)
-5. **Binary detection** — extension-based (75+ extensions) + null-byte content sniffing in first 8KB
-6. **Size limit** — 500 KB per file (configurable)
-7. **File count limit** — 10,000 files max, prioritized: `src/` → `lib/` → `pkg/` → `cmd/` → `internal/` → remainder
-8. **Encoding safety** — `utf8.Valid` check, replacement on invalid
-
----
-
-## Concurrency Model
-
-Go's goroutines provide true parallelism (no GIL):
-
-- **GitHub file fetching**: 20-goroutine worker pool with semaphore
-- **File parsing**: Parallel tree-sitter parsing across files (each goroutine gets its own parser)
-- **AI summarization**: Concurrent batch API calls
-- **Local folder walking**: Parallel file reads with `filepath.WalkDir`
-- **File watching**: Background goroutine per watched folder, debounced at 500ms
-
----
-
-## Response Envelope
-
-Tools return compact `_meta` timing/truncation telemetry by default. Full telemetry can add measured context sizes when a defensible baseline exists:
-
-```json
-{
-  "_meta": {
-    "timing_ms": 42,
-    "timing_ms": 4,
-    "truncated": false,
-    "response_bytes": 740,
-    "baseline_context_bytes": 8200,
-    "estimated_context_saved_bytes": 7460,
-    "estimated_context_saved_tokens": 1865
-  }
-}
-```
-
-- **`response_bytes`** and **`baseline_context_bytes`**: Measured values when available
-- **`estimated_context_saved_bytes`** and **`estimated_context_saved_tokens`**: Explicit estimates derived from those values
-- **`estimated_context_saved_bytes`** and **`estimated_context_saved_tokens`**: Measured estimates emitted only when a defensible full-file baseline is available and full telemetry is enabled
-
----
-
-## Error Handling
-
-All errors return:
-
-```json
-{
-  "error": "Human-readable message",
-  "_meta": { "timing_ms": 1 }
-}
-```
-
-| Scenario                          | Behavior                                              |
-| --------------------------------- | ----------------------------------------------------- |
-| Repository not found (GitHub 404) | Error with message                                    |
-| Rate limited (GitHub 403)         | Error with reset time; suggest setting `GITHUB_TOKEN` |
-| File fetch fails                  | File skipped; indexing continues                      |
-| Parse fails (single file)         | File skipped; indexing continues                      |
-| No source files found             | Error message returned                                |
-| Symbol ID not found               | Error in response                                     |
-| Repository not indexed            | Error suggesting indexing first                       |
-| AI summarization fails            | Falls back to docstring or signature                  |
-| Content hash mismatch             | `content_verified: false` in response                 |
-
----
-
-## Security (9 Layers)
-
-1. **Path traversal prevention** — `filepath.Rel` + prefix check
-2. **Symlink escape detection** — `filepath.EvalSymlinks`
-3. **Secret file exclusion** — 36 glob patterns
-4. **Binary detection** — 75+ extensions + null-byte sniff in first 8KB
-5. **File size limits** — 500KB default, configurable
-6. **`.gitignore` respect** — pattern matching for file filtering
-7. **Skip patterns** — node_modules, vendor, .git, build, dist, lock files
-8. **Encoding safety** — `utf8.Valid` check, replacement on invalid
-9. **Safe repo component validation** — regex: `[A-Za-z0-9._-]+`
-
----
-
-## Environment Variables
-
-| Variable            | Purpose                                                              | Required |
-| ------------------- | -------------------------------------------------------------------- | -------- |
-| `GITHUB_TOKEN`      | GitHub API authentication (higher limits, private repos)             | No       |
-| `ANTHROPIC_API_KEY` | AI summarization via Claude Haiku (takes priority if both keys set)  | No       |
-| `GOOGLE_API_KEY`    | AI summarization via Gemini Flash (used if Anthropic key not set)    | No       |
-| `CODE_INDEX_PATH`   | Custom storage path (default: `~/.code-index/`)                     | No       |
-
----
-
-## Supported Languages (13)
-
-| Language   | Extensions                          | Symbol Types                                           |
-|------------|-------------------------------------|--------------------------------------------------------|
-| Python     | `.py`                               | functions, classes, methods, constants, decorators     |
-| JavaScript | `.js`, `.jsx`                       | functions, classes, methods, constants                 |
-| TypeScript | `.ts`, `.tsx`                       | functions, classes, methods, interfaces, enums, types  |
-| Go         | `.go`                               | functions, methods, types, constants                   |
-| Rust       | `.rs`                               | functions, structs, enums, traits, impls, types        |
-| Java       | `.java`                             | methods, constructors, classes, interfaces, enums      |
-| PHP        | `.php`                              | functions, classes, methods, interfaces, traits, enums |
-| C          | `.c`, `.h`                          | functions, structs, enums, typedefs                    |
-| C++        | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`| functions, classes, structs, enums, namespaces         |
-| Ruby       | `.rb`                               | methods, classes, modules                              |
-| Kotlin     | `.kt`, `.kts`                       | functions, classes, objects, interfaces                |
-| Swift      | `.swift`                            | functions, classes, structs, protocols, enums           |
-| Lua        | `.lua`                              | functions                                              |
+Source implementation, tests, and generated benchmark reports are the
+authorities for runtime behavior. Update this specification when durable
+contracts change; keep operational examples in USER_GUIDE.md and PROMPTS.md.

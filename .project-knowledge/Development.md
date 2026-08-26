@@ -2,7 +2,7 @@
 type: development-workflow
 project: code-scale-mcpv2
 status: active
-updated: 2026-08-25
+updated: 2026-08-26
 tags:
   - project/code-scale-mcpv2
   - project-knowledge
@@ -10,8 +10,13 @@ tags:
 
 # Development
 
-## Detected commands
-- No package scripts detected during bootstrap. Inspect the repository before adding commands.
+## Current commands
+- `make build` builds `bin/code-scale-mcp`.
+- `make test` runs `go test ./... -count=1`.
+- `make fmt` runs `gofmt -w .`.
+- `make lint` runs golangci-lint when installed.
+- `make clean` removes build artifacts.
+- `go build ./cmd/code-scale-bench` builds the offline benchmark CLI.
 - `go run ./cmd/code-scale-bench run --budgets 512,1024,2048,4000,8000,16000,32000 --repeat 2` runs the offline Phase 7.4 matrix and writes `benchmarks/reports/latest.json` plus `benchmarks/reports/latest.md`.
 - The committed reference report records the clean implementation SHA separately from the later report commit; benchmark-generated reports must be run before committing the report artifact so `dirty_worktree` remains false.
 

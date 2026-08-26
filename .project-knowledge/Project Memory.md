@@ -2,7 +2,7 @@
 type: project-memory
 project: code-scale-mcpv2
 status: active
-updated: 2026-08-25
+updated: 2026-08-26
 tags:
   - project/code-scale-mcpv2
   - project-knowledge
@@ -13,7 +13,15 @@ tags:
 This is the compact durable memory of the project. It is **not** a per-task diary.
 
 ## Current state
-- Workflow Governor / Obsidian project knowledge initialized.
+- Phase 7 is functionally complete. Phase 7.4 is CONDITIONAL PASS because the
+  provisional token-efficiency target was missed; validated correctness and
+  safety gates remain green.
+- The current product is semantic/context infrastructure, not only a symbol
+  retriever: generic, FiveM, framework, workspace, Planner, ContextAssembler,
+  and Sufficiency layers are active.
+- The official reference report is `benchmarks/reports/latest.md` and records
+  the clean tested implementation SHA separately from the later report/docs
+  commits.
 
 ## Active constraints
 - Durable internal knowledge is maintained in this vault.

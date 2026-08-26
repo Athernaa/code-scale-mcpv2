@@ -256,7 +256,7 @@ capabilities; semantic parity is not implied across all 13 languages.
 
 - Go 1.24 or newer for building from source
 - A CGo-capable toolchain for tree-sitter and SQLite dependencies
-- Optional ANTHROPIC_API_KEY or GEMINI_API_KEY for AI-assisted summaries
+- Optional ANTHROPIC_API_KEY or GOOGLE_API_KEY for AI-assisted summaries
 - Optional GITHUB_TOKEN for private GitHub repositories and higher API limits
 
 ## Configuration
@@ -265,7 +265,7 @@ capabilities; semantic parity is not implied across all 13 languages.
 | --- | --- | --- |
 | GITHUB_TOKEN | unset | GitHub token for private repositories and higher rate limits. |
 | ANTHROPIC_API_KEY | unset | Anthropic key for optional summaries. |
-| GEMINI_API_KEY | unset | Google Gemini key for optional summaries. |
+| GOOGLE_API_KEY | unset | Google Gemini key for optional summaries. |
 | CODE_INDEX_PATH | ~/.code-index | Directory for the SQLite index and cached content. |
 | CODE_SCALE_ALLOWED_ROOTS | unset | Allowed indexing/watch roots; use ; as the separator on Windows. |
 | CODE_SCALE_AUTH_TOKEN | unset | Bearer token required by SSE requests when configured. |
@@ -279,6 +279,10 @@ warning. Use authentication for exposed HTTP/SSE deployments.
   tools.
 - [SKILL.md](SKILL.md) contains optional agent guidance for choosing the
   indexing, exploration, planning, and retrieval workflow.
+- [USER_GUIDE.md](USER_GUIDE.md) is the practical end-user manual.
+- [SPEC.md](SPEC.md) describes the technical architecture and contracts.
+- [SECURITY.md](SECURITY.md) documents path, content, storage, and network
+  controls.
 
 ## Installation
 

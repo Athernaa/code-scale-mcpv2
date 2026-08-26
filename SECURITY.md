@@ -2,6 +2,25 @@
 
 code-scale-mcp indexes source code from local folders and GitHub repositories via tree-sitter AST parsing. This document describes the security controls that protect against common risks when handling arbitrary codebases.
 
+## Trust and network boundary
+
+The default stdio workflow is local-first. Indexing, parsing, semantic
+analysis, planning, context assembly, and SQLite/cache access do not require a
+remote service.
+
+Network access is still possible when explicitly used:
+
+* `index_repo` calls the GitHub API and may read a repository's remote
+  `.gitignore`.
+* AI summaries are opt-in through `use_ai_summaries`. `ANTHROPIC_API_KEY`
+  uses Anthropic; `GOOGLE_API_KEY` uses Google when Anthropic is not set. The
+  summarizer sends symbol kind/signature prompts to the selected provider.
+* SSE/HTTP is opt-in through `--transport=sse`; `CODE_SCALE_AUTH_TOKEN`
+  enables bearer authentication.
+
+No remote telemetry service is required. `CODE_SCALE_TELEMETRY=full` changes
+the local response metadata and token tracker, not the network boundary.
+
 ---
 
 ## Path Traversal Prevention
@@ -41,7 +60,7 @@ Files are filtered through multiple layers during discovery:
 
 1. **SkipPatterns** — directories always excluded: `node_modules`, `vendor`, `.git`, `build`, `dist`, `__pycache__`, `.tox`, `.mypy_cache`, `.pytest_cache`, `.venv`, `venv`, `.eggs`, `target`.
 2. **SkipFiles** — files always excluded: `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `poetry.lock`, `Cargo.lock`, `go.sum`, `composer.lock`, and minified files (`*.min.js`, `*.min.css`).
-3. **`.gitignore`** — respected for GitHub repositories via the GitHub API.
+3. **`.gitignore`** — respected for local discovery and GitHub repositories.
 4. **`extra_ignore_patterns`** — user-configurable additional ignore patterns passed to the `index_folder` tool.
 
 ---
@@ -120,4 +139,4 @@ When running in SSE/HTTP mode, authentication can be enforced:
 | UTF-8 safe decode           | `security.SafeDecode()`            | Always enabled                 |
 | Repo component validation   | `security.SafeRepoComponent()`     | Always enabled                 |
 | SSE bearer authentication   | `authMiddleware()`                 | Opt-in via `CODE_SCALE_AUTH_TOKEN` |
-| `.gitignore` respect        | GitHub indexing pipeline           | Enabled for GitHub repos       |
+| `.gitignore` respect        | Local and GitHub discovery         | Enabled                         |
