@@ -69,7 +69,11 @@ func MarkdownReport(report Report) string {
 	b.WriteString("## Modes Compared\n\n")
 	for _, mode := range AllModes {
 		summary := report.ByMode[string(mode)]
-		fmt.Fprintf(&b, "- **%s**: %d results, median recall %s, median saving %s.\n", mode, summary.Results, percent(summary.MedianRecall), percent(summary.MedianSaving))
+		saving := summary.MedianSaving
+		if mode == ModeScopedPanoramic {
+			saving = summary.MedianScopedSaving
+		}
+		fmt.Fprintf(&b, "- **%s**: %d results, median recall %s, relevant-baseline saving %s.\n", mode, summary.Results, percent(summary.MedianRecall), percent(saving))
 	}
 	b.WriteString("\n### Manual/Baseline\n\nDeterministic ground-truth minimum files; no model behavior is simulated.\n\n### Panoramic / Repomix-Like\n\nOffline whole-fixture broad-file snapshot. It is not Repomix and no Repomix claim is made.\n\n### Scoped Panoramic\n\nOffline relevant-file snapshot using the same task scope available to every mode.\n\n### Primitive Code-Scale\n\nExisting storage symbol/semantic search, bounded source reads, and bounded relationship traces.\n\n### Phase-7 assemble_context\n\nProduction Planner, ContextAssembler, TokenCounter, and Sufficiency path.\n\n### Phase-7 no early stop\n\nBenchmark-only paired run using the same Planner/ranking policy while continuing eligible packing stages. It is not a production MCP mode.\n\n")
 	b.WriteString("## Retrieval Quality\n\n")
