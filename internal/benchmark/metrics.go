@@ -34,7 +34,7 @@ func scoreResult(task Task, mode Mode, budget, repeat int, output modeOutput, co
 	result := TaskResult{TaskID: task.ID, Category: task.Category, Repo: task.Repo, Mode: mode, Budget: budget, Repeat: repeat, AcceptanceClass: task.AcceptanceClass, ExclusionReason: task.ExclusionReason, FixtureTier: task.FixtureTier, ContextTokens: contextTokens, MetadataTokens: output.MetadataTokens, SourceTokens: sourceTokens, BaselineContextTokens: baselineContextTokens, ScopedBaselineContextTokens: scopedBaselineContextTokens, CandidateCount: len(output.Ranked), SourceReads: output.SourceReads, SourceBytes: output.SourceBytes, RetrievalCalls: output.RetrievalCalls, PlannerMilliseconds: durationMilliseconds(output.PlannerTime), AssemblyMilliseconds: durationMilliseconds(output.AssemblyTime), TotalMilliseconds: durationMilliseconds(output.TotalTime)}
 	result.Retrieved = summaries(output.Items)
 	result.Ranked = summaries(output.Ranked)
-	result.Relationships = append([]RelationshipEvidence(nil), output.Relationships...)
+	result.RelationshipCount = len(output.Relationships)
 	if baselineContextTokens > 0 {
 		result.TokenSaving = 1 - float64(contextTokens)/float64(baselineContextTokens)
 	}
@@ -48,6 +48,7 @@ func scoreResult(task Task, mode Mode, budget, repeat int, output modeOutput, co
 			result.RequiredMissing = append(result.RequiredMissing, requiredLabel(index, required))
 		}
 	}
+	result.Relationships = requiredRelationshipEvidence(task, output.Relationships)
 	result.RequiredTotal = len(task.Required)
 	if result.RequiredTotal > 0 {
 		result.DependencyRecall = float64(result.RequiredFound) / float64(result.RequiredTotal)
@@ -84,6 +85,27 @@ func scoreResult(task Task, mode Mode, budget, repeat int, output modeOutput, co
 	result.ProviderFabrication = providerFabrication(task, output.Items, output.Ranked)
 	result.CrossRepoLeak = crossRepoLeak(task, output.Items)
 	result.DeterminismFingerprint = fingerprint(task, mode, budget, output)
+	return result
+}
+
+func requiredRelationshipEvidence(task Task, relationships []RelationshipEvidence) []RelationshipEvidence {
+	if len(relationships) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	result := make([]RelationshipEvidence, 0)
+	for _, required := range task.Required {
+		if required.Kind != "relationship" {
+			continue
+		}
+		for _, relationship := range relationships {
+			if relationship.Kind != required.Relationship || !relationshipEndpointMatches(required.From, required.FromFile, relationship.FromName, relationship.FromFile) || !relationshipEndpointMatches(required.To, required.ToFile, relationship.ToName, relationship.ToFile) || seen[relationship.ID] {
+				continue
+			}
+			seen[relationship.ID] = true
+			result = append(result, relationship)
+		}
+	}
 	return result
 }
 

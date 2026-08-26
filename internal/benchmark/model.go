@@ -156,6 +156,7 @@ type TaskResult struct {
 	RuntimeError                string                 `json:"runtime_error,omitempty"`
 	Retrieved                   []RetrievedSummary     `json:"retrieved,omitempty"`
 	Ranked                      []RetrievedSummary     `json:"ranked,omitempty"`
+	RelationshipCount           int                    `json:"relationship_count"`
 	Relationships               []RelationshipEvidence `json:"relationships,omitempty"`
 }
 
