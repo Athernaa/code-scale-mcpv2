@@ -34,4 +34,4 @@ tags:
 
 ## Benchmark boundary
 - Phase 7.4 evaluation lives in `internal/benchmark`, `cmd/code-scale-bench`, and `benchmarks/`; it builds temporary offline indexes and is not part of the MCP runtime or a runtime dependency.
-- The measured Phase 7.4 corpus passed supported-task recall, provider fabrication, repository isolation, serialized-budget, determinism, and incremental/full authority checks. Its supported-task median token reduction was below the provisional 50% target, so token efficiency remains a release limitation rather than a marketing claim.
+- The official Phase 7.4 corpus passed supported-task recall, provider fabrication, repository isolation, serialized-budget, determinism, false-sufficiency, and incremental/full authority checks. Token efficiency is stratified: realistic fixtures reached 93.6% median broad-baseline reduction, while small fixtures reached -13.7%; the combined supported maximum-budget result was 0.5%, below the provisional 50% target. Keep these measurements separate before any packing optimization.
